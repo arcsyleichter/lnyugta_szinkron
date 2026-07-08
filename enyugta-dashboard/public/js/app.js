@@ -144,6 +144,7 @@ document.querySelectorAll('.range-chip').forEach((chip) => {
     document.getElementById('range-custom-inputs').hidden = r !== 'custom';
     if (r !== 'custom') {
       state.range = { from: isoDaysAgo(parseInt(r, 10) - 1), to: todayIso(), preset: r };
+      if (state.range.from !== state.range.to) setGroup('day'); // óránkénti csak egy napra értelmezhető
       refreshAll();
     }
   });
@@ -151,7 +152,11 @@ document.querySelectorAll('.range-chip').forEach((chip) => {
 document.getElementById('apply-range-btn').addEventListener('click', () => {
   const from = document.getElementById('from-input').value;
   const to = document.getElementById('to-input').value;
-  if (from && to) { state.range = { from, to, preset: 'custom' }; refreshAll(); }
+  if (from && to) {
+    state.range = { from, to, preset: 'custom' };
+    if (from !== to) setGroup('day'); // óránkénti csak egy napra értelmezhető
+    refreshAll();
+  }
 });
 document.getElementById('refresh-btn').addEventListener('click', () => refreshAll(true));
 
@@ -300,25 +305,54 @@ function renderLineChart(container, points) {
       ${labelsSvg}
     </svg>`;
 }
-function shortDate(d) { const dt = new Date(d); return dt.toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' }); }
+function shortDate(d) {
+  if (/^\d{2}$/.test(d)) return `${d}:00`; // óránkénti bontás — "14" -> "14:00"
+  const dt = new Date(d);
+  return dt.toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' });
+}
 function formatShort(v) { if (v >= 1000000) return (v / 1000000).toFixed(1) + 'M'; if (v >= 1000) return Math.round(v / 1000) + 'e'; return String(v); }
 
 /* ============================================================
    Forgalom nézet
    ============================================================ */
+function setGroup(g) {
+  state.group = g;
+  document.querySelectorAll('#group-toggle .chip').forEach((c) => c.classList.toggle('is-active', c.dataset.group === g));
+}
 document.querySelectorAll('#group-toggle .chip').forEach((chip) => {
   chip.addEventListener('click', () => {
-    document.querySelectorAll('#group-toggle .chip').forEach((c) => c.classList.remove('is-active'));
-    chip.classList.add('is-active');
-    state.group = chip.dataset.group;
+    const g = chip.dataset.group;
+    if (g === 'hour' && state.range.from !== state.range.to) {
+      // Óránkénti bontás csak egyetlen napra értelmezhető — automatikusan
+      // egy napra szűkítjük a tartományt (a jelenlegi záró dátumra), és ezt
+      // az "Egyedi" dátumválasztóban is megjelenítjük, hogy látszódjon, mi történt.
+      const day = state.range.to;
+      state.range = { from: day, to: day, preset: 'custom' };
+      document.querySelectorAll('.range-chip').forEach((c) => c.classList.toggle('is-active', c.dataset.range === 'custom'));
+      document.getElementById('range-custom-inputs').hidden = false;
+      document.getElementById('from-input').value = day;
+      document.getElementById('to-input').value = day;
+    }
+    setGroup(g);
     loadRevenueView();
   });
 });
 
 async function loadRevenueView() {
   const { from, to } = state.range;
-  const series = await api(`/api/revenue-series?from=${from}&to=${to}&group=${state.group}`);
-  renderLineChart(document.getElementById('revenue-chart'), series.points);
+  const hint = document.getElementById('group-hint');
+  if (state.group === 'hour') {
+    hint.hidden = false;
+    hint.textContent = `Óránkénti bontás — ${fmtDate(from)} napra.`;
+  } else {
+    hint.hidden = true;
+  }
+  try {
+    const series = await api(`/api/revenue-series?from=${from}&to=${to}&group=${state.group}`);
+    renderLineChart(document.getElementById('revenue-chart'), series.points);
+  } catch (e) {
+    document.getElementById('revenue-chart').innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
+  }
 
   const summary = await api(`/api/summary?from=${from}&to=${to}`);
   const names = { kp: 'Készpénz', 'bankkártya': 'Bankkártya', 'egyéb': 'Egyéb' };

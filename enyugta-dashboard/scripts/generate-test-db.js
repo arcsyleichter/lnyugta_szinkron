@@ -6,7 +6,7 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SRC_PATH = path.join(__dirname, 'current.db');
+const SRC_PATH = path.join(__dirname, '..', 'data', 'companies', '27129430.db');
 
 function pad(n, len) { return String(n).padStart(len, '0'); }
 
@@ -46,10 +46,10 @@ function buildDb(outPath, company, products, opts) {
   // --- nyfej + nytet (nyugták) ---
   const insFej = db.prepare(`INSERT INTO nyfej
     (cegid, rksh, bsz, keltdat, nypeldsz, sznev, szadoszam, szorszag, szvaros, szirsz, szcim,
-     vnev, vorszag, vvaros, virsz, vcim, umdate, fizmod, bsznr,
+     vnev, vorszag, vvaros, virsz, vcim, umdate, rendkezdatum, fizmod, bsznr,
      bruttokp, bruttoafr, bruttokartya, storno, stornozott, helybenfogyasztott)
     VALUES (1, '10000', ?, ?, 1, ?, ?, 'HU', ?, ?, ?,
-     '', 'HU', '', '', '', ?, ?, ?,
+     '', 'HU', '', '', '', ?, ?, ?, ?,
      ?, 0, ?, 'N', 'N', 'I')`);
 
   const insTet = db.prepare(`INSERT INTO nytet
@@ -84,13 +84,13 @@ function buildDb(outPath, company, products, opts) {
       const bruttokp = fizmod === 'kp' ? grossTotal : 0;
       const bruttokartya = fizmod === 'bankkártya' ? grossTotal : 0;
       const bruttoegyeb = fizmod === 'egyéb' ? grossTotal : 0;
-      const hh = pad(8 + Math.floor(Math.random() * 11), 2);
+      const hh = pad(8 + Math.floor(Math.random() * 14), 2); // 08:00–21:59 nyitvatartás
       const mm = pad(Math.floor(Math.random() * 60), 2);
       const umdate = `${dateStr} ${hh}:${mm}:00`;
 
       insFej.run(
         bsz, dateStr, company.nev, company.adoszam, company.varos, company.irsz, company.cim,
-        umdate, fizmod, bsznr,
+        umdate, umdate, fizmod, bsznr,
         bruttokp, bruttokartya
       );
       // bruttoafr (utalvány/egyéb) oszlopba írjuk az "egyéb" fizmódot, ha volt
@@ -116,7 +116,7 @@ function buildDb(outPath, company, products, opts) {
 // ---------------------------------------------------------------------------
 // Cég A: Corvin Presszó Kft. — kávézó / cukrászda
 // ---------------------------------------------------------------------------
-buildDb(path.join(__dirname, 'test-corvin-presszo.db'), {
+buildDb(path.join(__dirname, '..', 'data', 'companies', '18774455.db'), {
   nev: 'Corvin Presszó Kft.',
   adoszam: '18774455-1-42',
   varos: 'SZEGED',
@@ -134,12 +134,12 @@ buildDb(path.join(__dirname, 'test-corvin-presszo.db'), {
   { nev: 'Sajttorta szelet', me: 'Darab', ar: 1050, afakod: '27%', fokat: 'ETEL', alkat: 'DESSZERT' },
   { nev: 'Ásványvíz 0.33', me: 'Darab', ar: 500, afakod: '27%', fokat: 'ALKMENTESITAL_HELYBEN', alkat: 'UDITO' },
   { nev: 'Limonádé', me: 'Darab', ar: 890, afakod: '27%', fokat: 'ALKMENTESITAL_HELYBEN', alkat: 'UDITO' },
-], { days: 45, minPerDay: 10, maxPerDay: 28, prefix: 'CPY', today: '2026-07-08' });
+], { days: 45, minPerDay: 10, maxPerDay: 28, prefix: 'CPY', today: '2026-07-09' });
 
 // ---------------------------------------------------------------------------
 // Cég B: Zöld Kanál Vendéglő Kft. — étterem
 // ---------------------------------------------------------------------------
-buildDb(path.join(__dirname, 'test-zold-kanal.db'), {
+buildDb(path.join(__dirname, '..', 'data', 'companies', '24681357.db'), {
   nev: 'Zöld Kanál Vendéglő Kft.',
   adoszam: '24681357-2-09',
   varos: 'DEBRECEN',
@@ -157,4 +157,4 @@ buildDb(path.join(__dirname, 'test-zold-kanal.db'), {
   { nev: 'Üdítő 0.3', me: 'Darab', ar: 690, afakod: '27%', fokat: 'ALKMENTESITAL_HELYBEN', alkat: 'UDITO' },
   { nev: 'Ásványvíz 0.33', me: 'Darab', ar: 550, afakod: '27%', fokat: 'ALKMENTESITAL_HELYBEN', alkat: 'UDITO' },
   { nev: 'Espresso', me: 'Darab', ar: 650, afakod: '5%', fokat: 'ALKMENTESITAL_HELYBEN', alkat: 'KAVE' },
-], { days: 45, minPerDay: 8, maxPerDay: 20, prefix: 'ZKY', today: '2026-07-08' });
+], { days: 45, minPerDay: 8, maxPerDay: 20, prefix: 'ZKY', today: '2026-07-09' });

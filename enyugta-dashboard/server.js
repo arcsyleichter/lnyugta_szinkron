@@ -305,7 +305,31 @@ route('GET', '/api/revenue-series', async (req, res, query) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const k = session.companyKey;
   const { from, to } = resolveRange(query);
-  const group = ['day', 'week', 'month'].includes(query.group) ? query.group : 'day';
+  const group = ['hour', 'day', 'week', 'month'].includes(query.group) ? query.group : 'day';
+
+  if (group === 'hour') {
+    if (from !== to) {
+      return sendJson(res, 400, { error: 'Óránkénti bontáshoz egyetlen napot válassz ki (a kezdő és záró dátum legyen ugyanaz).' });
+    }
+    // Az órás bontáshoz a rendkezdatum (a nyugta tényleges kezdési időpontja)
+    // kell, NEM az umdate — utóbbi azt mutatja, mikor szinkronizálódott utoljára
+    // a sor a szerverre, ami sok nyugtánál egyszerre, jóval később történik,
+    // és órás bontásban félrevezető torlódást mutatna egyetlen órában.
+    const rows = all(k,
+      `SELECT strftime('%H', rendkezdatum) AS hh, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(*) AS cnt
+       FROM nyfej WHERE keltdat = ? AND rendkezdatum IS NOT NULL AND ${NOT_STORNO} GROUP BY hh`,
+      [from]
+    );
+    const byHour = new Map(rows.map((r) => [r.hh, r]));
+    const points = [];
+    for (let h = 0; h < 24; h++) {
+      const hh = String(h).padStart(2, '0');
+      const row = byHour.get(hh);
+      points.push({ d: hh, revenue: row ? row.revenue : 0, cnt: row ? row.cnt : 0 });
+    }
+    return sendJson(res, 200, { group, points });
+  }
+
   const daily = all(k,
     `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(*) AS cnt
      FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat ORDER BY keltdat`,
@@ -330,6 +354,7 @@ route('GET', '/api/revenue-series', async (req, res, query) => {
   }
   sendJson(res, 200, { group, points: [...buckets.values()].sort((a, b) => a.d.localeCompare(b.d)) });
 });
+
 
 route('GET', '/api/products', async (req, res, query) => {
   const session = requireAuth(req);

@@ -140,6 +140,12 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .range-chip.is-active{ background:var(--ink); color:#fff; border-color:var(--ink); }
 .range-custom-inputs{ display:flex; align-items:center; gap:6px; font-size:12.5px; }
 .range-custom-inputs input{ border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+.group-toggle{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:4px; }
+.group-toggle .chip{
+  border:1px solid var(--line); background:#fff; padding:6px 12px; border-radius:20px; font-size:12.5px; font-weight:500; color:var(--text-dim);
+}
+.group-toggle .chip.is-active{ background:var(--jade); color:#fff; border-color:var(--jade); }
+.group-hint{ font-size:12px; color:var(--text-dim); margin:0 0 10px; }
 .btn-refresh{
   background:var(--marigold); color:var(--ink); border:none; padding:9px 16px; border-radius:8px; font-weight:600; font-size:13px;
   display:flex; align-items:center; gap:6px;
