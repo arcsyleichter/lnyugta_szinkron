@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L-NYUGTA — élő értékesítési nézegető</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- ===================== BEJELENTKEZÉS ===================== -->
+<section id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <span class="brand-mark">受</span>
+      <div>
+        <div class="brand-name">L-NYUGTA nézegető</div>
+        <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
+      </div>
+    </div>
+    <p class="login-lede">Add meg a céged adószámát a belépéshez. Nincs jelszó — az adatbázisban szereplő adószám azonosít.</p>
+    <form id="login-form" autocomplete="off">
+      <label for="adoszam-input">Adószám</label>
+      <input id="adoszam-input" name="adoszam" type="text" placeholder="pl. 27129430" inputmode="text" required>
+      <button type="submit" id="login-btn">Belépés</button>
+      <div class="login-error" id="login-error" hidden></div>
+    </form>
+    <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
+         JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
+         mert bárkinek megmutatja az összes regisztrált cég adószámát. -->
+    <div class="login-hint" id="login-hint" hidden>
+      <div class="login-hint-title">Ideiglenes — teszteléshez érvényes adószámok</div>
+      <ul class="login-hint-list" id="login-hint-list"></ul>
+    </div>
+  </div>
+  <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul. Elég az adószám első 8 számjegye.</div>
+</section>
+
+<!-- ===================== DASHBOARD ===================== -->
+<div id="app-screen" class="app-shell" hidden>
+
+  <aside class="sidebar">
+    <div class="brand brand--sidebar">
+      <span class="brand-mark">受</span>
+      <div>
+        <div class="brand-name">L-NYUGTA</div>
+        <div class="brand-sub" id="company-name">—</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="overview">Áttekintés</button>
+      <button class="nav-item" data-view="revenue">Forgalom</button>
+      <button class="nav-item" data-view="products">Cikk eladások</button>
+      <button class="nav-item" data-view="receipts">Nyugták</button>
+      <button class="nav-item" data-view="sync">Szinkronizáció</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sync-pill" id="sync-pill">
+        <span class="dot" id="sync-dot"></span>
+        <span id="sync-pill-text">szinkron ellenőrzése…</span>
+      </div>
+      <button class="btn-ghost" id="logout-btn">Kilépés</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="date-range" id="date-range-control">
+        <button class="range-chip is-active" data-range="7">7 nap</button>
+        <button class="range-chip" data-range="30">30 nap</button>
+        <button class="range-chip" data-range="90">90 nap</button>
+        <button class="range-chip" data-range="custom">Egyedi</button>
+        <span class="range-custom-inputs" id="range-custom-inputs" hidden>
+          <input type="date" id="from-input"> – <input type="date" id="to-input">
+          <button class="btn-tiny" id="apply-range-btn">Alkalmaz</button>
+        </span>
+      </div>
+      <button class="btn-refresh" id="refresh-btn" title="Adatok frissítése">
+        <span class="refresh-icon">⟳</span> Frissítés
+      </button>
+    </header>
+
+    <!-- --- ÁTTEKINTÉS --- -->
+    <section class="view" data-view="overview">
+      <div class="receipt-strip">
+        <div class="receipt-strip-inner">
+          <div class="kpi">
+            <div class="kpi-label">Forgalom</div>
+            <div class="kpi-value" id="kpi-revenue">—</div>
+            <div class="kpi-trend" id="kpi-revenue-trend"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Nyugták száma</div>
+            <div class="kpi-value" id="kpi-count">—</div>
+            <div class="kpi-trend" id="kpi-count-trend"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Átlagos kosárérték</div>
+            <div class="kpi-value" id="kpi-avg">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Napi forgalom</div>
+          <div id="overview-chart" class="chart-holder"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Fizetési módok szerint</div>
+          <div id="fizmod-list" class="fizmod-list"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Legjobban fogyó cikkek</div>
+        <div id="overview-top-products"></div>
+      </div>
+    </section>
+
+    <!-- --- FORGALOM --- -->
+    <section class="view" data-view="revenue" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Forgalom alakulása</div>
+          <div class="group-toggle" id="group-toggle">
+            <button class="chip is-active" data-group="day">Napi</button>
+            <button class="chip" data-group="week">Heti</button>
+            <button class="chip" data-group="month">Havi</button>
+          </div>
+        </div>
+        <div id="revenue-chart" class="chart-holder chart-holder--tall"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Fizetési módok bontásban</div>
+          <table class="data-table" id="fizmod-table">
+            <thead><tr><th>Fizetési mód</th><th class="td-right">Nyugták</th><th class="td-right">Forgalom</th><th class="td-right">Részarány</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <div class="card-title">Árbevétel ÁFA kulcsok szerint</div>
+          <table class="data-table" id="vat-table">
+            <thead><tr><th>ÁFA kulcs</th><th class="td-right">Nettó</th><th class="td-right">ÁFA</th><th class="td-right">Bruttó</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- CIKK ELADÁSOK --- -->
+    <section class="view" data-view="products" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Cikk eladások</div>
+          <input type="search" class="search-input" id="products-search" placeholder="Termék keresése…">
+        </div>
+        <table class="data-table" id="products-table">
+          <thead><tr><th>Termék</th><th>Mennyiség</th><th>Nyugtákon</th><th>Árbevétel</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="table-footer">
+          <span id="products-count"></span>
+          <div class="pager">
+            <button class="btn-tiny" id="products-prev">‹ Előző</button>
+            <button class="btn-tiny" id="products-next">Következő ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- NYUGTÁK --- -->
+    <section class="view" data-view="receipts" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Nyugták</div>
+          <input type="search" class="search-input" id="receipts-search" placeholder="Nyugtaszám keresése…">
+        </div>
+        <div class="filters-row">
+          <select id="receipts-fizmod">
+            <option value="">Minden fizetési mód</option>
+            <option value="kp">Készpénz</option>
+            <option value="bankkártya">Bankkártya</option>
+            <option value="egyéb">Egyéb</option>
+          </select>
+          <input type="number" id="receipts-min" placeholder="Min. összeg">
+          <input type="number" id="receipts-max" placeholder="Max. összeg">
+          <button class="btn-tiny" id="receipts-filter-btn">Szűrés</button>
+        </div>
+        <table class="data-table" id="receipts-table">
+          <thead><tr><th>Nyugtaszám</th><th>Dátum</th><th>Fizetési mód</th><th>Összeg</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="table-footer">
+          <span id="receipts-count"></span>
+          <div class="pager">
+            <button class="btn-tiny" id="receipts-prev">‹ Előző</button>
+            <button class="btn-tiny" id="receipts-next">Következő ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- SZINKRONIZÁCIÓ --- -->
+    <section class="view" data-view="sync" hidden>
+      <div class="card">
+        <div class="card-title">Élő kapcsolat az androidos alkalmazással</div>
+        <p class="muted">
+          A nézegető a bejelentkezett céghez tartozó, saját adatbázis-pillanatképből
+          dolgozik (a szerver minden céget külön fájlban tart, egymástól elkülönítve).
+          Ez a fájl egy előre beállított időközönként frissül, amikor a cég androidos
+          L-NYUGTA GO appja elküldi a saját adatbázisát a szerver
+          <code>/api/sync/upload</code> végpontjára.
+        </p>
+        <div class="sync-status-box" id="sync-status-box">Betöltés…</div>
+        <button class="btn-secondary" id="sync-request-btn">Szinkron lekérdezése most</button>
+        <div id="sync-request-result" class="muted" style="margin-top:10px;"></div>
+      </div>
+    </section>
+
+    <!-- --- NYUGTA RÉSZLETEK MODAL --- -->
+    <div class="modal-backdrop" id="receipt-modal-backdrop" hidden>
+      <div class="modal receipt-modal">
+        <button class="modal-close" id="receipt-modal-close">✕</button>
+        <div id="receipt-modal-content"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
