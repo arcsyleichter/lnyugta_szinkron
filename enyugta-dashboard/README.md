@@ -365,6 +365,29 @@ a ténylegesen beérkezett adattal, és a módosítást "leszinkronizálva"
 (vadonatúj termék), a rendszer ezt is jelzi ("Új — függőben"), amíg az
 androidos oldal ténylegesen létre nem hozza.
 
+### Teszteléshez: `scripts/simulate_android_pull.py`
+
+Mielőtt az androidos oldal ténylegesen implementálja a fenti szerződést, ezzel
+a szkripttel ki lehet próbálni a teljes kört — pontosan azt csinálja, amit
+majd a telefonnak kell: lekérdezi a függő módosításokat, és ha megadsz egy
+helyi `.db` fájlt, azokat ténylegesen alkalmazza is rá (upsert `cikkt` /
+`cikkcsop` táblákba).
+
+```bash
+export SYNC_API_KEY="a szerver data/.secrets.json-jában lévő kulcs"
+
+# csak megnézni, mi van függőben:
+python3 scripts/simulate_android_pull.py --url https://lnyugta-szinkron-1.onrender.com --adoszam 18774455
+
+# a teljes kör: lekérdezés + helyi alkalmazás egy .db másolatra
+python3 scripts/simulate_android_pull.py --url https://lnyugta-szinkron-1.onrender.com \
+  --adoszam 18774455 --apply-to teszt-masolat.db
+```
+
+Utána a módosított fájlt visszatöltve az `upload_sync.py`-jal, a szerver a
+következő feltöltésben automatikusan "leszinkronizálva" állapotba teszi a
+teljesült módosításokat — nincs szükség külön visszaigazoló hívásra.
+
 ### Excel (CSV) import/export
 
 Igazi bináris `.xlsx` helyett **CSV-t** használ a rendszer (UTF-8 BOM-mal,

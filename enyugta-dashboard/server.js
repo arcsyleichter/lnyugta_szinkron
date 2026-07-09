@@ -209,6 +209,16 @@ productChangesDb.exec(`
 `);
 
 function addProductChange(companyKey, changeType, payload, source) {
+  // Ha ugyanerre a cikkre/csoportra már van egy még FÜGGŐBEN lévő korábbi
+  // módosítás, azt előbb töröljük — különben soha nem tudna teljesülni
+  // (hiszen a cikk ára/adatai a most beérkező, újabb szándék szerint fognak
+  // majd módosulni, nem a réginek megfelelően), és örökre "függőben" ragadna.
+  // A már LESZINKRONIZÁLT (történeti) bejegyzéseket ez nem érinti.
+  const target = payload.megnevezes;
+  productChangesDb.prepare(
+    `DELETE FROM product_changes WHERE company_key = ? AND change_type = ? AND status = 'pending'
+     AND json_extract(payload, '$.megnevezes') = ?`
+  ).run(companyKey, changeType, target);
   productChangesDb.prepare(
     `INSERT INTO product_changes (company_key, change_type, payload, status, source, created_at)
      VALUES (?, ?, ?, 'pending', ?, ?)`
