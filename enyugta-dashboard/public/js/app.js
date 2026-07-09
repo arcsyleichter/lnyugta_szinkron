@@ -9,6 +9,37 @@ const fmtDateTime = (d) => new Date(d).toLocaleString('hu-HU');
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const isoDaysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 
+/* Dátumtartomány-preset segédfüggvények — mindig helyi (nem UTC) dátumokkal
+   számolnak, hogy ne csússzon el a nap a felhasználó időzónájában. */
+const pad2 = (n) => String(n).padStart(2, '0');
+const toIso = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+function startOfWeek(d) { const dt = new Date(d); const day = (dt.getDay() + 6) % 7; dt.setDate(dt.getDate() - day); return dt; }
+function endOfWeek(d) { const dt = startOfWeek(d); dt.setDate(dt.getDate() + 6); return dt; }
+function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+function startOfYear(d) { return new Date(d.getFullYear(), 0, 1); }
+function endOfYear(d) { return new Date(d.getFullYear(), 11, 31); }
+
+/* Egy preset kulcsból ({from,to}) számol — a "mai nap" mindig a böngésző
+   aktuális dátuma. Az aktuális hét/hónap/év mindig a mai napig tart
+   (nincs értelme jövőbeli, üres napokat mutatni). */
+function resolvePreset(key) {
+  const now = new Date();
+  switch (key) {
+    case 'today': return { from: toIso(now), to: toIso(now) };
+    case '7': return { from: isoDaysAgo(6), to: todayIso() };
+    case '30': return { from: isoDaysAgo(29), to: todayIso() };
+    case '90': return { from: isoDaysAgo(89), to: todayIso() };
+    case 'week-td': return { from: toIso(startOfWeek(now)), to: toIso(now) };
+    case 'month-td': return { from: toIso(startOfMonth(now)), to: toIso(now) };
+    case 'year-td': return { from: toIso(startOfYear(now)), to: toIso(now) };
+    case 'prev-week': { const p = new Date(now); p.setDate(p.getDate() - 7); return { from: toIso(startOfWeek(p)), to: toIso(endOfWeek(p)) }; }
+    case 'prev-month': { const p = new Date(now.getFullYear(), now.getMonth() - 1, 1); return { from: toIso(startOfMonth(p)), to: toIso(endOfMonth(p)) }; }
+    case 'prev-year': { const p = new Date(now.getFullYear() - 1, 0, 1); return { from: toIso(startOfYear(p)), to: toIso(endOfYear(p)) }; }
+    default: return { from: isoDaysAgo(6), to: todayIso() };
+  }
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
   if (res.status === 401) { showLogin(); throw new Error('NOT_AUTHENTICATED'); }
@@ -150,6 +181,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'revenue') loadRevenueView();
     if (view === 'products') loadProductsView(true);
     if (view === 'receipts') loadReceiptsView(true);
+    if (view === 'ntak') loadNtakView();
     if (view === 'sync') loadSyncView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
   });
@@ -158,27 +190,43 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 /* ============================================================
    Dátumtartomány vezérlő
    ============================================================ */
-document.querySelectorAll('.range-chip').forEach((chip) => {
-  chip.addEventListener('click', () => {
-    document.querySelectorAll('.range-chip').forEach((c) => c.classList.remove('is-active'));
-    chip.classList.add('is-active');
-    const r = chip.dataset.range;
-    document.getElementById('range-custom-inputs').hidden = r !== 'custom';
-    if (r !== 'custom') {
-      state.range = { from: isoDaysAgo(parseInt(r, 10) - 1), to: todayIso(), preset: r };
-      if (state.range.from !== state.range.to) setGroup('day'); // óránkénti csak egy napra értelmezhető
-      refreshAll();
-    }
-  });
+function updateRangeLabel() {
+  const el = document.getElementById('range-label');
+  const { from, to } = state.range;
+  el.textContent = from === to ? fmtDate(from) : `${fmtDate(from)} – ${fmtDate(to)}`;
+}
+// Egységes belépési pont minden tartomány-változtatáshoz: beállítja a state-et,
+// frissíti a címkét, és ha a tartomány már nem egyetlen nap, óránkénti nézetből
+// visszavált napi bontásra (az óránkénti csak egy napra értelmezhető).
+function applyRange(range) {
+  state.range = range;
+  if (range.from !== range.to) setGroup('day');
+  updateRangeLabel();
+  refreshAll();
+}
+document.getElementById('range-select').addEventListener('change', (e) => {
+  const key = e.target.value;
+  document.getElementById('range-custom-inputs').hidden = key !== 'custom';
+  document.getElementById('range-single-input').hidden = key !== 'single-day';
+  if (key === 'custom') {
+    document.getElementById('from-input').value = state.range.from;
+    document.getElementById('to-input').value = state.range.to;
+    return; // "Alkalmaz"-ra vár
+  }
+  if (key === 'single-day') {
+    document.getElementById('single-day-input').value = state.range.to;
+    return; // "Alkalmaz"-ra vár
+  }
+  applyRange({ ...resolvePreset(key), preset: key });
 });
 document.getElementById('apply-range-btn').addEventListener('click', () => {
   const from = document.getElementById('from-input').value;
   const to = document.getElementById('to-input').value;
-  if (from && to) {
-    state.range = { from, to, preset: 'custom' };
-    if (from !== to) setGroup('day'); // óránkénti csak egy napra értelmezhető
-    refreshAll();
-  }
+  if (from && to) applyRange({ from, to, preset: 'custom' });
+});
+document.getElementById('apply-single-day-btn').addEventListener('click', () => {
+  const day = document.getElementById('single-day-input').value;
+  if (day) applyRange({ from: day, to: day, preset: 'single-day' });
 });
 document.getElementById('refresh-btn').addEventListener('click', () => refreshAll(true));
 
@@ -188,6 +236,7 @@ document.getElementById('refresh-btn').addEventListener('click', () => refreshAl
 function boot() {
   document.getElementById('from-input').value = state.range.from;
   document.getElementById('to-input').value = state.range.to;
+  updateRangeLabel();
   refreshAll();
   refreshSyncPill();
   if (state.pollTimer) clearInterval(state.pollTimer);
@@ -203,6 +252,7 @@ async function refreshAll(spin) {
     if (activeView === 'revenue') await loadRevenueView();
     if (activeView === 'products') await loadProductsView(false);
     if (activeView === 'receipts') await loadReceiptsView(false);
+    if (activeView === 'ntak') await loadNtakView();
   } finally {
     if (spin) setTimeout(() => icon.classList.remove('spin'), 400);
   }
@@ -347,13 +397,14 @@ document.querySelectorAll('#group-toggle .chip').forEach((chip) => {
     if (g === 'hour' && state.range.from !== state.range.to) {
       // Óránkénti bontás csak egyetlen napra értelmezhető — automatikusan
       // egy napra szűkítjük a tartományt (a jelenlegi záró dátumra), és ezt
-      // az "Egyedi" dátumválasztóban is megjelenítjük, hogy látszódjon, mi történt.
+      // az "Egy nap" választóban is megjelenítjük, hogy látszódjon, mi történt.
       const day = state.range.to;
-      state.range = { from: day, to: day, preset: 'custom' };
-      document.querySelectorAll('.range-chip').forEach((c) => c.classList.toggle('is-active', c.dataset.range === 'custom'));
-      document.getElementById('range-custom-inputs').hidden = false;
-      document.getElementById('from-input').value = day;
-      document.getElementById('to-input').value = day;
+      state.range = { from: day, to: day, preset: 'single-day' };
+      document.getElementById('range-select').value = 'single-day';
+      document.getElementById('range-custom-inputs').hidden = true;
+      document.getElementById('range-single-input').hidden = false;
+      document.getElementById('single-day-input').value = day;
+      updateRangeLabel();
     }
     setGroup(g);
     loadRevenueView();
@@ -487,6 +538,77 @@ async function openReceiptModal(bsz) {
 }
 document.getElementById('receipt-modal-close').addEventListener('click', () => { document.getElementById('receipt-modal-backdrop').hidden = true; });
 document.getElementById('receipt-modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'receipt-modal-backdrop') e.currentTarget.hidden = true; });
+
+/* ============================================================
+   NTAK nézet
+   ============================================================ */
+const NTAK_STATUS_LABELS = {
+  TELJESEN_SIKERES: { label: 'Teljesen sikeres', cls: 'ok' },
+  RESZBEN_SIKERES: { label: 'Részben sikeres', cls: 'warn' },
+  TELJESEN_HIBAS: { label: 'Teljesen hibás', cls: 'error' },
+  BEFOGADVA: { label: 'Befogadva', cls: 'pending' },
+  ISMERETLEN: { label: 'Ismeretlen', cls: 'pending' },
+};
+const NTAK_TYPE_LABELS = { 'napi-zaras': 'Napi zárás', 'rendeles-osszesito': 'Rendelés összesítő' };
+
+function ntakStatusBadge(status) {
+  const meta = NTAK_STATUS_LABELS[status] || { label: status, cls: 'pending' };
+  return `<span class="ntak-badge ${meta.cls}">${escapeHtml(meta.label)}</span>`;
+}
+
+async function loadNtakView() {
+  const { from, to } = state.range;
+  const data = await api(`/api/ntak/summary?from=${from}&to=${to}`);
+
+  const statusBox = document.getElementById('ntak-status-summary');
+  if (!data.submissionsByStatus.length) {
+    statusBox.innerHTML = '<div class="empty-state">Nincs NTAK adatküldés a kiválasztott időszakban.</div>';
+  } else {
+    statusBox.innerHTML = data.submissionsByStatus
+      .map((r) => `<div class="ntak-summary-item">${ntakStatusBadge(r.ellenorzott)}<span class="ntak-summary-count">${r.cnt}</span></div>`)
+      .join('');
+  }
+  const typeBox = document.getElementById('ntak-type-summary');
+  typeBox.innerHTML = data.submissionsByType
+    .map((r) => `<div class="ntak-summary-item"><span class="ntak-type-name">${escapeHtml(NTAK_TYPE_LABELS[r.url] || r.url)}</span><span class="ntak-summary-count">${r.cnt}</span></div>`)
+    .join('');
+
+  const subTbody = document.querySelector('#ntak-submissions-table tbody');
+  subTbody.innerHTML = '';
+  if (!data.recent.length) {
+    subTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs adatküldés a kiválasztott időszakban.</td></tr>';
+  } else {
+    data.recent.forEach((r) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(NTAK_TYPE_LABELS[r.url] || r.url)}</td>
+        <td>${fmtDateTime(r.kulddate)}</td>
+        <td>${r.elldate ? fmtDateTime(r.elldate) : '—'}</td>
+        <td>${ntakStatusBadge(r.ellenorzott || 'ISMERETLEN')}</td>
+        <td class="ntak-uuid" title="${escapeHtml(r.uuid || '')}">${escapeHtml((r.uuid || '').slice(0, 8))}…</td>`;
+      subTbody.appendChild(tr);
+    });
+  }
+
+  const napTbody = document.querySelector('#ntak-napzaras-table tbody');
+  napTbody.innerHTML = '';
+  if (!data.napzarasok.length) {
+    napTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs napi nyitás-zárás adat a kiválasztott időszakban.</td></tr>';
+  } else {
+    data.napzarasok.forEach((r) => {
+      const tr = document.createElement('tr');
+      const nyitasIdo = r.nyitas ? r.nyitas.slice(11, 16) : '—';
+      const zarasIdo = r.zaras ? r.zaras.slice(11, 16) : '—';
+      tr.innerHTML = `
+        <td>${fmtDate(r.targynap)}</td>
+        <td>${nyitasIdo}</td>
+        <td>${zarasIdo}</td>
+        <td>${escapeHtml(r.naptipus || '—')}</td>
+        <td class="num">${fmtHuf(r.borravalo)}</td>`;
+      napTbody.appendChild(tr);
+    });
+  }
+}
 
 /* ============================================================
    Szinkronizáció nézet

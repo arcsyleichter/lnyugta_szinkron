@@ -430,6 +430,39 @@ route('GET', '/api/vat-breakdown', async (req, res, query) => {
   sendJson(res, 200, { from, to, items: rows });
 });
 
+// NTAK (turisztikai adatszolgáltatás) állapot: adatküldések eredménye +
+// napi nyitás-zárás log. Azoknál a cégeknél, akiknek nincs NTAK-kötelezettsége
+// (pl. a demó teszt cégek), ezek a táblák egyszerűen üresek — a végpont ilyenkor
+// is 200-at ad, üres listákkal, a felület pedig "nincs adat" állapotot mutat.
+route('GET', '/api/ntak/summary', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+
+  const napzarasok = all(k,
+    `SELECT targynap, nyitas, zaras, borravalo, naptipus, uuid
+     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? ORDER BY targynap DESC`,
+    [from, to]
+  );
+  const submissionsByStatus = all(k,
+    `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
+     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY ellenorzott ORDER BY cnt DESC`,
+    [from, to]
+  );
+  const submissionsByType = all(k,
+    `SELECT url, COUNT(*) AS cnt
+     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY url ORDER BY cnt DESC`,
+    [from, to]
+  );
+  const recent = all(k,
+    `SELECT url, sikeres, uuid, kulddate, elldate, ellenorzott
+     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
+    [from, to]
+  );
+  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent });
+});
+
 route('GET', '/api/receipt', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });

@@ -215,6 +215,24 @@ Ezt hívhatja:
   automatizálás (pl. Tasker HTTP Request akció), ami elküldi a helyi
   adatbázis-fájlt.
 
+### Teszteléshez: `scripts/upload_sync.py`
+
+Mielőtt az androidos oldal bekötésre kerül, a `scripts/upload_sync.py`
+szkripttel kézzel / szkriptből is ki lehet próbálni a feltöltést — pontosan
+azt csinálja, amit majd a telefon fog. Nincs függősége, csak Python 3.8+:
+
+```bash
+export SYNC_API_KEY="a szerver data/.secrets.json-jában lévő kulcs"
+python3 scripts/upload_sync.py \
+  --url https://l-nyugta-dashboard.onrender.com \
+  --db data/companies/18774455.db \
+  --adoszam 18774455
+```
+
+Folyamatos, időzített szinkron szimulálásához (pl. hogy lásd élőben
+frissülni a dashboardot): add hozzá a `--interval 60` kapcsolót — ekkor a
+szkript percenként újraküldi ugyanazt a fájlt, Ctrl+C-ig.
+
 Amíg ez nincs bekötve, a felület **"Szinkronizáció" menüpontjában** lévő
 "Szinkron lekérdezése most" gomb csak visszajelzi, hogy nincs élő
 kapcsolat, és a jelenleg feltöltött pillanatkép aktív — így a demó

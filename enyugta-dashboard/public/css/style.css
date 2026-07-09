@@ -139,13 +139,16 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 .main{ padding:22px 30px 60px; max-width:1180px; }
 .topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; flex-wrap:wrap; gap:12px; }
-.date-range{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.range-chip{
-  border:1px solid var(--line); background:#fff; padding:7px 13px; border-radius:20px; font-size:12.5px; font-weight:500; color:var(--text-dim);
+.date-range{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.range-select{
+  border:1px solid var(--line); background:#fff; padding:8px 12px; border-radius:9px; font-size:13px; font-weight:500; color:var(--text);
+  cursor:pointer;
 }
-.range-chip.is-active{ background:var(--ink); color:#fff; border-color:var(--ink); }
+.range-single-input{ display:flex; align-items:center; gap:6px; font-size:12.5px; }
+.range-single-input input{ border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
 .range-custom-inputs{ display:flex; align-items:center; gap:6px; font-size:12.5px; }
 .range-custom-inputs input{ border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+.range-label{ font-size:12.5px; color:var(--text-dim); font-family:var(--font-mono); }
 .group-toggle{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:4px; }
 .group-toggle .chip{
   border:1px solid var(--line); background:#fff; padding:6px 12px; border-radius:20px; font-size:12.5px; font-weight:500; color:var(--text-dim);
@@ -210,6 +213,9 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .main{ padding:70px 16px 50px; }
   .topbar{ gap:10px; }
   .date-range, .group-toggle{ width:100%; }
+  .range-select{ width:100%; }
+  .range-single-input, .range-custom-inputs{ width:100%; flex-wrap:wrap; }
+  .range-single-input input, .range-custom-inputs input{ flex:1; min-width:0; }
   .receipt-strip-inner{ gap:22px; padding:18px 18px; }
   .kpi-value{ font-size:23px; }
   table.data-table{ font-size:12.5px; }
@@ -224,7 +230,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 @media (max-width:520px){
   .main{ padding:66px 12px 44px; }
   .card{ padding:16px 14px; }
-  .range-chip, .group-toggle .chip{ padding:6px 10px; font-size:12px; }
+  .range-select, .group-toggle .chip{ padding:6px 10px; font-size:12px; }
   .receipt-strip-inner{ flex-direction:column; gap:14px; }
 }
 
@@ -253,6 +259,27 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .td-right{ text-align:right; }
 
 .table-footer{ display:flex; align-items:center; justify-content:space-between; margin-top:12px; font-size:12.5px; color:var(--text-dim); }
+
+/* ============================================================
+   NTAK nézet
+   ============================================================ */
+.ntak-summary-row{ display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.ntak-summary-row:first-of-type{ margin-top:0; }
+.ntak-summary-item{
+  display:flex; align-items:center; gap:8px; background:var(--paper-dim); border:1px solid var(--line);
+  border-radius:9px; padding:8px 12px; font-size:12.5px;
+}
+.ntak-summary-count{ font-family:var(--font-mono); font-weight:600; color:var(--text); }
+.ntak-type-name{ font-weight:500; color:var(--text); }
+.ntak-badge{
+  display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.03em;
+  padding:3px 9px; border-radius:20px;
+}
+.ntak-badge.ok{ background:rgba(95,191,143,0.15); color:#2E7D5C; }
+.ntak-badge.warn{ background:rgba(222,159,39,0.18); color:#8A5E10; }
+.ntak-badge.error{ background:rgba(192,89,107,0.15); color:var(--brick); }
+.ntak-badge.pending{ background:rgba(108,130,153,0.15); color:var(--text-dim); }
+.ntak-uuid{ font-family:var(--font-mono); font-size:11.5px; color:var(--text-dim); }
 .pager{ display:flex; gap:6px; }
 .btn-tiny{ background:var(--paper-dim); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; }
 .btn-tiny:hover{ background:var(--line); }

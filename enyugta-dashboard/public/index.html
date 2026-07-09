@@ -63,6 +63,7 @@
       <button class="nav-item" data-view="revenue">Forgalom</button>
       <button class="nav-item" data-view="products">Cikk eladások</button>
       <button class="nav-item" data-view="receipts">Nyugták</button>
+      <button class="nav-item" data-view="ntak">NTAK</button>
       <button class="nav-item" data-view="sync">Szinkronizáció</button>
     </nav>
     <div class="sidebar-footer">
@@ -77,15 +78,38 @@
   <main class="main">
     <header class="topbar">
       <div class="date-range" id="date-range-control">
-        <button class="range-chip is-active" data-range="7">7 nap</button>
-        <button class="range-chip" data-range="30">30 nap</button>
-        <button class="range-chip" data-range="90">90 nap</button>
-        <button class="range-chip" data-range="custom">Egyedi</button>
+        <select id="range-select" class="range-select">
+          <optgroup label="Gyors">
+            <option value="today">Ma</option>
+            <option value="7" selected>7 nap</option>
+            <option value="30">30 nap</option>
+            <option value="90">90 nap</option>
+          </optgroup>
+          <optgroup label="Aktuális időszak">
+            <option value="week-td">Ezen a héten</option>
+            <option value="month-td">Ezen a hónapban</option>
+            <option value="year-td">Idén</option>
+          </optgroup>
+          <optgroup label="Előző időszak">
+            <option value="prev-week">Előző hét</option>
+            <option value="prev-month">Előző hónap</option>
+            <option value="prev-year">Előző év</option>
+          </optgroup>
+          <optgroup label="Egyedi">
+            <option value="single-day">Egy nap</option>
+            <option value="custom">Egyedi tartomány</option>
+          </optgroup>
+        </select>
+        <span class="range-single-input" id="range-single-input" hidden>
+          <input type="date" id="single-day-input">
+          <button class="btn-tiny" id="apply-single-day-btn">Alkalmaz</button>
+        </span>
         <span class="range-custom-inputs" id="range-custom-inputs" hidden>
           <input type="date" id="from-input"> – <input type="date" id="to-input">
           <button class="btn-tiny" id="apply-range-btn">Alkalmaz</button>
         </span>
       </div>
+      <span class="range-label" id="range-label"></span>
       <button class="btn-refresh" id="refresh-btn" title="Adatok frissítése">
         <span class="refresh-icon">⟳</span> Frissítés
       </button>
@@ -212,6 +236,29 @@
             <button class="btn-tiny" id="receipts-next">Következő ›</button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- --- NTAK --- -->
+    <section class="view" data-view="ntak" hidden>
+      <div class="card">
+        <div class="card-title">NTAK adatküldések állapota</div>
+        <div class="ntak-summary-row" id="ntak-status-summary"></div>
+        <div class="ntak-summary-row" id="ntak-type-summary"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Legutóbbi adatküldések</div>
+        <table class="data-table" id="ntak-submissions-table">
+          <thead><tr><th>Típus</th><th>Küldve</th><th>Válasz</th><th>Állapot</th><th>UUID</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title">Napi nyitás–zárás</div>
+        <table class="data-table" id="ntak-napzaras-table">
+          <thead><tr><th>Nap</th><th>Nyitás</th><th>Zárás</th><th>Nap típusa</th><th class="td-right">Borravaló</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
