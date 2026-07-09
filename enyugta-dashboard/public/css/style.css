@@ -13,16 +13,16 @@
 [hidden]{ display:none !important; }
 
 :root{
-  --ink: #4A7FB5;         /* pasztell, de kontrasztos középkék — sidebar / login háttér */
-  --ink-soft: #3D6C9C;
+  --ink: #3D6C9C;         /* pasztell, de kontrasztos középkék — sidebar / login háttér (egy árnyalattal sötétebb) */
+  --ink-soft: #2F5580;
   --paper: #FFFFFF;       /* tiszta fehér */
   --paper-dim: #EAF3FB;   /* nagyon halvány pasztellkék */
   --line: #D3E6F5;
   --text: #1E3247;
   --text-dim: #6C8299;
-  --jade: #6FA8DC;        /* elsődleges márka szín — pasztell égkék */
-  --jade-deep: #4A87C4;
-  --marigold: #A9CCEB;    /* akcentus — halvány pasztellkék kiemelés */
+  --jade: #5A93C9;        /* elsődleges márka szín — pasztell égkék (egy árnyalattal sötétebb) */
+  --jade-deep: #3D71A8;
+  --marigold: #8FB9DE;    /* akcentus — pasztellkék kiemelés (egy árnyalattal sötétebb) */
   --brick: #C0596B;       /* figyelmeztetés / negatív trend — visszafogott korall, hogy jól elváljon a kéktől */
   --font-display: 'Space Grotesk', system-ui, sans-serif;
   --font-body: 'Inter', system-ui, sans-serif;
@@ -47,7 +47,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
   background:
     radial-gradient(1200px 600px at 15% -10%, rgba(255,255,255,0.22), transparent),
-    radial-gradient(900px 500px at 110% 110%, rgba(169,204,235,0.30), transparent),
+    radial-gradient(900px 500px at 110% 110%, rgba(143,185,222,0.32), transparent),
     var(--ink);
   padding:24px;
 }
@@ -175,7 +175,44 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .kpi-trend.down{ color:#E39281; }
 
 .grid-2{ display:grid; grid-template-columns:1.5fr 1fr; gap:16px; margin-bottom:16px; }
-@media (max-width:880px){ .grid-2{ grid-template-columns:1fr; } .app-shell{ grid-template-columns:1fr; } .sidebar{ position:relative; height:auto; } }
+
+/* ============================================================
+   Mobil / reszponzív
+   ============================================================ */
+.hamburger-btn{
+  display:none; position:fixed; top:14px; left:14px; z-index:120;
+  width:40px; height:40px; border-radius:9px; border:1px solid var(--line);
+  background:#fff; box-shadow:var(--shadow); flex-direction:column; align-items:center; justify-content:center; gap:4px;
+}
+.hamburger-btn span{ display:block; width:18px; height:2px; background:var(--ink); border-radius:2px; }
+.sidebar-overlay{
+  display:none; position:fixed; inset:0; background:rgba(30,50,71,0.45); z-index:90;
+}
+.sidebar-overlay:not([hidden]){ display:block; }
+
+@media (max-width:880px){
+  .grid-2{ grid-template-columns:1fr; }
+  .app-shell{ grid-template-columns:1fr; }
+  .hamburger-btn{ display:flex; }
+  .sidebar{
+    position:fixed; top:0; left:0; height:100vh; width:250px; z-index:100;
+    transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 0 rgba(0,0,0,0);
+  }
+  .sidebar.is-open{ transform:translateX(0); box-shadow:12px 0 32px -8px rgba(30,50,71,0.35); }
+  .main{ padding:70px 16px 50px; }
+  .topbar{ gap:10px; }
+  .date-range, .group-toggle{ width:100%; }
+  .receipt-strip-inner{ gap:22px; padding:18px 18px; }
+  .kpi-value{ font-size:23px; }
+  table.data-table{ font-size:12.5px; }
+  .card{ overflow-x:auto; }
+}
+@media (max-width:520px){
+  .main{ padding:66px 12px 44px; }
+  .card{ padding:16px 14px; }
+  .range-chip, .group-toggle .chip{ padding:6px 10px; font-size:12px; }
+  .receipt-strip-inner{ flex-direction:column; gap:14px; }
+}
 
 .card{ background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; box-shadow:var(--shadow); }
 .card-title{ font-family:var(--font-display); font-weight:600; font-size:15px; margin-bottom:14px; }

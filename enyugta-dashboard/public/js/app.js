@@ -118,6 +118,23 @@ let loggedIn = false;
 showLogin();
 
 /* ============================================================
+   Mobil hamburger-menü
+   ============================================================ */
+function closeMobileSidebar() {
+  document.getElementById('sidebar').classList.remove('is-open');
+  document.getElementById('sidebar-overlay').hidden = true;
+}
+function openMobileSidebar() {
+  document.getElementById('sidebar').classList.add('is-open');
+  document.getElementById('sidebar-overlay').hidden = false;
+}
+document.getElementById('hamburger-btn').addEventListener('click', () => {
+  const sidebar = document.getElementById('sidebar');
+  if (sidebar.classList.contains('is-open')) closeMobileSidebar(); else openMobileSidebar();
+});
+document.getElementById('sidebar-overlay').addEventListener('click', closeMobileSidebar);
+
+/* ============================================================
    Navigáció / nézetváltás
    ============================================================ */
 document.querySelectorAll('.nav-item').forEach((btn) => {
@@ -130,6 +147,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'products') loadProductsView(true);
     if (view === 'receipts') loadReceiptsView(true);
     if (view === 'sync') loadSyncView();
+    closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
   });
 });
 
@@ -294,13 +312,13 @@ function renderLineChart(container, points) {
       labelsSvg += `<text x="${x(i)}" y="${H - 8}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="Inter">${shortDate(p.d)}</text>`;
     }
   });
-  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.revenue)}" r="2.6" fill="#4A87C4"><title>${shortDate(p.d)}: ${fmtHuf(p.revenue)}</title></circle>`).join('');
+  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.revenue)}" r="2.6" fill="#3D71A8"><title>${shortDate(p.d)}: ${fmtHuf(p.revenue)}</title></circle>`).join('');
 
   container.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
       ${gridSvg}
-      <path d="${area}" fill="rgba(111,168,220,0.16)" stroke="none"/>
-      <path d="${path}" fill="none" stroke="#4A87C4" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${area}" fill="rgba(90,147,201,0.18)" stroke="none"/>
+      <path d="${path}" fill="none" stroke="#3D71A8" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
       ${dots}
       ${labelsSvg}
     </svg>`;
