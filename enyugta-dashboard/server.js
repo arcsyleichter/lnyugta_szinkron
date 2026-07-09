@@ -48,7 +48,8 @@ function loadOrCreateSecrets() {
   }
   const sessionSecret = process.env.SESSION_SECRET || stored.sessionSecret || crypto.randomBytes(32).toString('hex');
   const syncApiKey = process.env.SYNC_API_KEY || stored.syncApiKey || crypto.randomBytes(24).toString('hex');
-  const next = { sessionSecret, syncApiKey };
+  const adminPassword = process.env.ADMIN_PASSWORD || stored.adminPassword || crypto.randomBytes(9).toString('base64url');
+  const next = { sessionSecret, syncApiKey, adminPassword };
   if (JSON.stringify(next) !== JSON.stringify(stored)) {
     fs.writeFileSync(SECRETS_PATH, JSON.stringify(next, null, 2));
   }
@@ -59,6 +60,10 @@ const SECRETS = loadOrCreateSecrets();
 if (!process.env.SYNC_API_KEY) {
   console.log('\n[info] Nincs SYNC_API_KEY env változó beállítva — generált kulcs a data/.secrets.json fájlban.');
   console.log(`[info] Az androidos szinkronhoz ezt a kulcsot kell majd megadni: ${SECRETS.syncApiKey}\n`);
+}
+if (!process.env.ADMIN_PASSWORD) {
+  console.log('[info] Nincs ADMIN_PASSWORD env változó beállítva — generált jelszó a data/.secrets.json fájlban.');
+  console.log(`[info] Admin belépéshez ezt a jelszót kell majd megadni: ${SECRETS.adminPassword}\n`);
 }
 
 function normalizeAdoszam(s) {
@@ -154,6 +159,42 @@ function writeSyncMeta(meta) {
 }
 
 // ---------------------------------------------------------------------------
+// Szinkron-napló — MINDEN feltöltési próbálkozást rögzít, sikereset és
+// sikertelent is (rossz kulcs, ismeretlen/hibás adószám, hibás fájl stb.),
+// hogy az admin felületen visszakereshető legyen, hol volt gond.
+// JSONL formátum (soronként egy JSON objektum), data/sync-log.jsonl.
+// Egyszerű rotáció: ha 5000 sor fölé nő, az utolsó 2000-re vágjuk vissza.
+// ---------------------------------------------------------------------------
+const SYNC_LOG_PATH = path.join(DATA_DIR, 'sync-log.jsonl');
+const SYNC_LOG_MAX_LINES = 5000;
+const SYNC_LOG_TRIM_TO = 2000;
+
+function logSync(entry) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
+  try {
+    fs.appendFileSync(SYNC_LOG_PATH, line + '\n');
+    maybeTrimSyncLog();
+  } catch (e) {
+    console.error('[hiba] szinkron-napló írása sikertelen:', e.message);
+  }
+}
+function maybeTrimSyncLog() {
+  let stat;
+  try { stat = fs.statSync(SYNC_LOG_PATH); } catch (_) { return; }
+  if (stat.size < 512 * 1024) return; // ne olvassuk feleslegesen minden íráskor, csak ha már számottevő a fájl
+  const lines = fs.readFileSync(SYNC_LOG_PATH, 'utf8').split('\n').filter(Boolean);
+  if (lines.length > SYNC_LOG_MAX_LINES) {
+    fs.writeFileSync(SYNC_LOG_PATH, lines.slice(-SYNC_LOG_TRIM_TO).join('\n') + '\n');
+  }
+}
+function readSyncLog(limit) {
+  let lines;
+  try { lines = fs.readFileSync(SYNC_LOG_PATH, 'utf8').split('\n').filter(Boolean); }
+  catch (_) { return []; }
+  return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
 // Apró segédfüggvények — session token (HMAC-aláírt, cookie-ban tárolt)
 // ---------------------------------------------------------------------------
 
@@ -220,6 +261,16 @@ function requireAuth(req) {
   const cookies = parseCookies(req.headers.cookie);
   const session = verifySession(cookies.enysession);
   if (!session || !session.companyKey || !companyIndex.has(session.companyKey)) return null;
+  return session;
+}
+
+// Admin munkamenet — KÜLÖN cookie-ban (enyadmin), nem keverendő a cégenkénti
+// bejelentkezéssel. Az admin jelszava a data/.secrets.json-ban (vagy
+// ADMIN_PASSWORD env változóban) van, teljesen független a szinkron API kulcstól.
+function requireAdmin(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enyadmin);
+  if (!session || !session.isAdmin) return null;
   return session;
 }
 
@@ -496,36 +547,58 @@ route('GET', '/api/sync/status', async (req, res) => {
 // admin-beavatkozás nélkül, amíg mindegyik ismeri a közös x-api-key-t.
 // Kérés törzse: a teljes .db fájl nyers bájtjai (application/octet-stream).
 route('POST', '/api/sync/upload', async (req, res, query) => {
+  const ip = (req.socket && req.socket.remoteAddress) || null;
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey || apiKey !== SECRETS.syncApiKey) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  if (!apiKey || apiKey !== SECRETS.syncApiKey) {
+    logSync({ ok: false, companyKey: null, nev: null, error: 'Érvénytelen vagy hiányzó x-api-key.', ip });
+    return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  }
 
   const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
   const key = companyKeyFromAdoszam(adoszamRaw);
-  if (key.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter — melyik céghez tartozik a feltöltés?' });
+  if (key.length < 8) {
+    logSync({ ok: false, companyKey: null, nev: null, error: 'Hiányzó vagy érvénytelen x-adoszam.', ip });
+    return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter — melyik céghez tartozik a feltöltés?' });
+  }
 
   let buf;
   try { buf = await readBody(req, 100 * 1024 * 1024); }
-  catch (_) { return sendJson(res, 413, { error: 'A feltöltött fájl túl nagy.' }); }
+  catch (_) {
+    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: 'A feltöltött fájl túl nagy.', ip });
+    return sendJson(res, 413, { error: 'A feltöltött fájl túl nagy.' });
+  }
   if (buf.length < 100 || buf.slice(0, 16).toString('utf8').indexOf('SQLite format 3') !== 0) {
+    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: 'A törzs nem érvényes SQLite fájl.', bytes: buf.length, ip });
     return sendJson(res, 400, { error: 'A törzsnek egy érvényes SQLite (.db) fájlnak kell lennie.' });
   }
 
   const dbFile = dbFileForKey(key);
   const tmpPath = dbFile + '.uploading';
-  fs.writeFileSync(tmpPath, buf);
-  evictConnection(key); // zárjuk a gyorsítótárban lévő, régi fájlra mutató kapcsolatot, mielőtt felülírjuk
-  fs.renameSync(tmpPath, dbFile);
+  try {
+    fs.writeFileSync(tmpPath, buf);
+    evictConnection(key); // zárjuk a gyorsítótárban lévő, régi fájlra mutató kapcsolatot, mielőtt felülírjuk
+    fs.renameSync(tmpPath, dbFile);
+  } catch (e) {
+    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: `Fájlírási hiba: ${e.message}`, bytes: buf.length, ip });
+    return sendJson(res, 500, { error: 'Nem sikerült elmenteni a feltöltött fájlt a szerveren.' });
+  }
 
   let identity = null;
   try { identity = readCompanyIdentity(dbFile); } catch (e) { console.error(`[hiba] identitás-olvasás sikertelen (${key}):`, e.message); }
   const isNew = !companyIndex.has(key);
   if (identity) companyIndex.set(key, { ...identity, dbFile });
 
+  if (!identity) {
+    logSync({ ok: false, companyKey: key, nev: null, error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', bytes: buf.length, ip });
+    return sendJson(res, 400, { error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat.' });
+  }
+
   const meta = readSyncMeta();
-  meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity ? identity.nev : (meta[key] && meta[key].nev) };
+  meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity.nev };
   writeSyncMeta(meta);
 
-  console.log(`[sync] ${key} (${identity ? identity.nev : '?'}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ CÉG regisztrálva' : ''}`);
+  logSync({ ok: true, companyKey: key, nev: identity.nev, bytes: buf.length, newCompany: isNew, ip });
+  console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ CÉG regisztrálva' : ''}`);
   sendJson(res, 200, { ok: true, companyKey: key, newCompany: isNew, ...meta[key] });
 });
 
@@ -570,6 +643,77 @@ route('GET', '/api/sync/companies', async (req, res) => {
     ...(meta[key] || { lastSync: null, source: null }),
   }));
   sendJson(res, 200, { count: list.length, companies: list });
+});
+
+// ---------------------------------------------------------------------------
+// ADMIN — külön bejelentkezés (nem cégenkénti adószámos belépés), amivel
+// az összes cég szinkron-naplója, NTAK állapota belátható, és bármelyik
+// cég dashboardja megnyitható. Az admin jelszó a data/.secrets.json-ban
+// (vagy ADMIN_PASSWORD env változóban) van.
+// ---------------------------------------------------------------------------
+
+route('POST', '/api/admin/login', async (req, res) => {
+  const { password } = await readJsonBody(req);
+  if (!password || password !== SECRETS.adminPassword) {
+    return sendJson(res, 401, { error: 'Hibás admin jelszó.' });
+  }
+  const payload = { isAdmin: true, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enyadmin=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': cookie });
+});
+
+route('POST', '/api/admin/logout', async (req, res) => {
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+});
+
+function computeNtakOverview() {
+  const rows = [];
+  for (const [key, entry] of companyIndex.entries()) {
+    let byStatus, lastProblem;
+    try {
+      byStatus = all(key, `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS s, COUNT(*) AS c FROM ntakrms GROUP BY s`);
+      lastProblem = get(key,
+        `SELECT url, kulddate, ellenorzott FROM ntakrms WHERE ellenorzott IN ('TELJESEN_HIBAS','RESZBEN_SIKERES') ORDER BY kulddate DESC LIMIT 1`
+      );
+    } catch (_) { byStatus = []; lastProblem = null; }
+    const total = byStatus.reduce((s, r) => s + r.c, 0);
+    if (total === 0) continue; // nincs NTAK adata ennek a cégnek — kihagyjuk az áttekintésből
+    const get1 = (s) => (byStatus.find((r) => r.s === s) || { c: 0 }).c;
+    rows.push({
+      key, nev: entry.nev, adoszam: entry.adoszam, total,
+      ok: get1('TELJESEN_SIKERES'), warn: get1('RESZBEN_SIKERES'), error: get1('TELJESEN_HIBAS'), pending: get1('BEFOGADVA'),
+      lastProblem: lastProblem || null,
+    });
+  }
+  return rows.sort((a, b) => (b.error + b.warn) - (a.error + a.warn));
+}
+
+route('GET', '/api/admin/overview', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  const companies = [...companyIndex.entries()]
+    .map(([key, entry]) => ({ key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, ...(meta[key] || { lastSync: null, source: null, bytes: null }) }))
+    .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
+  const syncLog = readSyncLog(Math.min(parseInt(query.logLimit || '200', 10) || 200, 1000));
+  const ntak = computeNtakOverview();
+  sendJson(res, 200, { companies, syncLog, ntak });
+});
+
+// Admin "belép" egy adott cég nevében — utána a normál, cégenkénti
+// dashboard API-kat használja a böngésző, mintha az illető cég jelentkezett
+// volna be az adószámával. Így nem kell duplikálni egyik nézetet sem.
+route('POST', '/api/admin/impersonate', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyKey } = await readJsonBody(req);
+  const entry = companyIndex.get(companyKey);
+  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const payload = { companyKey, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
 });
 
 // ---------------------------------------------------------------------------

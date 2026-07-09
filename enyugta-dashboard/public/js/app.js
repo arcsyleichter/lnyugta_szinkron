@@ -74,16 +74,20 @@ const state = {
    ============================================================ */
 const loginScreen = document.getElementById('login-screen');
 const appScreen = document.getElementById('app-screen');
+const adminLoginScreen = document.getElementById('admin-login-screen');
+const adminScreen = document.getElementById('admin-screen');
 
-function showLogin() {
-  loginScreen.hidden = false;
+function hideAllScreens() {
+  loginScreen.hidden = true;
   appScreen.hidden = true;
+  adminLoginScreen.hidden = true;
+  adminScreen.hidden = true;
   if (state.pollTimer) clearInterval(state.pollTimer);
 }
-function showApp() {
-  loginScreen.hidden = true;
-  appScreen.hidden = false;
-}
+function showLogin() { hideAllScreens(); loginScreen.hidden = false; }
+function showApp() { hideAllScreens(); appScreen.hidden = false; document.getElementById('back-to-admin-btn').hidden = !state.viaAdmin; }
+function showAdminLogin() { hideAllScreens(); adminLoginScreen.hidden = false; }
+function showAdmin() { hideAllScreens(); adminScreen.hidden = false; }
 
 document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -96,6 +100,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam }) });
     document.getElementById('company-name').textContent = data.company.nev;
     loggedIn = true;
+    state.viaAdmin = false;
     showApp();
     boot();
   } catch (e2) {
@@ -109,8 +114,121 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 document.getElementById('logout-btn').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
   loggedIn = false;
+  state.viaAdmin = false;
   showLogin();
 });
+document.getElementById('back-to-admin-btn').addEventListener('click', () => {
+  showAdmin();
+  loadAdminOverview();
+});
+
+/* ============================================================
+   Admin belépés + panel
+   ============================================================ */
+document.getElementById('show-admin-login').addEventListener('click', (e) => { e.preventDefault(); showAdminLogin(); });
+document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+
+document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('admin-login-btn');
+  const err = document.getElementById('admin-login-error');
+  err.hidden = true;
+  btn.disabled = true; btn.textContent = 'Belépés…';
+  try {
+    const password = document.getElementById('admin-password-input').value;
+    await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ password }) });
+    showAdmin();
+    loadAdminOverview();
+  } catch (e2) {
+    err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Hibás jelszó.' : e2.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Belépés';
+  }
+});
+
+document.getElementById('admin-logout-btn').addEventListener('click', async () => {
+  await api('/api/admin/logout', { method: 'POST' }).catch(() => {});
+  showLogin();
+});
+
+const NTAK_ADMIN_STATUS_LABELS = { TELJESEN_HIBAS: 'Teljesen hibás', RESZBEN_SIKERES: 'Részben sikeres' };
+
+async function loadAdminOverview() {
+  const data = await api('/api/admin/overview');
+
+  document.getElementById('admin-company-count').textContent = data.companies.length;
+  const compTbody = document.querySelector('#admin-companies-table tbody');
+  compTbody.innerHTML = '';
+  data.companies.forEach((c) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(c.nev)}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${escapeHtml(c.varos || '—')}</td>
+      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
+      <td>${escapeHtml(c.source || '—')}</td>
+      <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
+      <td><button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button></td>`;
+    compTbody.appendChild(tr);
+  });
+  compTbody.querySelectorAll('.btn-open-company').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = 'Nyitás…';
+      try {
+        const data2 = await api('/api/admin/impersonate', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
+        document.getElementById('company-name').textContent = data2.company.nev;
+        loggedIn = true;
+        state.viaAdmin = true;
+        showApp();
+        boot();
+      } catch (e) {
+        btn.disabled = false; btn.textContent = 'Megnyitás';
+        alert('Nem sikerült megnyitni: ' + e.message);
+      }
+    });
+  });
+
+  const ntakTbody = document.querySelector('#admin-ntak-table tbody');
+  ntakTbody.innerHTML = '';
+  if (!data.ntak.length) {
+    ntakTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Egyik cégnek sincs NTAK adata.</td></tr>';
+  } else {
+    data.ntak.forEach((n) => {
+      const tr = document.createElement('tr');
+      const problem = n.lastProblem
+        ? `${NTAK_ADMIN_STATUS_LABELS[n.lastProblem.ellenorzott] || n.lastProblem.ellenorzott} — ${fmtDateTime(n.lastProblem.kulddate)}`
+        : '—';
+      tr.innerHTML = `
+        <td>${escapeHtml(n.nev)}</td>
+        <td class="num">${n.ok}</td>
+        <td class="num">${n.warn ? `<span class="ntak-badge warn">${n.warn}</span>` : '0'}</td>
+        <td class="num">${n.error ? `<span class="ntak-badge error">${n.error}</span>` : '0'}</td>
+        <td class="num">${n.pending}</td>
+        <td>${escapeHtml(problem)}</td>`;
+      ntakTbody.appendChild(tr);
+    });
+  }
+
+  const logTbody = document.querySelector('#admin-synclog-table tbody');
+  logTbody.innerHTML = '';
+  if (!data.syncLog.length) {
+    logTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Még nem történt szinkron-próbálkozás.</td></tr>';
+  } else {
+    data.syncLog.forEach((l) => {
+      const tr = document.createElement('tr');
+      const statusBadge = l.ok ? '<span class="ntak-badge ok">Sikeres</span>' : '<span class="ntak-badge error">Hiba</span>';
+      const detail = l.ok ? (l.newCompany ? 'Új cég regisztrálva' : '—') : (l.error || 'Ismeretlen hiba');
+      tr.innerHTML = `
+        <td>${fmtDateTime(l.ts)}</td>
+        <td>${escapeHtml(l.nev || l.companyKey || '—')}</td>
+        <td>${statusBadge}</td>
+        <td>${escapeHtml(detail)}</td>
+        <td class="num">${l.bytes ? Math.round(l.bytes / 1024) + ' KB' : '—'}</td>`;
+      logTbody.appendChild(tr);
+    });
+  }
+}
 
 /* IDEIGLENES, TESZT CÉLÚ — a bejelentkező oldalon megmutatja, milyen
    adószámokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,

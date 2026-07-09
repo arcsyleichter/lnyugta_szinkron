@@ -297,6 +297,36 @@ db.exec('VACUUM');
 db.close();
 ```
 
+## Admin panel
+
+A bejelentkező oldal alján lévő "Admin belépés" linkkel egy külön, jelszavas
+bejelentkezéssel érhető el egy admin nézet, ami **minden** regisztrált céget
+átfog:
+
+- **Cégek listája** — mindegyik utolsó szinkron időpontjával, forrásával,
+  méretével, és egy **"Megnyitás"** gombbal, ami rögtön beléptet az adott cég
+  normál dashboardjába (nem kell ismerni az adószámát). Innen egy "‹ Admin
+  panel" linkkel bármikor vissza lehet lépni az admin nézetbe.
+- **NTAK állapot — minden cégre** — azoknál a cégeknél, akiknek van NTAK
+  adata, összesítve látszik, hány adatküldés volt sikeres / részben sikeres /
+  hibás / befogadva, plusz a legutóbbi probléma időpontja és típusa. (Ez a
+  nézet szándékosan cégek közötti — az admin mindenkinek a NTAK-státuszába
+  belelát, hogy gyorsan ki lehessen szűrni, kinél van gond a küldéssel.)
+- **Szinkron-napló** — minden feltöltési *próbálkozás* (nem csak a sikeresek)
+  időrendben: sikeres/hibás jelzéssel, a hiba szövegével (pl. rossz API-kulcs,
+  hibás adószám, sérült fájl), mérettel. Ez teszi visszakereshetővé, hol volt
+  feltöltési hiba.
+
+Az admin jelszó ugyanúgy generálódik és tárolódik, mint a `SESSION_SECRET` /
+`SYNC_API_KEY` — első induláskor a konzol kiírja, és a `data/.secrets.json`-ban
+van, vagy env változóként (`ADMIN_PASSWORD`) is rögzíthető, hogy újraindítás
+után se változzon.
+
+**Fontos:** ez egy jelszóval védett, de egyetlen, közös admin-fiók — nincsenek
+külön admin-felhasználók/naplózott admin-nevek. Ha többen kezelik majd a
+rendszert, és nyomon kell követni, *ki* nyitott meg egy céget, ez a rész
+bővítésre szorul (pl. named admin accounts).
+
 ## Biztonsági megjegyzések
 
 - A bejelentkezés kizárólag az adószámra épül — ez megfelel a kérésnek

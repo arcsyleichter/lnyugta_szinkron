@@ -61,9 +61,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 .brand{ display:flex; align-items:center; gap:12px; margin-bottom:18px; }
 .brand-mark{
-  width:38px; height:38px; border-radius:9px; background:var(--jade); color:#fff;
-  display:flex; align-items:center; justify-content:center; font-family:var(--font-display);
-  font-weight:700; font-size:19px; flex:none;
+  width:38px; height:38px; border-radius:9px; flex:none;
+  object-fit:cover; border:1px solid rgba(255,255,255,0.35); background:#fff;
 }
 .brand-name{ font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:0.2px; }
 .brand-sub{ font-size:12px; color:var(--text-dim); margin-top:1px; }
@@ -280,6 +279,38 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .ntak-badge.error{ background:rgba(192,89,107,0.15); color:var(--brick); }
 .ntak-badge.pending{ background:rgba(108,130,153,0.15); color:var(--text-dim); }
 .ntak-uuid{ font-family:var(--font-mono); font-size:11.5px; color:var(--text-dim); }
+
+/* ============================================================
+   Admin belépés + panel
+   ============================================================ */
+.admin-entry{ text-align:center; margin-top:14px; }
+.admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
+.admin-entry a:hover{ color:rgba(250,249,245,0.8); }
+
+.admin-shell{ min-height:100vh; background:var(--paper-dim); }
+.admin-topbar{
+  display:flex; align-items:center; justify-content:space-between; background:var(--ink);
+  padding:16px 26px; box-shadow:var(--shadow);
+}
+.admin-topbar .brand{ margin-bottom:0; }
+.admin-topbar .brand-name, .admin-topbar .brand-sub{ color:#fff; }
+.admin-topbar .brand-sub{ color:rgba(255,255,255,0.6); }
+.admin-main{ padding:22px 30px 60px; max-width:1180px; margin:0 auto; display:flex; flex-direction:column; gap:16px; }
+.admin-badge{
+  display:inline-block; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+  padding:2px 8px; border-radius:20px; background:rgba(192,89,107,0.15); color:var(--brick);
+}
+.btn-open-company{
+  border:1px solid var(--jade); background:#fff; color:var(--jade-deep); padding:5px 12px; border-radius:7px;
+  font-size:12px; font-weight:600;
+}
+.btn-open-company:hover{ background:var(--jade); color:#fff; }
+
+@media (max-width:880px){
+  .admin-topbar{ padding:14px 16px; }
+  .admin-main{ padding:18px 14px 40px; }
+  .admin-shell .card{ overflow-x:auto; }
+}
 .pager{ display:flex; gap:6px; }
 .btn-tiny{ background:var(--paper-dim); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; }
 .btn-tiny:hover{ background:var(--line); }

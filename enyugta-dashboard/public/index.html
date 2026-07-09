@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>L-NYUGTA — élő értékesítési nézegető</title>
+<link rel="icon" type="image/svg+xml" href="/img/logo.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/style.css">
@@ -15,7 +16,7 @@
   <div class="login-card">
     <div class="ticket-notch"></div>
     <div class="brand">
-      <span class="brand-mark">受</span>
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
       <div>
         <div class="brand-name">L-NYUGTA nézegető</div>
         <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
@@ -37,6 +38,29 @@
     </div>
   </div>
   <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul. Elég az adószám első 8 számjegye.</div>
+  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
+</section>
+
+<!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
+<section id="admin-login-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA admin</div>
+        <div class="brand-sub">összes cég áttekintése</div>
+      </div>
+    </div>
+    <p class="login-lede">Ez a bejelentkezés minden regisztrált cég szinkron-naplóját és NTAK-állapotát megmutatja — csak arra használd, aki erre jogosult.</p>
+    <form id="admin-login-form" autocomplete="off">
+      <label for="admin-password-input">Admin jelszó</label>
+      <input id="admin-password-input" name="password" type="password" placeholder="••••••••" required>
+      <button type="submit" id="admin-login-btn">Belépés</button>
+      <div class="login-error" id="admin-login-error" hidden></div>
+    </form>
+  </div>
+  <div class="admin-entry"><a href="#" id="show-company-login">‹ Vissza a céges bejelentkezéshez</a></div>
 </section>
 
 <!-- ===================== DASHBOARD ===================== -->
@@ -50,7 +74,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-topline">
       <div class="brand brand--sidebar">
-        <span class="brand-mark">受</span>
+        <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
         <div>
           <div class="brand-name">L-NYUGTA</div>
           <div class="brand-sub" id="company-name">—</div>
@@ -71,6 +95,7 @@
         <span class="dot" id="sync-dot"></span>
         <span id="sync-pill-text">szinkron ellenőrzése…</span>
       </div>
+      <button class="btn-ghost" id="back-to-admin-btn" hidden>‹ Admin panel</button>
       <button class="btn-ghost" id="logout-btn">Kilépés</button>
     </div>
   </aside>
@@ -287,6 +312,46 @@
       </div>
     </div>
 
+  </main>
+</div>
+
+<!-- ===================== ADMIN PANEL ===================== -->
+<div id="admin-screen" class="admin-shell" hidden>
+  <header class="admin-topbar">
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA admin</div>
+        <div class="brand-sub">összes cég áttekintése</div>
+      </div>
+    </div>
+    <button class="btn-ghost" id="admin-logout-btn">Kilépés</button>
+  </header>
+
+  <main class="admin-main">
+    <div class="card">
+      <div class="card-title">Cégek (<span id="admin-company-count">0</span>)</div>
+      <table class="data-table" id="admin-companies-table">
+        <thead><tr><th>Cégnév</th><th>Adószám</th><th>Város</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">NTAK állapot — minden cég, akinél van adat</div>
+      <table class="data-table" id="admin-ntak-table">
+        <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Szinkron-napló — legutóbbi feltöltési próbálkozások</div>
+      <table class="data-table" id="admin-synclog-table">
+        <thead><tr><th>Időpont</th><th>Cég</th><th>Állapot</th><th>Részlet</th><th class="td-right">Méret</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </main>
 </div>
 
