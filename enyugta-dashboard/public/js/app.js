@@ -272,13 +272,17 @@ async function loadAdminOverview() {
    ============================================================ */
 const ACTIVITY_TYPE_LABELS = {
   company_login: 'Céges belépés',
+  company_logout: 'Céges kilépés',
   admin_login: 'Admin belépés',
+  admin_logout: 'Admin kilépés',
   admin_impersonate: 'Admin: cég megnyitása',
   admin_regen_code: 'Kód újragenerálva',
   admin_send_code: 'Kód kiküldve emailben',
   sync_upload: 'Szinkron feltöltés',
   stock_receipt_add: 'Bevételezés rögzítve',
   stock_receipt_delete: 'Bevételezés törölve',
+  stock_threshold_set: 'Riasztási küszöb beállítva',
+  stock_threshold_delete: 'Riasztási küszöb törölve',
 };
 const activityFilter = { company: '', type: '' };
 

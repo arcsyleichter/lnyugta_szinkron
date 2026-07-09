@@ -450,6 +450,8 @@ route('POST', '/api/auth/login', async (req, res) => {
 });
 
 route('POST', '/api/auth/logout', async (req, res) => {
+  const session = requireAuth(req);
+  if (session) logActivity({ type: 'company_logout', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Kijelentkezés.' });
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enysession=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
 });
 
@@ -774,6 +776,7 @@ route('POST', '/api/stock/threshold', async (req, res) => {
     `INSERT INTO keszlet_riasztas (company_key, scope, nev, kuszob) VALUES (?, ?, ?, ?)
      ON CONFLICT(company_key, scope, nev) DO UPDATE SET kuszob = excluded.kuszob`
   ).run(session.companyKey, scope, nev, kuszob);
+  logActivity({ type: 'stock_threshold_set', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${scope === 'csoport' ? 'Csoport' : 'Cikk'}: ${nev} → ${kuszob}` });
   sendJson(res, 200, { ok: true });
 });
 
@@ -784,6 +787,7 @@ route('DELETE', '/api/stock/threshold', async (req, res, query) => {
   const nev = String(query.nev || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
   stockDb.prepare(`DELETE FROM keszlet_riasztas WHERE company_key = ? AND scope = ? AND nev = ?`).run(session.companyKey, scope, nev);
+  logActivity({ type: 'stock_threshold_delete', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${scope === 'csoport' ? 'Csoport' : 'Cikk'}: ${nev}` });
   sendJson(res, 200, { ok: true });
 });
 
@@ -977,6 +981,8 @@ route('POST', '/api/admin/login', async (req, res) => {
 });
 
 route('POST', '/api/admin/logout', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (admin) logActivity({ type: 'admin_logout', ok: true, companyKey: null, nev: null, detail: 'Admin kijelentkezett.' });
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
 });
 
