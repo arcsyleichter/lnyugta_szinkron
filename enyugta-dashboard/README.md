@@ -369,10 +369,14 @@ bejelentkezéssel érhető el egy admin nézet, ami **minden** regisztrált cég
   hibás / befogadva, plusz a legutóbbi probléma időpontja és típusa. (Ez a
   nézet szándékosan cégek közötti — az admin mindenkinek a NTAK-státuszába
   belelát, hogy gyorsan ki lehessen szűrni, kinél van gond a küldéssel.)
-- **Szinkron-napló** — minden feltöltési *próbálkozás* (nem csak a sikeresek)
-  időrendben: sikeres/hibás jelzéssel, a hiba szövegével (pl. rossz API-kulcs,
-  hibás adószám, sérült fájl), mérettel. Ez teszi visszakereshetővé, hol volt
-  feltöltési hiba.
+- **Tevékenység-napló** — minden esemény cégenként és típusonként
+  csoportosítva, nem ömlesztve: céges bejelentkezés, admin bejelentkezés,
+  admin műveletek (cég megnyitása, kód újragenerálás/kiküldés), szinkron
+  feltöltés, bevételezés rögzítése/törlése — sikeres *és* sikertelen
+  próbálkozás is (pl. rossz jelszó/kód, hibás fájl). Felül egy cégenkénti
+  összesítő táblázat mutatja, hány esemény volt kinél és mikor történt az
+  utolsó; egy cégre kattintva rögtön rá is szűr. Alul cég és típus szerint
+  tovább szűrhető, részletes, időrendi lista.
 
 ### Hozzáférési kód kiküldése emailben (Brevo)
 

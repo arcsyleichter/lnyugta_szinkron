@@ -195,37 +195,43 @@ function writeSyncMeta(meta) {
 }
 
 // ---------------------------------------------------------------------------
-// Szinkron-napló — MINDEN feltöltési próbálkozást rögzít, sikereset és
-// sikertelent is (rossz kulcs, ismeretlen/hibás adószám, hibás fájl stb.),
-// hogy az admin felületen visszakereshető legyen, hol volt gond.
-// JSONL formátum (soronként egy JSON objektum), data/sync-log.jsonl.
-// Egyszerű rotáció: ha 5000 sor fölé nő, az utolsó 2000-re vágjuk vissza.
+// Tevékenység-napló — MINDEN releváns esemény ide kerül, cégenként és
+// típusonként megkülönböztetve, sikeres és sikertelen próbálkozás is:
+// céges bejelentkezés, admin bejelentkezés, admin műveletek (cég megnyitása,
+// kód újragenerálás/kiküldés), szinkron feltöltés, bevételezés rögzítése/
+// törlése. JSONL formátum (soronként egy JSON objektum), data/activity-log.jsonl.
+// Egyszerű rotáció: ha 8000 sor fölé nő, az utolsó 3000-re vágjuk vissza.
 // ---------------------------------------------------------------------------
-const SYNC_LOG_PATH = path.join(DATA_DIR, 'sync-log.jsonl');
-const SYNC_LOG_MAX_LINES = 5000;
-const SYNC_LOG_TRIM_TO = 2000;
+const ACTIVITY_LOG_PATH = path.join(DATA_DIR, 'activity-log.jsonl');
+const ACTIVITY_LOG_MAX_LINES = 8000;
+const ACTIVITY_LOG_TRIM_TO = 3000;
 
-function logSync(entry) {
+// Típuscímkék — csak dokumentációs célból itt, a tényleges magyar feliratozás
+// a felületen (app.js ACTIVITY_TYPE_LABELS) történik.
+// 'company_login' | 'admin_login' | 'admin_impersonate' | 'admin_regen_code' |
+// 'admin_send_code' | 'sync_upload' | 'stock_receipt_add' | 'stock_receipt_delete'
+
+function logActivity(entry) {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
   try {
-    fs.appendFileSync(SYNC_LOG_PATH, line + '\n');
-    maybeTrimSyncLog();
+    fs.appendFileSync(ACTIVITY_LOG_PATH, line + '\n');
+    maybeTrimActivityLog();
   } catch (e) {
-    console.error('[hiba] szinkron-napló írása sikertelen:', e.message);
+    console.error('[hiba] tevékenység-napló írása sikertelen:', e.message);
   }
 }
-function maybeTrimSyncLog() {
+function maybeTrimActivityLog() {
   let stat;
-  try { stat = fs.statSync(SYNC_LOG_PATH); } catch (_) { return; }
+  try { stat = fs.statSync(ACTIVITY_LOG_PATH); } catch (_) { return; }
   if (stat.size < 512 * 1024) return; // ne olvassuk feleslegesen minden íráskor, csak ha már számottevő a fájl
-  const lines = fs.readFileSync(SYNC_LOG_PATH, 'utf8').split('\n').filter(Boolean);
-  if (lines.length > SYNC_LOG_MAX_LINES) {
-    fs.writeFileSync(SYNC_LOG_PATH, lines.slice(-SYNC_LOG_TRIM_TO).join('\n') + '\n');
+  const lines = fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8').split('\n').filter(Boolean);
+  if (lines.length > ACTIVITY_LOG_MAX_LINES) {
+    fs.writeFileSync(ACTIVITY_LOG_PATH, lines.slice(-ACTIVITY_LOG_TRIM_TO).join('\n') + '\n');
   }
 }
-function readSyncLog(limit) {
+function readActivityLog(limit) {
   let lines;
-  try { lines = fs.readFileSync(SYNC_LOG_PATH, 'utf8').split('\n').filter(Boolean); }
+  try { lines = fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8').split('\n').filter(Boolean); }
   catch (_) { return []; }
   return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
 }
@@ -420,20 +426,26 @@ const routes = [];
 function route(method, pattern, handler) { routes.push({ method, pattern, handler }); }
 
 route('POST', '/api/auth/login', async (req, res) => {
+  const ip = (req.socket && req.socket.remoteAddress) || null;
   const { adoszam, code } = await readJsonBody(req);
   const wanted = normalizeAdoszam(adoszam);
   if (wanted.length < 8) return sendJson(res, 400, { error: 'Adj meg legalább 8 számjegyet az adószámból.' });
   const key = wanted.slice(0, 8);
   const entry = companyIndex.get(key);
-  if (!entry) return sendJson(res, 401, { error: 'Ismeretlen adószám. Ellenőrizd, és próbáld újra.' });
+  if (!entry) {
+    logActivity({ type: 'company_login', ok: false, companyKey: key, nev: null, detail: 'Ismeretlen adószám.', ip });
+    return sendJson(res, 401, { error: 'Ismeretlen adószám. Ellenőrizd, és próbáld újra.' });
+  }
   const codes = readAccessCodes();
   const expected = codes[key]?.code;
   if (!expected || !code || String(code).trim() !== expected) {
+    logActivity({ type: 'company_login', ok: false, companyKey: key, nev: entry.nev, detail: 'Hibás hozzáférési kód.', ip });
     return sendJson(res, 401, { error: 'Hibás hozzáférési kód. Kérd el a céged adminisztrátorától.' });
   }
   const payload = { companyKey: key, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  logActivity({ type: 'company_login', ok: true, companyKey: key, nev: entry.nev, detail: 'Sikeres bejelentkezés.', ip });
   sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
 });
 
@@ -732,6 +744,7 @@ route('POST', '/api/stock/receipt', async (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(session.companyKey, datum, cikkNev, me, mennyiseg, beszerzesiAr, szallito, megjegyzes, new Date().toISOString());
 
+  logActivity({ type: 'stock_receipt_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${cikkNev}: ${mennyiseg} ${me || ''}`.trim() });
   sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
 });
 
@@ -740,8 +753,10 @@ route('DELETE', '/api/stock/receipt', async (req, res, query) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const id = parseInt(query.id, 10);
   if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
+  const existing = stockDb.prepare(`SELECT cikk_nev, mennyiseg FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
   const result = stockDb.prepare(`DELETE FROM bevetelezesek WHERE id = ? AND company_key = ?`).run(id, session.companyKey);
   if (result.changes === 0) return sendJson(res, 404, { error: 'Nem található (vagy nem a te cégedhez tartozik).' });
+  logActivity({ type: 'stock_receipt_delete', ok: true, companyKey: session.companyKey, nev: session.nev, detail: existing ? `${existing.cikk_nev}: ${existing.mennyiseg}` : `#${id}` });
   sendJson(res, 200, { ok: true });
 });
 
@@ -841,25 +856,25 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   const ip = (req.socket && req.socket.remoteAddress) || null;
   const apiKey = req.headers['x-api-key'];
   if (!apiKey || apiKey !== SECRETS.syncApiKey) {
-    logSync({ ok: false, companyKey: null, nev: null, error: 'Érvénytelen vagy hiányzó x-api-key.', ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Érvénytelen vagy hiányzó x-api-key.', ip });
     return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
   }
 
   const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
   const key = companyKeyFromAdoszam(adoszamRaw);
   if (key.length < 8) {
-    logSync({ ok: false, companyKey: null, nev: null, error: 'Hiányzó vagy érvénytelen x-adoszam.', ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Hiányzó vagy érvénytelen x-adoszam.', ip });
     return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter — melyik céghez tartozik a feltöltés?' });
   }
 
   let buf;
   try { buf = await readBody(req, 100 * 1024 * 1024); }
   catch (_) {
-    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: 'A feltöltött fájl túl nagy.', ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: 'A feltöltött fájl túl nagy.', ip });
     return sendJson(res, 413, { error: 'A feltöltött fájl túl nagy.' });
   }
   if (buf.length < 100 || buf.slice(0, 16).toString('utf8').indexOf('SQLite format 3') !== 0) {
-    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: 'A törzs nem érvényes SQLite fájl.', bytes: buf.length, ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: 'A törzs nem érvényes SQLite fájl.', ip });
     return sendJson(res, 400, { error: 'A törzsnek egy érvényes SQLite (.db) fájlnak kell lennie.' });
   }
 
@@ -870,7 +885,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
     evictConnection(key); // zárjuk a gyorsítótárban lévő, régi fájlra mutató kapcsolatot, mielőtt felülírjuk
     fs.renameSync(tmpPath, dbFile);
   } catch (e) {
-    logSync({ ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, error: `Fájlírási hiba: ${e.message}`, bytes: buf.length, ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: `Fájlírási hiba: ${e.message}`, ip });
     return sendJson(res, 500, { error: 'Nem sikerült elmenteni a feltöltött fájlt a szerveren.' });
   }
 
@@ -881,7 +896,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   if (isNew) ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
 
   if (!identity) {
-    logSync({ ok: false, companyKey: key, nev: null, error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', bytes: buf.length, ip });
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: null, detail: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', ip });
     return sendJson(res, 400, { error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat.' });
   }
 
@@ -889,7 +904,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity.nev };
   writeSyncMeta(meta);
 
-  logSync({ ok: true, companyKey: key, nev: identity.nev, bytes: buf.length, newCompany: isNew, ip });
+  logActivity({ type: 'sync_upload', ok: true, companyKey: key, nev: identity.nev, detail: `${Math.round(buf.length / 1024)} KB${isNew ? ' — új cég regisztrálva' : ''}`, ip });
   console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ CÉG regisztrálva' : ''}`);
   sendJson(res, 200, { ok: true, companyKey: key, newCompany: isNew, ...meta[key] });
 });
@@ -948,13 +963,16 @@ route('GET', '/api/sync/companies', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 route('POST', '/api/admin/login', async (req, res) => {
+  const ip = (req.socket && req.socket.remoteAddress) || null;
   const { password } = await readJsonBody(req);
   if (!password || password !== SECRETS.adminPassword) {
+    logActivity({ type: 'admin_login', ok: false, companyKey: null, nev: null, detail: 'Hibás admin jelszó.', ip });
     return sendJson(res, 401, { error: 'Hibás admin jelszó.' });
   }
   const payload = { isAdmin: true, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enyadmin=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  logActivity({ type: 'admin_login', ok: true, companyKey: null, nev: null, detail: 'Sikeres admin bejelentkezés.', ip });
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': cookie });
 });
 
@@ -1002,9 +1020,41 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
       };
     })
     .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
-  const syncLog = readSyncLog(Math.min(parseInt(query.logLimit || '200', 10) || 200, 1000));
   const ntak = computeNtakOverview();
-  sendJson(res, 200, { companies, syncLog, ntak, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+  sendJson(res, 200, { companies, ntak, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+});
+
+// Tevékenység-napló — minden esemény cégenként és típusonként megkülönböztetve.
+// Szűrhető companyKey és type szerint (mindkettő opcionális); emellett egy
+// cégenkénti+típusonkénti összesítő mátrixot is visszaad a csoportosított
+// megjelenítéshez.
+route('GET', '/api/admin/activity', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '1000', 10) || 1000, 5000);
+  let entries = readActivityLog(limit);
+
+  const types = [...new Set(entries.map((e) => e.type))].sort();
+  const companyNames = new Map();
+  for (const e of entries) if (e.companyKey && e.nev && !companyNames.has(e.companyKey)) companyNames.set(e.companyKey, e.nev);
+  const companies = [...companyNames.entries()].map(([key, nev]) => ({ key, nev })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  // cégenkénti + típusonkénti összesítő mátrix a csoportosított nézethez
+  const matrix = new Map(); // companyKey -> { nev, counts: {type: n}, total, lastTs }
+  for (const e of entries) {
+    const mk = e.companyKey || '__admin__';
+    if (!matrix.has(mk)) matrix.set(mk, { key: mk, nev: e.companyKey ? (e.nev || e.companyKey) : 'Admin (nem cég-specifikus)', counts: {}, total: 0, lastTs: e.ts });
+    const row = matrix.get(mk);
+    row.counts[e.type] = (row.counts[e.type] || 0) + 1;
+    row.total += 1;
+    if (e.ts > row.lastTs) row.lastTs = e.ts;
+  }
+  const summary = [...matrix.values()].sort((a, b) => b.total - a.total);
+
+  if (query.company) entries = entries.filter((e) => (e.companyKey || '__admin__') === query.company);
+  if (query.type) entries = entries.filter((e) => e.type === query.type);
+
+  sendJson(res, 200, { entries, types, companies, summary });
 });
 
 // Admin újrageneráltatja egy cég hozzáférési kódját (pl. ha az kiszivárgott).
@@ -1013,10 +1063,12 @@ route('POST', '/api/admin/regenerate-code', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const { companyKey } = await readJsonBody(req);
-  if (!companyIndex.has(companyKey)) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const entry = companyIndex.get(companyKey);
+  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
   const codes = readAccessCodes();
   codes[companyKey] = { ...(codes[companyKey] || {}), code: generateAccessCode() };
   writeAccessCodes(codes);
+  logActivity({ type: 'admin_regen_code', ok: true, companyKey, nev: entry.nev, detail: 'Hozzáférési kód újragenerálva.' });
   sendJson(res, 200, { ok: true, companyKey, code: codes[companyKey].code });
 });
 
@@ -1047,8 +1099,10 @@ route('POST', '/api/admin/send-code', async (req, res) => {
   try {
     await sendBrevoEmail({ toEmail: cleanEmail, toName: entry.nev, subject: 'L-NYUGTA — hozzáférési kódod', html });
   } catch (e) {
+    logActivity({ type: 'admin_send_code', ok: false, companyKey, nev: entry.nev, detail: `Sikertelen küldés (${cleanEmail}): ${e.message}` });
     return sendJson(res, 502, { error: `Nem sikerült elküldeni: ${e.message}` });
   }
+  logActivity({ type: 'admin_send_code', ok: true, companyKey, nev: entry.nev, detail: `Kód kiküldve ide: ${cleanEmail}` });
 
   // elmentjük az email címet, hogy legközelebb ne kelljen újra beírni
   codes[companyKey] = { ...(codes[companyKey] || {}), email: cleanEmail };
@@ -1069,6 +1123,7 @@ route('POST', '/api/admin/impersonate', async (req, res) => {
   const payload = { companyKey, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a cég nézetét.' });
   sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
 });
 

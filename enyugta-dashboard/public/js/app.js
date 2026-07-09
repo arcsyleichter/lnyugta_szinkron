@@ -122,6 +122,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 document.getElementById('back-to-admin-btn').addEventListener('click', () => {
   showAdmin();
   loadAdminOverview();
+  loadAdminActivity();
 });
 
 /* ============================================================
@@ -141,6 +142,7 @@ document.getElementById('admin-login-form').addEventListener('submit', async (e)
     await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ password }) });
     showAdmin();
     loadAdminOverview();
+    loadAdminActivity();
   } catch (e2) {
     err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Hibás jelszó.' : e2.message;
     err.hidden = false;
@@ -160,7 +162,6 @@ async function loadAdminOverview() {
   const data = await api('/api/admin/overview');
 
   document.getElementById('admin-kpi-companies').textContent = data.companies.length;
-  document.getElementById('admin-kpi-failed').textContent = data.syncLog.filter((l) => !l.ok).length;
   document.getElementById('admin-kpi-ntak-problems').textContent = data.ntak.reduce((s, n) => s + n.warn + n.error, 0);
 
   document.getElementById('admin-email-warning').hidden = !!data.emailReady;
@@ -264,26 +265,103 @@ async function loadAdminOverview() {
       ntakTbody.appendChild(tr);
     });
   }
+}
 
-  const logTbody = document.querySelector('#admin-synclog-table tbody');
-  logTbody.innerHTML = '';
-  if (!data.syncLog.length) {
-    logTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Még nem történt szinkron-próbálkozás.</td></tr>';
+/* ============================================================
+   Tevékenység-napló (admin)
+   ============================================================ */
+const ACTIVITY_TYPE_LABELS = {
+  company_login: 'Céges belépés',
+  admin_login: 'Admin belépés',
+  admin_impersonate: 'Admin: cég megnyitása',
+  admin_regen_code: 'Kód újragenerálva',
+  admin_send_code: 'Kód kiküldve emailben',
+  sync_upload: 'Szinkron feltöltés',
+  stock_receipt_add: 'Bevételezés rögzítve',
+  stock_receipt_delete: 'Bevételezés törölve',
+};
+const activityFilter = { company: '', type: '' };
+
+async function loadAdminActivity() {
+  const data = await api('/api/admin/activity');
+  document.getElementById('admin-kpi-failed').textContent = data.entries.filter((e) => e.type === 'sync_upload' && !e.ok).length;
+
+  // --- cégenkénti összesítő mátrix ---
+  const sumTbody = document.querySelector('#activity-summary-table tbody');
+  sumTbody.innerHTML = '';
+  if (!data.summary.length) {
+    sumTbody.innerHTML = '<tr><td colspan="3" class="empty-state">Még nincs naplózott esemény.</td></tr>';
   } else {
-    data.syncLog.forEach((l) => {
+    data.summary.forEach((row) => {
       const tr = document.createElement('tr');
-      const statusBadge = l.ok ? '<span class="ntak-badge ok">Sikeres</span>' : '<span class="ntak-badge error">Hiba</span>';
-      const detail = l.ok ? (l.newCompany ? 'Új cég regisztrálva' : '—') : (l.error || 'Ismeretlen hiba');
+      tr.className = 'clickable';
+      const typeBreakdown = Object.entries(row.counts)
+        .map(([t, c]) => `${ACTIVITY_TYPE_LABELS[t] || t}: ${c}`)
+        .join(' · ');
       tr.innerHTML = `
-        <td>${fmtDateTime(l.ts)}</td>
-        <td>${escapeHtml(l.nev || l.companyKey || '—')}</td>
-        <td>${statusBadge}</td>
-        <td>${escapeHtml(detail)}</td>
-        <td class="num">${l.bytes ? Math.round(l.bytes / 1024) + ' KB' : '—'}</td>`;
-      logTbody.appendChild(tr);
+        <td>${escapeHtml(row.nev)}</td>
+        <td class="num">${row.total}</td>
+        <td class="activity-summary-detail" title="${escapeHtml(typeBreakdown)}">${fmtDateTime(row.lastTs)} — <span class="muted">${escapeHtml(typeBreakdown)}</span></td>`;
+      tr.addEventListener('click', () => {
+        activityFilter.company = row.key;
+        document.getElementById('activity-company-select').value = row.key;
+        renderActivityLog(data);
+      });
+      sumTbody.appendChild(tr);
     });
   }
+
+  // --- szűrők feltöltése ---
+  const companySelect = document.getElementById('activity-company-select');
+  const currentVal = companySelect.value;
+  companySelect.innerHTML = '<option value="">Összes cég</option>' +
+    data.companies.map((c) => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.nev)}</option>`).join('') +
+    '<option value="__admin__">Admin (nem cég-specifikus)</option>';
+  companySelect.value = currentVal;
+
+  const typeChips = document.getElementById('activity-type-chips');
+  typeChips.innerHTML = `<button class="chip activity-type-chip ${!activityFilter.type ? 'is-active' : ''}" data-type="">Összes típus</button>` +
+    data.types.map((t) => `<button class="chip activity-type-chip ${activityFilter.type === t ? 'is-active' : ''}" data-type="${t}">${ACTIVITY_TYPE_LABELS[t] || t}</button>`).join('');
+  typeChips.querySelectorAll('.activity-type-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activityFilter.type = btn.dataset.type;
+      renderActivityLog(data);
+    });
+  });
+
+  renderActivityLog(data);
 }
+
+function renderActivityLog(data) {
+  document.querySelectorAll('.activity-type-chip').forEach((c) => c.classList.toggle('is-active', c.dataset.type === activityFilter.type));
+
+  let entries = data.entries;
+  if (activityFilter.company) entries = entries.filter((e) => (e.companyKey || '__admin__') === activityFilter.company);
+  if (activityFilter.type) entries = entries.filter((e) => e.type === activityFilter.type);
+
+  const tbody = document.querySelector('#activity-log-table tbody');
+  tbody.innerHTML = '';
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs a szűrésnek megfelelő esemény.</td></tr>';
+    return;
+  }
+  entries.slice(0, 300).forEach((e) => {
+    const tr = document.createElement('tr');
+    const statusBadge = e.ok ? '<span class="ntak-badge ok">Sikeres</span>' : '<span class="ntak-badge error">Hiba</span>';
+    tr.innerHTML = `
+      <td>${fmtDateTime(e.ts)}</td>
+      <td>${escapeHtml(e.nev || (e.companyKey ? e.companyKey : 'Admin'))}</td>
+      <td><span class="activity-type-badge">${escapeHtml(ACTIVITY_TYPE_LABELS[e.type] || e.type)}</span></td>
+      <td>${statusBadge}</td>
+      <td>${escapeHtml(e.detail || '—')}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById('activity-company-select').addEventListener('change', (e) => {
+  activityFilter.company = e.target.value;
+  loadAdminActivity();
+});
 
 /* IDEIGLENES, TESZT CÉLÚ — a bejelentkező oldalon megmutatja, milyen
    adószámokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,
