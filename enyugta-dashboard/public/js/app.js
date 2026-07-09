@@ -123,16 +123,20 @@ showLogin();
 function closeMobileSidebar() {
   document.getElementById('sidebar').classList.remove('is-open');
   document.getElementById('sidebar-overlay').hidden = true;
+  document.getElementById('hamburger-btn').classList.remove('is-hidden');
 }
 function openMobileSidebar() {
   document.getElementById('sidebar').classList.add('is-open');
   document.getElementById('sidebar-overlay').hidden = false;
+  // a hamburgert elrejtjük nyitott állapotban, hogy ne fedje a sidebar saját logóját
+  document.getElementById('hamburger-btn').classList.add('is-hidden');
 }
 document.getElementById('hamburger-btn').addEventListener('click', () => {
   const sidebar = document.getElementById('sidebar');
   if (sidebar.classList.contains('is-open')) closeMobileSidebar(); else openMobileSidebar();
 });
 document.getElementById('sidebar-overlay').addEventListener('click', closeMobileSidebar);
+document.getElementById('sidebar-close-btn').addEventListener('click', closeMobileSidebar);
 
 /* ============================================================
    Navigáció / nézetváltás

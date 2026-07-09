@@ -111,7 +111,13 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   background:var(--ink); color:var(--paper); padding:22px 16px; display:flex; flex-direction:column;
   position:sticky; top:0; height:100vh;
 }
-.brand--sidebar{ margin-bottom:26px; padding:0 4px; }
+.sidebar-topline{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:26px; }
+.sidebar-topline .brand--sidebar{ margin-bottom:0; padding:0 4px; min-width:0; }
+.sidebar-close-btn{
+  display:none; flex:none; width:30px; height:30px; border-radius:8px; border:1px solid rgba(250,249,245,0.25);
+  background:rgba(250,249,245,0.08); color:#fff; font-size:14px; line-height:1; align-items:center; justify-content:center;
+}
+.sidebar-close-btn:hover{ background:rgba(250,249,245,0.16); }
 .brand--sidebar .brand-sub{ color:rgba(250,249,245,0.55); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:150px; }
 .nav{ display:flex; flex-direction:column; gap:2px; flex:1; }
 .nav-item{
@@ -182,11 +188,11 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .hamburger-btn{
   display:none; position:fixed; top:14px; left:14px; z-index:120;
   width:40px; height:40px; border-radius:9px; border:1px solid var(--line);
-  background:#fff; box-shadow:var(--shadow); flex-direction:column; align-items:center; justify-content:center; gap:4px;
+  background:#fff; box-shadow:0 2px 6px rgba(30,50,71,0.18); flex-direction:column; align-items:center; justify-content:center; gap:4px;
 }
 .hamburger-btn span{ display:block; width:18px; height:2px; background:var(--ink); border-radius:2px; }
 .sidebar-overlay{
-  display:none; position:fixed; inset:0; background:rgba(30,50,71,0.45); z-index:90;
+  display:none; position:fixed; inset:0; background:rgba(20,34,49,0.72); z-index:90;
 }
 .sidebar-overlay:not([hidden]){ display:block; }
 
@@ -194,6 +200,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .grid-2{ grid-template-columns:1fr; }
   .app-shell{ grid-template-columns:1fr; }
   .hamburger-btn{ display:flex; }
+  .hamburger-btn.is-hidden{ display:none; }
+  .sidebar-close-btn{ display:flex; }
   .sidebar{
     position:fixed; top:0; left:0; height:100vh; width:250px; z-index:100;
     transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 0 rgba(0,0,0,0);
