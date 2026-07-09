@@ -97,10 +97,12 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   btn.disabled = true; btn.textContent = 'Belépés…';
   try {
     const adoszam = document.getElementById('adoszam-input').value;
-    const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam }) });
+    const code = document.getElementById('code-input').value;
+    const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam, code }) });
     document.getElementById('company-name').textContent = data.company.nev;
     loggedIn = true;
     state.viaAdmin = false;
+    stockProductsLoaded = false;
     showApp();
     boot();
   } catch (e2) {
@@ -157,6 +159,12 @@ const NTAK_ADMIN_STATUS_LABELS = { TELJESEN_HIBAS: 'Teljesen hibás', RESZBEN_SI
 async function loadAdminOverview() {
   const data = await api('/api/admin/overview');
 
+  document.getElementById('admin-kpi-companies').textContent = data.companies.length;
+  document.getElementById('admin-kpi-failed').textContent = data.syncLog.filter((l) => !l.ok).length;
+  document.getElementById('admin-kpi-ntak-problems').textContent = data.ntak.reduce((s, n) => s + n.warn + n.error, 0);
+
+  document.getElementById('admin-email-warning').hidden = !!data.emailReady;
+
   document.getElementById('admin-company-count').textContent = data.companies.length;
   const compTbody = document.querySelector('#admin-companies-table tbody');
   compTbody.innerHTML = '';
@@ -166,11 +174,57 @@ async function loadAdminOverview() {
       <td>${escapeHtml(c.nev)}</td>
       <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
       <td>${escapeHtml(c.varos || '—')}</td>
+      <td>
+        <span class="admin-code" data-key="${escapeHtml(c.key)}">${escapeHtml(c.code || '—')}</span>
+        <button class="btn-regen-code" data-key="${escapeHtml(c.key)}" title="Új kód generálása">⟳</button>
+      </td>
+      <td>
+        <div class="admin-email-cell">
+          <input type="email" class="admin-email-input" data-key="${escapeHtml(c.key)}" value="${escapeHtml(c.email || '')}" placeholder="cég@email.hu">
+          <button class="btn-send-code" data-key="${escapeHtml(c.key)}" ${data.emailReady ? '' : 'disabled'}>Küldés</button>
+        </div>
+        <div class="admin-email-status" id="admin-email-status-${escapeHtml(c.key)}"></div>
+      </td>
       <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
       <td>${escapeHtml(c.source || '—')}</td>
       <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
       <td><button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button></td>`;
     compTbody.appendChild(tr);
+  });
+  compTbody.querySelectorAll('.btn-send-code').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const key = btn.dataset.key;
+      const emailInput = compTbody.querySelector(`.admin-email-input[data-key="${key}"]`);
+      const status = document.getElementById(`admin-email-status-${key}`);
+      const email = emailInput.value.trim();
+      if (!email || !email.includes('@')) { status.textContent = 'Adj meg érvényes email címet.'; status.className = 'admin-email-status error'; return; }
+      btn.disabled = true; btn.textContent = 'Küldés…';
+      status.textContent = ''; status.className = 'admin-email-status';
+      try {
+        await api('/api/admin/send-code', { method: 'POST', body: JSON.stringify({ companyKey: key, email }) });
+        status.textContent = '✓ Elküldve';
+        status.className = 'admin-email-status ok';
+      } catch (e) {
+        status.textContent = e.message;
+        status.className = 'admin-email-status error';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Küldés';
+      }
+    });
+  });
+  compTbody.querySelectorAll('.btn-regen-code').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Biztosan új kódot generálsz? A régi kód azonnal érvénytelenné válik.')) return;
+      btn.disabled = true;
+      try {
+        const res = await api('/api/admin/regenerate-code', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
+        document.querySelector(`.admin-code[data-key="${res.companyKey}"]`).textContent = res.code;
+      } catch (e) {
+        alert('Nem sikerült új kódot generálni: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
   compTbody.querySelectorAll('.btn-open-company').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -180,6 +234,7 @@ async function loadAdminOverview() {
         document.getElementById('company-name').textContent = data2.company.nev;
         loggedIn = true;
         state.viaAdmin = true;
+        stockProductsLoaded = false;
         showApp();
         boot();
       } catch (e) {
@@ -246,10 +301,11 @@ async function renderLoginHint() {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'login-hint-item';
-      btn.innerHTML = `<span class="login-hint-nev">${c.nev}</span><span class="login-hint-ado">${c.adoszam}</span>`;
+      btn.innerHTML = `<span class="login-hint-nev">${c.nev}</span><span class="login-hint-ado">${c.adoszam} · kód: ${c.code}</span>`;
       btn.addEventListener('click', () => {
         document.getElementById('adoszam-input').value = c.adoszam;
-        document.getElementById('adoszam-input').focus();
+        document.getElementById('code-input').value = c.code;
+        document.getElementById('code-input').focus();
       });
       li.appendChild(btn);
       list.appendChild(li);
@@ -300,6 +356,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'products') loadProductsView(true);
     if (view === 'receipts') loadReceiptsView(true);
     if (view === 'ntak') loadNtakView();
+    if (view === 'stock') loadStockView();
     if (view === 'sync') loadSyncView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
   });
@@ -354,6 +411,7 @@ document.getElementById('refresh-btn').addEventListener('click', () => refreshAl
 function boot() {
   document.getElementById('from-input').value = state.range.from;
   document.getElementById('to-input').value = state.range.to;
+  document.getElementById('stock-datum-input').value = todayIso();
   updateRangeLabel();
   refreshAll();
   refreshSyncPill();
@@ -371,6 +429,7 @@ async function refreshAll(spin) {
     if (activeView === 'products') await loadProductsView(false);
     if (activeView === 'receipts') await loadReceiptsView(false);
     if (activeView === 'ntak') await loadNtakView();
+    if (activeView === 'stock') await loadStockView(false);
   } finally {
     if (spin) setTimeout(() => icon.classList.remove('spin'), 400);
   }
@@ -727,6 +786,99 @@ async function loadNtakView() {
     });
   }
 }
+
+/* ============================================================
+   Készlet nézet
+   ============================================================ */
+let stockProductsLoaded = false;
+
+async function loadStockProductList() {
+  if (stockProductsLoaded) return;
+  try {
+    const data = await api('/api/products/master');
+    const list = document.getElementById('stock-cikk-list');
+    list.innerHTML = data.items.map((p) => `<option value="${escapeHtml(p.nev)}">`).join('');
+    stockProductsLoaded = true;
+  } catch (_) { /* nem kritikus, a mező enélkül is szabadon kitölthető */ }
+}
+
+async function loadStockView(fetchProducts = true) {
+  if (fetchProducts) loadStockProductList();
+
+  const stock = await api('/api/stock');
+  const tbody = document.querySelector('#stock-table tbody');
+  tbody.innerHTML = '';
+  if (!stock.items.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Még nincs egyetlen bevételezés sem — rögzíts egyet fent.</td></tr>';
+  } else {
+    stock.items.forEach((it) => {
+      const tr = document.createElement('tr');
+      const keszletCls = it.keszlet < 0 ? 'stock-negative' : '';
+      tr.innerHTML = `
+        <td>${escapeHtml(it.nev)}</td>
+        <td class="num">${it.bevetelezve} ${escapeHtml(it.me || '')}</td>
+        <td class="num">${it.eladva} ${escapeHtml(it.me || '')}</td>
+        <td class="num ${keszletCls}">${it.keszlet} ${escapeHtml(it.me || '')}</td>
+        <td>${it.utolsoBevetelezes ? fmtDate(it.utolsoBevetelezes) : '—'}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  const receipts = await api('/api/stock/receipts?limit=50');
+  const logTbody = document.querySelector('#stock-log-table tbody');
+  logTbody.innerHTML = '';
+  if (!receipts.items.length) {
+    logTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Még nincs rögzített bevételezés.</td></tr>';
+  } else {
+    receipts.items.forEach((r) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmtDate(r.datum)}</td>
+        <td>${escapeHtml(r.cikkNev)}</td>
+        <td class="num">${r.mennyiseg} ${escapeHtml(r.me || '')}</td>
+        <td>${escapeHtml(r.szallito || '—')}</td>
+        <td>${escapeHtml(r.megjegyzes || '—')}</td>
+        <td><button class="btn-delete-receipt" data-id="${r.id}" title="Törlés">✕</button></td>`;
+      logTbody.appendChild(tr);
+    });
+    logTbody.querySelectorAll('.btn-delete-receipt').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Biztosan törlöd ezt a bevételezést?')) return;
+        try {
+          await api(`/api/stock/receipt?id=${btn.dataset.id}`, { method: 'DELETE' });
+          loadStockView(false);
+        } catch (e) { alert('Nem sikerült törölni: ' + e.message); }
+      });
+    });
+  }
+}
+
+document.getElementById('stock-receipt-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('stock-add-btn');
+  const msg = document.getElementById('stock-form-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Mentés…';
+  try {
+    const body = {
+      cikkNev: document.getElementById('stock-cikk-input').value.trim(),
+      mennyiseg: document.getElementById('stock-mennyiseg-input').value,
+      me: document.getElementById('stock-me-input').value,
+      beszerzesiAr: document.getElementById('stock-ar-input').value,
+      szallito: document.getElementById('stock-szallito-input').value,
+      datum: document.getElementById('stock-datum-input').value,
+      megjegyzes: document.getElementById('stock-megjegyzes-input').value,
+    };
+    await api('/api/stock/receipt', { method: 'POST', body: JSON.stringify(body) });
+    msg.textContent = '✓ Bevételezés rögzítve.'; msg.className = 'stock-form-msg ok';
+    document.getElementById('stock-receipt-form').reset();
+    loadStockView(false);
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Bevételezés rögzítése';
+  }
+});
 
 /* ============================================================
    Szinkronizáció nézet

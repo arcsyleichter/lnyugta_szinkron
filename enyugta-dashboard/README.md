@@ -297,6 +297,63 @@ db.exec('VACUUM');
 db.close();
 ```
 
+## Hozzáférés-védelem — cégenkénti hozzáférési kód
+
+Az adószám **önmagában nem titok** — Magyarországon bárki lekérdezheti egy
+cég adószámát (NAV-os cégkereső, cégjegyzék). Ezért a bejelentkezéshez az
+adószám mellé egy második, tényleg titkos, 6 jegyű **hozzáférési kódot** is
+meg kell adni.
+
+Minden cég automatikusan kap egy véletlen kódot, amint először megjelenik a
+rendszerben (induláskor a meglévőknek, első szinkronkor az újaknak) —
+`data/access-codes.json`-ban tárolva (ez a fájl `.gitignore`-olt, tehát
+minden telepítés a saját, egyedi kódjait generálja, nem kerül semmi
+kódszöveg a git repóba).
+
+**A kódok megtekintése / kiadása a cégeknek:** az admin panelen (lásd lent)
+minden cég sorában látszik a saját kódja, és egy ⟳ gombbal bármikor
+újrageneráltatható (pl. ha kiszivárgott) — a régi kód ilyenkor azonnal
+érvénytelenné válik. Ezt a kódot kell eljuttatni a cég képviselőjéhez
+(telefonon, e-mailben, vagy akár az androidos appban is meg lehetne majd
+jeleníteni — ez utóbbi már az androidos oldal bővítése lenne).
+
+A **`data/companies/`** mappa (a tényleges forgalmi adatok) így önmagában
+sosem elég valaki adataihoz — a kettő (adószám + kód) együtt szükséges.
+
+## Készlet-nyilvántartás (bevételezés alapú)
+
+A "Készlet" menüpontban rögzíthető, mikor mennyi áru érkezett be (cikk,
+mennyiség, opcionálisan beszerzési ár és szállító) — ebből és a már
+szinkronizált eladási adatokból (`nytet`) számolódik ki a jelenlegi készlet:
+
+```
+készlet = összes eddig bevételezett mennyiség − összes eddig eladott mennyiség
+```
+
+**Fontos architekturális döntés:** a bevételezések **külön fájlban**
+(`data/stock.db`) tárolódnak, NEM a cégek szinkronizált `.db` fájljaiban —
+mert azokat az androidos app minden szinkronkor **teljesen felülírja**. Ha a
+bevételezés a szinkronizált fájlban lenne, minden feltöltés törölné. Így a
+`data/stock.db` sosem érintkezik az androidos szinkronnal, tisztán a webes
+felület írja/olvassa, cégenként elkülönítve (`company_key` oszloppal).
+
+Mivel ez egy vadonatúj nyilvántartás, kezdetben minden cégnél negatív
+készletet fog mutatni, amíg nem rögzítitek az aktuális, tényleges
+raktárkészletet egy kezdő ("nyitó") bevételezésként minden cikkre — ezután
+már pontosan követi a valós állapotot.
+
+### Mit NEM tud (egyelőre)
+
+- Nincs kiadás/leltárkorrekció rögzítése, csak bevételezés — a fogyás
+  kizárólag az eladásokból (nytet) számolódik. Ha kell selejtezés/leltár-
+  korrekció is, ez egy hasonló, "negatív irányú" tábla/végpont hozzáadásával
+  bővíthető.
+- Nincs cikktörzs-szerkesztés (pl. új termék felvétele, ár módosítása) — a
+  termékválasztó a meglévő `cikkt` törzsből dolgozik, csak olvasásra
+  (`GET /api/products/master`). Ha ez is kell (különösen, hogy a
+  pénztárgépen is érvényesüljön egy itt módosított ár), az egy külön,
+  kétirányú szinkron-tervet igényel az androidos alkalmazással együtt.
+
 ## Admin panel
 
 A bejelentkező oldal alján lévő "Admin belépés" linkkel egy külön, jelszavas
@@ -317,6 +374,33 @@ bejelentkezéssel érhető el egy admin nézet, ami **minden** regisztrált cég
   hibás adószám, sérült fájl), mérettel. Ez teszi visszakereshetővé, hol volt
   feltöltési hiba.
 
+### Hozzáférési kód kiküldése emailben (Brevo)
+
+A Cégek táblázat minden sorában van egy Email mező és egy **Küldés** gomb —
+erre kattintva a rendszer a Brevo tranzakciós email API-ján keresztül
+elküldi a cég adószámát és aktuális hozzáférési kódját a megadott címre.
+Az email mező alapból megpróbálja kitölteni a cég saját androidos
+adatbázisában tárolt email címet (`szallitot.email`), ha van ilyen — ezt
+felül lehet írni, és amit egyszer elküldtél, azt a rendszer megjegyzi
+legközelebbre is.
+
+Ehhez egy [Brevo](https://www.brevo.com) fiók és API-kulcs szükséges,
+környezeti változóként beállítva (Render Environment fülön, vagy helyben
+`export`-tal):
+
+```bash
+BREVO_API_KEY=xkeysib-...          # Brevo fiók → Settings → API Keys
+BREVO_SENDER_EMAIL=info@ceged.hu   # Brevo-ban ELLENŐRZÖTT (verified) feladó cím
+BREVO_SENDER_NAME="L-NYUGTA rendszer"   # opcionális, ez lesz a feladó neve
+```
+
+**Fontos:** a `BREVO_SENDER_EMAIL`-nek egy a Brevo fiókodban **ellenőrzött
+(verified) feladó email címnek** kell lennie (Brevo → Settings → Senders &
+IP) — enélkül a Brevo API elutasítja a küldést. Amíg ezek a változók
+nincsenek beállítva, az admin panel egy sárga figyelmeztető sávot mutat, és
+a "Küldés" gombok inaktívak — ezt nem kell külön lekezelni, a rendszer
+magától felismeri.
+
 Az admin jelszó ugyanúgy generálódik és tárolódik, mint a `SESSION_SECRET` /
 `SYNC_API_KEY` — első induláskor a konzol kiírja, és a `data/.secrets.json`-ban
 van, vagy env változóként (`ADMIN_PASSWORD`) is rögzíthető, hogy újraindítás
@@ -329,11 +413,11 @@ bővítésre szorul (pl. named admin accounts).
 
 ## Biztonsági megjegyzések
 
-- A bejelentkezés kizárólag az adószámra épül — ez megfelel a kérésnek
-  ("adja meg az adószámot és látja az adatokat"), de nem jelent erős
-  hitelesítést. Ha ez éles, nyilvánosan elérhető szolgáltatás lesz, érdemes
-  HTTPS mögé tenni (kötelező, mert a session-cookie különben lehallgatható)
-  és megfontolni egy második tényezőt (pl. e-mailben küldött kód).
+- A bejelentkezés adószám + hozzáférési kód párossal történik (lásd fent) —
+  ez már nem sebezhető pusztán azzal, hogy valaki ismeri egy cég adószámát.
+  Ha ez éles, nyilvánosan elérhető szolgáltatás lesz, HTTPS mögé tétele
+  továbbra is kötelező (különben a session-cookie és a bejelentkezéskor
+  küldött kód is lehallgatható).
 - A `/api/sync/upload` és `/api/sync/companies` végpontokat **csak** a
   titkos `x-api-key` védi — ezt tartsd titokban, és HTTPS-en keresztül
   küldd, különben a kulcs lehallgatható. Lásd fentebb a cégenkénti kulcsra

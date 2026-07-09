@@ -22,10 +22,12 @@
         <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
       </div>
     </div>
-    <p class="login-lede">Add meg a céged adószámát a belépéshez. Nincs jelszó — az adatbázisban szereplő adószám azonosít.</p>
+    <p class="login-lede">Add meg a céged adószámát és a hozzáférési kódodat a belépéshez. A kódot a cég adminisztrátorától kapod.</p>
     <form id="login-form" autocomplete="off">
       <label for="adoszam-input">Adószám</label>
       <input id="adoszam-input" name="adoszam" type="text" placeholder="pl. 27129430" inputmode="text" required>
+      <label for="code-input">Hozzáférési kód</label>
+      <input id="code-input" name="code" type="password" placeholder="6 jegyű kód" inputmode="numeric" maxlength="6" required>
       <button type="submit" id="login-btn">Belépés</button>
       <div class="login-error" id="login-error" hidden></div>
     </form>
@@ -37,7 +39,7 @@
       <ul class="login-hint-list" id="login-hint-list"></ul>
     </div>
   </div>
-  <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul. Elég az adószám első 8 számjegye.</div>
+  <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul, és egy külön hozzáférési kóddal védett.</div>
   <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
 </section>
 
@@ -88,6 +90,7 @@
       <button class="nav-item" data-view="products">Cikk eladások</button>
       <button class="nav-item" data-view="receipts">Nyugták</button>
       <button class="nav-item" data-view="ntak">NTAK</button>
+      <button class="nav-item" data-view="stock">Készlet</button>
       <button class="nav-item" data-view="sync">Szinkronizáció</button>
     </nav>
     <div class="sidebar-footer">
@@ -287,6 +290,67 @@
       </div>
     </section>
 
+    <!-- --- KÉSZLET --- -->
+    <section class="view" data-view="stock" hidden>
+      <div class="card">
+        <div class="card-title">Új bevételezés</div>
+        <form id="stock-receipt-form" class="stock-receipt-form">
+          <div class="stock-field stock-field-wide">
+            <label for="stock-cikk-input">Cikk</label>
+            <input list="stock-cikk-list" id="stock-cikk-input" placeholder="pl. Espresso" required>
+            <datalist id="stock-cikk-list"></datalist>
+          </div>
+          <div class="stock-field">
+            <label for="stock-mennyiseg-input">Mennyiség</label>
+            <input type="number" id="stock-mennyiseg-input" step="any" min="0" placeholder="pl. 50" required>
+          </div>
+          <div class="stock-field">
+            <label for="stock-me-input">Egység</label>
+            <input id="stock-me-input" placeholder="pl. Darab">
+          </div>
+          <div class="stock-field">
+            <label for="stock-ar-input">Besz. ár / egység</label>
+            <input type="number" id="stock-ar-input" step="any" min="0" placeholder="opcionális">
+          </div>
+          <div class="stock-field">
+            <label for="stock-szallito-input">Szállító</label>
+            <input id="stock-szallito-input" placeholder="opcionális">
+          </div>
+          <div class="stock-field">
+            <label for="stock-datum-input">Dátum</label>
+            <input type="date" id="stock-datum-input">
+          </div>
+          <div class="stock-field stock-field-wide">
+            <label for="stock-megjegyzes-input">Megjegyzés</label>
+            <input id="stock-megjegyzes-input" placeholder="opcionális">
+          </div>
+          <button type="submit" class="btn-primary" id="stock-add-btn">Bevételezés rögzítése</button>
+          <div class="stock-form-msg" id="stock-form-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Jelenlegi készlet</div>
+            <div class="card-subtitle">bevételezett mennyiség − összes eddigi eladás, cikkenként</div>
+          </div>
+        </div>
+        <table class="data-table" id="stock-table">
+          <thead><tr><th>Cikk</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Bevételezési napló</div>
+        <table class="data-table" id="stock-log-table">
+          <thead><tr><th>Dátum</th><th>Cikk</th><th class="td-right">Mennyiség</th><th>Szállító</th><th>Megjegyzés</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- --- SZINKRONIZÁCIÓ --- -->
     <section class="view" data-view="sync" hidden>
       <div class="card">
@@ -321,7 +385,7 @@
     <div class="brand">
       <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
       <div>
-        <div class="brand-name">L-NYUGTA admin</div>
+        <div class="brand-name">L-NYUGTA <span class="admin-badge">Admin</span></div>
         <div class="brand-sub">összes cég áttekintése</div>
       </div>
     </div>
@@ -329,16 +393,47 @@
   </header>
 
   <main class="admin-main">
+    <div class="receipt-strip admin-kpi-strip">
+      <div class="receipt-strip-inner">
+        <div class="kpi">
+          <div class="kpi-label">Regisztrált cégek</div>
+          <div class="kpi-value" id="admin-kpi-companies">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Sikertelen szinkron (napló)</div>
+          <div class="kpi-value" id="admin-kpi-failed">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">NTAK probléma (részben/teljesen hibás)</div>
+          <div class="kpi-value" id="admin-kpi-ntak-problems">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-email-warning" id="admin-email-warning" hidden>
+      ⚠️ Az email-küldés nincs beállítva a szerveren (hiányzó <code>BREVO_API_KEY</code> / <code>BREVO_SENDER_EMAIL</code> környezeti változó) — a "Küldés" gombok nem fognak működni, amíg ezt be nem állítod (lásd README).
+    </div>
+
     <div class="card">
-      <div class="card-title">Cégek (<span id="admin-company-count">0</span>)</div>
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">Cégek</div>
+          <div class="card-subtitle"><span id="admin-company-count">0</span> regisztrálva</div>
+        </div>
+      </div>
       <table class="data-table" id="admin-companies-table">
-        <thead><tr><th>Cégnév</th><th>Adószám</th><th>Város</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
+        <thead><tr><th>Cégnév</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
 
     <div class="card">
-      <div class="card-title">NTAK állapot — minden cég, akinél van adat</div>
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">NTAK állapot</div>
+          <div class="card-subtitle">minden cég, akinél van adatküldés</div>
+        </div>
+      </div>
       <table class="data-table" id="admin-ntak-table">
         <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
         <tbody></tbody>
@@ -346,7 +441,12 @@
     </div>
 
     <div class="card">
-      <div class="card-title">Szinkron-napló — legutóbbi feltöltési próbálkozások</div>
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">Szinkron-napló</div>
+          <div class="card-subtitle">legutóbbi feltöltési próbálkozások, sikeresek és sikertelenek is</div>
+        </div>
+      </div>
       <table class="data-table" id="admin-synclog-table">
         <thead><tr><th>Időpont</th><th>Cég</th><th>Állapot</th><th>Részlet</th><th class="td-right">Méret</th></tr></thead>
         <tbody></tbody>

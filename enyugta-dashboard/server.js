@@ -146,6 +146,34 @@ function all(key, sql, params = []) { return getDb(key).prepare(sql).all(...para
 function get(key, sql, params = []) { return getDb(key).prepare(sql).get(...params); }
 
 // ---------------------------------------------------------------------------
+// Készlet — bevételezések tárolása. SZÁNDÉKOSAN KÜLÖN fájlban (data/stock.db),
+// NEM a cégek szinkronizált .db fájljában, mert azt az androidos app
+// időnként teljes egészében felülírja egy friss szinkronnal — ha ide
+// mentenénk a bevételezéseket, minden feltöltéskor elvesznének. Ez a fájl
+// sosem érintkezik az android-szinkronnal, csak a webes admin/cég felület
+// írja/olvassa. Egyetlen közös fájl, company_key oszloppal elkülönítve
+// (nem kell cégenként külön fájlt nyitogatni, a várható adatmennyiség kicsi).
+// ---------------------------------------------------------------------------
+const STOCK_DB_PATH = path.join(DATA_DIR, 'stock.db');
+const stockDb = new DatabaseSync(STOCK_DB_PATH, { readOnly: false });
+stockDb.exec(`
+  CREATE TABLE IF NOT EXISTS bevetelezesek (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_key TEXT NOT NULL,
+    datum TEXT NOT NULL,
+    cikk_nev TEXT NOT NULL,
+    me TEXT,
+    mennyiseg NUMERIC NOT NULL,
+    beszerzesi_ar NUMERIC,
+    szallito TEXT,
+    megjegyzes TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bevetelezesek_company ON bevetelezesek(company_key);
+  CREATE INDEX IF NOT EXISTS idx_bevetelezesek_cikk ON bevetelezesek(company_key, cikk_nev);
+`);
+
+// ---------------------------------------------------------------------------
 // Szinkron-metaadat — cégenkénti utolsó szinkronizáció ideje/mérete,
 // data/sync-meta.json-ban tárolva: { "<key>": { lastSync, source, bytes } }
 // ---------------------------------------------------------------------------
@@ -192,6 +220,93 @@ function readSyncLog(limit) {
   try { lines = fs.readFileSync(SYNC_LOG_PATH, 'utf8').split('\n').filter(Boolean); }
   catch (_) { return []; }
   return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Hozzáférési kódok — az adószám ÖNMAGÁBAN NEM titok (Magyarországon bárki
+// lekérdezheti egy cég adószámát), ezért a bejelentkezéshez egy második,
+// tényleg titkos kódot is meg kell adni. Cégenként tárolva,
+// data/access-codes.json-ban: { "<companyKey>": { code, email } }.
+// Az "email" a legutóbb megadott/elmentett cím, amire a kódot kiküldtük —
+// csak kényelmi célból tárolt, hogy az admin panelen ne kelljen újra beírni.
+// Minden cég automatikusan kap egy kódot, amint először megjelenik az
+// indexben (induláskor a meglévőknek, első szinkronkor az újaknak) — ezt
+// az admin panelen lehet visszanézni / újragenerálni / kiküldeni.
+// ---------------------------------------------------------------------------
+const ACCESS_CODES_PATH = path.join(DATA_DIR, 'access-codes.json');
+
+function readAccessCodes() {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(ACCESS_CODES_PATH, 'utf8')); }
+  catch (_) { return {}; }
+  // migráció: korábbi verzióban codes[key] sima string volt (csak a kód)
+  for (const k of Object.keys(raw)) {
+    if (typeof raw[k] === 'string') raw[k] = { code: raw[k], email: '' };
+  }
+  return raw;
+}
+function writeAccessCodes(codes) {
+  fs.writeFileSync(ACCESS_CODES_PATH, JSON.stringify(codes, null, 2));
+}
+function generateAccessCode() {
+  // 6 jegyű, könnyen diktálható/begépelhető kód (nem base64 zagyvaság)
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+// Biztosítja, hogy MINDEN, az indexben szereplő cégnek legyen kódja —
+// hiányzóknak generál egyet, és elmenti. Induláskor és minden új
+// cég-regisztrációkor hívjuk.
+function ensureAccessCodes() {
+  const codes = readAccessCodes();
+  let changed = false;
+  for (const key of companyIndex.keys()) {
+    if (!codes[key]) { codes[key] = { code: generateAccessCode(), email: '' }; changed = true; }
+  }
+  if (changed) writeAccessCodes(codes);
+  return codes;
+}
+ensureAccessCodes();
+
+// ---------------------------------------------------------------------------
+// Email küldés Brevón keresztül — a hozzáférési kód kiküldéséhez az admin
+// panelről. Nincs npm-függőség: a Node beépített fetch()-ét használja.
+// Konfiguráció (Render Environment fülön / .secrets.json-ban NEM tárolt,
+// mert nincs értelmes véletlen alapérték — ezt neked kell megadnod):
+//   BREVO_API_KEY      — a Brevo fiókod API-kulcsa
+//   BREVO_SENDER_EMAIL — a Brevo-ban ELLENŐRZÖTT feladó email cím
+//   BREVO_SENDER_NAME  — feladó neve (opcionális, van alapértelmezés)
+// ---------------------------------------------------------------------------
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || '';
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || 'L-NYUGTA rendszer';
+
+if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
+  console.log('[info] Nincs BREVO_API_KEY / BREVO_SENDER_EMAIL beállítva — az admin panel email-küldés funkciója nem fog működni, amíg ezeket meg nem adod (lásd README).');
+}
+
+function escapeHtmlServer(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function sendBrevoEmail({ toEmail, toName, subject, html }) {
+  if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
+    throw new Error('Nincs beállítva a Brevo email küldés (BREVO_API_KEY / BREVO_SENDER_EMAIL hiányzik).');
+  }
+  const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({
+      sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
+      to: [{ email: toEmail, name: toName || undefined }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+  if (!resp.ok) {
+    let detail = await resp.text();
+    try { detail = JSON.parse(detail).message || detail; } catch (_) {}
+    throw new Error(`Brevo hiba (${resp.status}): ${detail}`);
+  }
+  return resp.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +390,8 @@ function requireAdmin(req) {
 }
 
 // Dátum-tartomány normalizálása: alapértelmezés az utolsó 30 nap
+function todayIsoServer() { return new Date().toISOString().slice(0, 10); }
+
 function resolveRange(query) {
   const today = new Date();
   const toDefault = today.toISOString().slice(0, 10);
@@ -295,12 +412,17 @@ const routes = [];
 function route(method, pattern, handler) { routes.push({ method, pattern, handler }); }
 
 route('POST', '/api/auth/login', async (req, res) => {
-  const { adoszam } = await readJsonBody(req);
+  const { adoszam, code } = await readJsonBody(req);
   const wanted = normalizeAdoszam(adoszam);
   if (wanted.length < 8) return sendJson(res, 400, { error: 'Adj meg legalább 8 számjegyet az adószámból.' });
   const key = wanted.slice(0, 8);
   const entry = companyIndex.get(key);
   if (!entry) return sendJson(res, 401, { error: 'Ismeretlen adószám. Ellenőrizd, és próbáld újra.' });
+  const codes = readAccessCodes();
+  const expected = codes[key]?.code;
+  if (!expected || !code || String(code).trim() !== expected) {
+    return sendJson(res, 401, { error: 'Hibás hozzáférési kód. Kérd el a céged adminisztrátorától.' });
+  }
   const payload = { companyKey: key, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
@@ -481,6 +603,96 @@ route('GET', '/api/vat-breakdown', async (req, res, query) => {
   sendJson(res, 200, { from, to, items: rows });
 });
 
+// Cikktörzs (a teljes termékkínálat, nem csak amit eladtak) — egyelőre
+// csak olvasható. Ez táplálja a Készlet modul termékválasztóját is.
+route('GET', '/api/products/master', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey,
+    `SELECT megnevezes AS nev, me, bruttoar, afakod, vonalkod, status
+     FROM cikkt WHERE status = 'A' ORDER BY megnevezes`
+  );
+  sendJson(res, 200, { items: rows });
+});
+
+// ---------------------------------------------------------------------------
+// Készlet — bevételezés alapú nyilvántartás. A stock.db-ben tárolt
+// bevételezések és a szinkronizált nytet-ből számolt eladások különbségéből
+// adódik a jelenlegi készlet. Teljes, dátumhatár nélküli összesítés (a
+// készlet fizikai állapot, nem egy kiválasztott jelentési időszakra
+// vonatkozik).
+// ---------------------------------------------------------------------------
+route('GET', '/api/stock', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+
+  const received = stockDb.prepare(
+    `SELECT cikk_nev AS nev, me, SUM(mennyiseg) AS mennyiseg, MAX(datum) AS utolsoBevetelezes
+     FROM bevetelezesek WHERE company_key = ? GROUP BY cikk_nev`
+  ).all(k);
+  const sold = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE ${notStorno('nf')}
+     GROUP BY nt.megnevezes`
+  );
+  const soldMap = new Map(sold.map((r) => [r.nev, r.mennyiseg]));
+
+  const items = received.map((r) => ({
+    nev: r.nev, me: r.me,
+    bevetelezve: r.mennyiseg,
+    eladva: soldMap.get(r.nev) || 0,
+    keszlet: r.mennyiseg - (soldMap.get(r.nev) || 0),
+    utolsoBevetelezes: r.utolsoBevetelezes,
+  })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  sendJson(res, 200, { items });
+});
+
+route('GET', '/api/stock/receipts', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
+  const rows = stockDb.prepare(
+    `SELECT id, datum, cikk_nev AS cikkNev, me, mennyiseg, beszerzesi_ar AS beszerzesiAr, szallito, megjegyzes, created_at AS createdAt
+     FROM bevetelezesek WHERE company_key = ? ORDER BY id DESC LIMIT ?`
+  ).all(session.companyKey, limit);
+  sendJson(res, 200, { items: rows });
+});
+
+route('POST', '/api/stock/receipt', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cikkNev = String(body.cikkNev || '').trim();
+  const mennyiseg = parseFloat(body.mennyiseg);
+  if (!cikkNev) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
+  if (!Number.isFinite(mennyiseg) || mennyiseg <= 0) return sendJson(res, 400, { error: 'A mennyiségnek pozitív számnak kell lennie.' });
+  const datum = /^\d{4}-\d{2}-\d{2}$/.test(body.datum || '') ? body.datum : todayIsoServer();
+  const me = String(body.me || '').trim() || null;
+  const beszerzesiAr = body.beszerzesiAr !== undefined && body.beszerzesiAr !== '' ? parseFloat(body.beszerzesiAr) : null;
+  const szallito = String(body.szallito || '').trim() || null;
+  const megjegyzes = String(body.megjegyzes || '').trim() || null;
+
+  const result = stockDb.prepare(
+    `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(session.companyKey, datum, cikkNev, me, mennyiseg, beszerzesiAr, szallito, megjegyzes, new Date().toISOString());
+
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('DELETE', '/api/stock/receipt', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const id = parseInt(query.id, 10);
+  if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
+  const result = stockDb.prepare(`DELETE FROM bevetelezesek WHERE id = ? AND company_key = ?`).run(id, session.companyKey);
+  if (result.changes === 0) return sendJson(res, 404, { error: 'Nem található (vagy nem a te cégedhez tartozik).' });
+  sendJson(res, 200, { ok: true });
+});
+
 // NTAK (turisztikai adatszolgáltatás) állapot: adatküldések eredménye +
 // napi nyitás-zárás log. Azoknál a cégeknél, akiknek nincs NTAK-kötelezettsége
 // (pl. a demó teszt cégek), ezek a táblák egyszerűen üresek — a végpont ilyenkor
@@ -587,6 +799,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   try { identity = readCompanyIdentity(dbFile); } catch (e) { console.error(`[hiba] identitás-olvasás sikertelen (${key}):`, e.message); }
   const isNew = !companyIndex.has(key);
   if (identity) companyIndex.set(key, { ...identity, dbFile });
+  if (isNew) ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
 
   if (!identity) {
     logSync({ ok: false, companyKey: key, nev: null, error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', bytes: buf.length, ip });
@@ -621,15 +834,18 @@ route('POST', '/api/sync/request', async (req, res) => {
 // x-api-key-jel hitelesít, mint a szinkron feltöltés (nem böngésző-session).
 // ---------------------------------------------------------------------------
 // IDEIGLENES, TESZT CÉLÚ végpont: a bejelentkező oldal ebből olvassa ki,
-// milyen érvényes adószámokkal lehet éppen belépni. NEM védett — bárki
-// lekérdezheti, mert a bejelentkező oldal (session nélkül) hívja meg.
-// Éles/nyilvános üzemeltetés előtt EZT ÉS a hozzá tartozó login-screen
-// kártyát (public/index.html + app.js) érdemes eltávolítani, mert az összes
-// regisztrált cég nevét/adószámát kiadja bárkinek, aki csak megnyitja az oldalt.
+// milyen érvényes adószámokkal/kódokkal lehet éppen belépni. NEM védett —
+// bárki lekérdezheti, mert a bejelentkező oldal (session nélkül) hívja meg.
+// ⚠️ FONTOS: ez a végpont a hozzáférési KÓDOKAT IS kiadja nyíltan — ez pont
+// azt a védelmet üresíti ki, amit a kód bevezetése adott. Éles/nyilvános
+// üzemeltetés előtt FELTÉTLENÜL távolítsd el EZT és a hozzá tartozó
+// login-screen kártyát (public/index.html + app.js), különben bárki, aki
+// megnyitja az oldalt, bejelentkezés nélkül megkapja az összes cég kódját.
 // ---------------------------------------------------------------------------
 route('GET', '/api/auth/companies-hint', async (req, res) => {
-  const list = [...companyIndex.values()]
-    .map((entry) => ({ nev: entry.nev, adoszam: entry.adoszam }))
+  const codes = ensureAccessCodes();
+  const list = [...companyIndex.entries()]
+    .map(([key, entry]) => ({ nev: entry.nev, adoszam: entry.adoszam, code: codes[key]?.code }))
     .sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
   sendJson(res, 200, { companies: list });
 });
@@ -693,12 +909,73 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const meta = readSyncMeta();
+  const codes = ensureAccessCodes();
   const companies = [...companyIndex.entries()]
-    .map(([key, entry]) => ({ key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, ...(meta[key] || { lastSync: null, source: null, bytes: null }) }))
+    .map(([key, entry]) => {
+      let fallbackEmail = '';
+      if (!codes[key]?.email) {
+        try { fallbackEmail = get(key, 'SELECT email FROM szallitot LIMIT 1')?.email || ''; } catch (_) {}
+      }
+      return {
+        key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+        code: codes[key]?.code, email: codes[key]?.email || fallbackEmail,
+        ...(meta[key] || { lastSync: null, source: null, bytes: null }),
+      };
+    })
     .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
   const syncLog = readSyncLog(Math.min(parseInt(query.logLimit || '200', 10) || 200, 1000));
   const ntak = computeNtakOverview();
-  sendJson(res, 200, { companies, syncLog, ntak });
+  sendJson(res, 200, { companies, syncLog, ntak, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+});
+
+// Admin újrageneráltatja egy cég hozzáférési kódját (pl. ha az kiszivárgott).
+// A régi kód azonnal érvénytelenné válik.
+route('POST', '/api/admin/regenerate-code', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyKey } = await readJsonBody(req);
+  if (!companyIndex.has(companyKey)) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const codes = readAccessCodes();
+  codes[companyKey] = { ...(codes[companyKey] || {}), code: generateAccessCode() };
+  writeAccessCodes(codes);
+  sendJson(res, 200, { ok: true, companyKey, code: codes[companyKey].code });
+});
+
+// Admin kiküldi a cég hozzáférési kódját emailben, Brevón keresztül.
+route('POST', '/api/admin/send-code', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyKey, email } = await readJsonBody(req);
+  const entry = companyIndex.get(companyKey);
+  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const cleanEmail = String(email || '').trim();
+  if (!cleanEmail || !cleanEmail.includes('@')) return sendJson(res, 400, { error: 'Érvénytelen email cím.' });
+
+  const codes = ensureAccessCodes();
+  const code = codes[companyKey]?.code;
+  const nev = escapeHtmlServer(entry.nev);
+  const html = `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
+      <p>Kedves <strong>${nev}</strong>!</p>
+      <p>Az L-NYUGTA nézegetőbe való belépéshez az alábbi adatokat használd:</p>
+      <table style="margin:16px 0;border-collapse:collapse;">
+        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Adószám</td><td style="padding:4px 0;font-weight:600;">${escapeHtmlServer(entry.adoszam)}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Hozzáférési kód</td><td style="padding:4px 0;font-weight:700;font-size:20px;letter-spacing:3px;">${escapeHtmlServer(code)}</td></tr>
+      </table>
+      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt az emailt, kérjük hagyd figyelmen kívül.</p>
+    </div>`;
+
+  try {
+    await sendBrevoEmail({ toEmail: cleanEmail, toName: entry.nev, subject: 'L-NYUGTA — hozzáférési kódod', html });
+  } catch (e) {
+    return sendJson(res, 502, { error: `Nem sikerült elküldeni: ${e.message}` });
+  }
+
+  // elmentjük az email címet, hogy legközelebb ne kelljen újra beírni
+  codes[companyKey] = { ...(codes[companyKey] || {}), email: cleanEmail };
+  writeAccessCodes(codes);
+  console.log(`[email] kód elküldve: ${entry.nev} (${companyKey}) -> ${cleanEmail}`);
+  sendJson(res, 200, { ok: true });
 });
 
 // Admin "belép" egy adott cég nevében — utána a normál, cégenkénti
