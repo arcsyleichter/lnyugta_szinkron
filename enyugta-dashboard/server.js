@@ -182,6 +182,99 @@ stockDb.exec(`
 `);
 
 // ---------------------------------------------------------------------------
+// Cikktörzs kétirányú szinkron — a webes felület (egyenként, tömegesen vagy
+// CSV/Excel importtal) tud terméktörzs-módosítást kezdeményezni, de ezt NEM
+// írja bele közvetlenül a cég szinkronizált .db fájljába — azt úgyis
+// felülírná a következő androidos szinkron feltöltés. Helyette egy külön
+// "függő módosítás" sorba kerül (data/product-changes.db), amit az androidos
+// alkalmazásnak kell lekérdeznie (GET /api/sync/pending-changes) és
+// alkalmaznia — lásd README. A módosítás automatikusan "leszinkronizálva"
+// állapotba kerül, amint a következő valódi szinkron feltöltésben megjelenik
+// a kívánt érték (lásd reconcileProductChanges, hívva /api/sync/upload-ból).
+// ---------------------------------------------------------------------------
+const PRODUCT_CHANGES_DB_PATH = path.join(DATA_DIR, 'product-changes.db');
+const productChangesDb = new DatabaseSync(PRODUCT_CHANGES_DB_PATH, { readOnly: false });
+productChangesDb.exec(`
+  CREATE TABLE IF NOT EXISTS product_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_key TEXT NOT NULL,
+    change_type TEXT NOT NULL CHECK(change_type IN ('cikk_upsert','csoport_upsert')),
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered')),
+    source TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_product_changes_company ON product_changes(company_key, status);
+`);
+
+function addProductChange(companyKey, changeType, payload, source) {
+  productChangesDb.prepare(
+    `INSERT INTO product_changes (company_key, change_type, payload, status, source, created_at)
+     VALUES (?, ?, ?, 'pending', ?, ?)`
+  ).run(companyKey, changeType, JSON.stringify(payload), source, new Date().toISOString());
+}
+
+// Minden valódi androidos szinkron feltöltés után lefut: megnézi, hogy a
+// frissen beérkezett cikktörzsben már megjelent-e a kért érték — ha igen,
+// a függő módosítást "leszinkronizálva" állapotba teszi. Így nincs szükség
+// külön visszaigazoló hívásra az androidos oldalról.
+function reconcileProductChanges(companyKey) {
+  let pending;
+  try {
+    pending = productChangesDb.prepare(
+      `SELECT id, change_type, payload FROM product_changes WHERE company_key = ? AND status = 'pending'`
+    ).all(companyKey);
+  } catch (_) { return; }
+  if (!pending.length) return;
+  for (const row of pending) {
+    let payload;
+    try { payload = JSON.parse(row.payload); } catch (_) { continue; }
+    let matches = false;
+    try {
+      if (row.change_type === 'cikk_upsert') {
+        const current = get(companyKey, `SELECT bruttoar, afakod FROM cikkt WHERE megnevezes = ?`, [payload.megnevezes]);
+        matches = !!current && Number(current.bruttoar) === Number(payload.bruttoar) && String(current.afakod) === String(payload.afakod);
+      } else if (row.change_type === 'csoport_upsert') {
+        matches = !!get(companyKey, `SELECT azon FROM cikkcsop WHERE megnevezes = ?`, [payload.megnevezes]);
+      }
+    } catch (_) { matches = false; }
+    if (matches) {
+      productChangesDb.prepare(`UPDATE product_changes SET status='delivered', delivered_at=? WHERE id=?`).run(new Date().toISOString(), row.id);
+    }
+  }
+}
+
+// --- Apró CSV segédfüggvények (Excel natívan megnyitja/menti) ---
+function csvEscape(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCsv(rows, headers) {
+  const lines = [headers.join(',')];
+  for (const r of rows) lines.push(headers.map((h) => csvEscape(r[h])).join(','));
+  return '\uFEFF' + lines.join('\r\n') + '\r\n'; // UTF-8 BOM, hogy Excelben jók legyenek az ékezetek
+}
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\r') { /* skip */ }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((f) => f !== ''));
+}
+
+// ---------------------------------------------------------------------------
 // Szinkron-metaadat — cégenkénti utolsó szinkronizáció ideje/mérete,
 // data/sync-meta.json-ban tárolva: { "<key>": { lastSync, source, bytes } }
 // ---------------------------------------------------------------------------
@@ -636,7 +729,174 @@ route('GET', '/api/products/master', async (req, res) => {
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
      WHERE c.status = 'A' ORDER BY c.megnevezes`
   );
+  let pendingRows = [];
+  try {
+    pendingRows = productChangesDb.prepare(
+      `SELECT payload FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'cikk_upsert'`
+    ).all(session.companyKey);
+  } catch (_) {}
+  const pendingMap = new Map();
+  for (const p of pendingRows) { try { const pl = JSON.parse(p.payload); pendingMap.set(pl.megnevezes, pl); } catch (_) {} }
+  const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null }));
+  // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
+  const existingNames = new Set(rows.map((r) => r.nev));
+  for (const [nev, pl] of pendingMap) {
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', pendingChange: pl, isNewPending: true });
+  }
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+  sendJson(res, 200, { items });
+});
+
+route('GET', '/api/products/groups', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey, `SELECT megnevezes AS nev FROM cikkcsop WHERE status = 'A' ORDER BY megnevezes`);
   sendJson(res, 200, { items: rows });
+});
+
+// Egyedi cikk létrehozása/módosítása — függő módosításként kerül be, NEM
+// közvetlenül a szinkronizált adatbázisba (lásd fenti magyarázat).
+route('POST', '/api/products/change', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const megnevezes = String(body.megnevezes || '').trim();
+  if (!megnevezes) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
+  const bruttoar = parseFloat(body.bruttoar);
+  if (!Number.isFinite(bruttoar) || bruttoar < 0) return sendJson(res, 400, { error: 'Érvénytelen bruttó ár.' });
+  const afakod = String(body.afakod || '').trim();
+  if (!afakod) return sendJson(res, 400, { error: 'Az ÁFA kód kötelező.' });
+  const me = String(body.me || '').trim() || 'Darab';
+  const csoportNev = String(body.csoportNev || '').trim() || null;
+  const vonalkod = String(body.vonalkod || '').trim() || null;
+  addProductChange(session.companyKey, 'cikk_upsert', { megnevezes, me, bruttoar, afakod, csoportNev, vonalkod }, 'web_form');
+  logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Új termékcsoport létrehozása — szintén függő módosításként.
+route('POST', '/api/products/group', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const megnevezes = String(body.megnevezes || '').trim();
+  if (!megnevezes) return sendJson(res, 400, { error: 'A csoport neve kötelező.' });
+  addProductChange(session.companyKey, 'csoport_upsert', { megnevezes }, 'web_form');
+  logActivity({ type: 'product_group_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: megnevezes });
+  sendJson(res, 200, { ok: true });
+});
+
+// Tömeges árváltoztatás — csoport szerint vagy megadott cikknevek szerint,
+// százalékos vagy fix összegű módosítással. Cikkenként külön függő
+// módosítást hoz létre.
+route('POST', '/api/products/bulk-price', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const mode = body.mode === 'fixed' ? 'fixed' : 'percent';
+  const value = parseFloat(body.value);
+  if (!Number.isFinite(value)) return sendJson(res, 400, { error: 'Érvénytelen érték.' });
+  const csoportNev = body.csoportNev ? String(body.csoportNev).trim() : null;
+  const names = Array.isArray(body.names) ? body.names.filter(Boolean) : null;
+  if (!csoportNev && !names) return sendJson(res, 400, { error: 'Válassz csoportot vagy cikkeket.' });
+
+  let products = all(session.companyKey,
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A'`
+  );
+  if (csoportNev) products = products.filter((p) => p.csoportNev === csoportNev);
+  if (names) products = products.filter((p) => names.includes(p.nev));
+  if (!products.length) return sendJson(res, 400, { error: 'Nincs a feltételnek megfelelő cikk.' });
+
+  for (const p of products) {
+    let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
+    newPrice = Math.max(0, Math.round(newPrice));
+    addProductChange(session.companyKey, 'cikk_upsert',
+      { megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, csoportNev: p.csoportNev, vonalkod: p.vonalkod },
+      'web_bulk_price');
+  }
+  logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
+  sendJson(res, 200, { ok: true, count: products.length });
+});
+
+// Függő + korábbi módosítások listája (a webes "Cikktörzs" nézet állapot-oszlopához).
+route('GET', '/api/products/changes', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = productChangesDb.prepare(
+    `SELECT id, change_type AS changeType, payload, status, source, created_at AS createdAt, delivered_at AS deliveredAt
+     FROM product_changes WHERE company_key = ? ORDER BY id DESC LIMIT 300`
+  ).all(session.companyKey);
+  const items = rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
+  sendJson(res, 200, { items });
+});
+
+// CSV export — a jelenlegi, élő cikktörzs letöltése Excelben szerkeszthető formában.
+route('GET', '/api/products/export', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey,
+    `SELECT c.megnevezes AS nev, IFNULL(g.megnevezes,'') AS csoport, c.me, c.bruttoar, c.afakod, IFNULL(c.vonalkod,'') AS vonalkod
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A' ORDER BY c.megnevezes`
+  );
+  const csv = toCsv(
+    rows.map((r) => ({ 'Cikknév': r.nev, 'Csoport': r.csoport, 'Egység': r.me, 'Bruttó ár': r.bruttoar, 'ÁFA kód': r.afakod, 'Vonalkód': r.vonalkod })),
+    ['Cikknév', 'Csoport', 'Egység', 'Bruttó ár', 'ÁFA kód', 'Vonalkód']
+  );
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs.csv"' });
+  res.end(csv);
+});
+
+// Letölthető minta CSV (üres kiindulási sablon, pár példasorral).
+route('GET', '/api/products/import-template', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const example = [
+    { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '5%', 'Vonalkód': '' },
+    { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '' },
+  ];
+  const csv = toCsv(example, ['Cikknév', 'Csoport', 'Egység', 'Bruttó ár', 'ÁFA kód', 'Vonalkód']);
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs-minta.csv"' });
+  res.end(csv);
+});
+
+// CSV import — soronként egy függő cikk-módosítást hoz létre.
+route('POST', '/api/products/import', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const buf = await readBody(req, 5 * 1024 * 1024);
+  const text = buf.toString('utf8');
+  const rows = parseCsv(text);
+  if (!rows.length) return sendJson(res, 400, { error: 'Üres vagy érvénytelen CSV fájl.' });
+  const header = rows[0].map((h) => h.trim());
+  const idx = {
+    nev: header.indexOf('Cikknév'), csoport: header.indexOf('Csoport'), me: header.indexOf('Egység'),
+    ar: header.indexOf('Bruttó ár'), afa: header.indexOf('ÁFA kód'), vonalkod: header.indexOf('Vonalkód'),
+  };
+  if (idx.nev === -1 || idx.ar === -1 || idx.afa === -1) {
+    return sendJson(res, 400, { error: 'Hiányzó kötelező oszlop (Cikknév, Bruttó ár, ÁFA kód). Használd a letölthető mintát.' });
+  }
+  let count = 0;
+  const errors = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const nev = (r[idx.nev] || '').trim();
+    if (!nev) continue;
+    const ar = parseFloat(r[idx.ar]);
+    const afa = (r[idx.afa] || '').trim();
+    if (!Number.isFinite(ar) || ar < 0 || !afa) { errors.push(`${i + 1}. sor: hiányos vagy érvénytelen adat`); continue; }
+    addProductChange(session.companyKey, 'cikk_upsert', {
+      megnevezes: nev,
+      me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
+      bruttoar: ar,
+      afakod: afa,
+      csoportNev: (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null,
+      vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
+    }, 'excel_import');
+    count++;
+  }
+  logActivity({ type: 'product_import', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${count} cikk importálva${errors.length ? `, ${errors.length} hibás sor` : ''}` });
+  sendJson(res, 200, { ok: true, count, errors });
 });
 
 // ---------------------------------------------------------------------------
@@ -898,6 +1158,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   const isNew = !companyIndex.has(key);
   if (identity) companyIndex.set(key, { ...identity, dbFile });
   if (isNew) ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
+  if (identity) reconcileProductChanges(key); // friss adat -> nézzük, teljesült-e valamelyik függő cikktörzs-módosítás
 
   if (!identity) {
     logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: null, detail: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', ip });
@@ -916,6 +1177,25 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
 // Demó/manuális "Frissítés most" gomb a felületen — bejelentkezett munkamenettel
 // hívható, a saját cégre vonatkozóan. Amíg nincs valós eszközkapcsolat beállítva
 // (lásd README), csak visszajelzi az aktuális állapotot ahelyett, hogy adatot hamisítana.
+// Ezt kellene lekérdeznie az androidos appnak (ugyanazzal az x-api-key +
+// x-adoszam hitelesítéssel, mint a feltöltésnél), MINDEN szinkron ELŐTT:
+// az itt kapott cikk/csoport módosításokat helyben alkalmazva, MIELŐTT
+// elküldi a saját friss adatbázisát. A szerver automatikusan felismeri,
+// ha egy módosítás megtörtént (a következő feltöltésben már benne van a
+// kért érték), nincs szükség külön visszaigazoló hívásra.
+route('GET', '/api/sync/pending-changes', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== SECRETS.syncApiKey) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
+  const key = companyKeyFromAdoszam(adoszamRaw);
+  if (key.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter.' });
+  const rows = productChangesDb.prepare(
+    `SELECT id, change_type AS type, payload FROM product_changes WHERE company_key = ? AND status = 'pending' ORDER BY id ASC`
+  ).all(key);
+  const items = rows.map((r) => ({ id: r.id, type: r.type, payload: JSON.parse(r.payload) }));
+  sendJson(res, 200, { items });
+});
+
 route('POST', '/api/sync/request', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });

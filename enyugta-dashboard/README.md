@@ -320,6 +320,65 @@ jeleníteni — ez utóbbi már az androidos oldal bővítése lenne).
 A **`data/companies/`** mappa (a tényleges forgalmi adatok) így önmagában
 sosem elég valaki adataihoz — a kettő (adószám + kód) együtt szükséges.
 
+## Cikktörzs kétirányú szinkron
+
+A "Cikktörzs" menüpontban a cégek (vagy az admin, rájuk belépve) módosíthatják
+a termékeik nevét, árát, ÁFA kulcsát, csoportját, vonalkódját — egyenként, egy
+egész csoportra vonatkozó **tömeges árváltoztatással** (%-os vagy fix
+összegű), vagy **CSV (Excel-kompatibilis) importtal**.
+
+### Miért nem azonnal élesek a módosítások?
+
+A cégek `.db` fájljait az androidos alkalmazás rendszeresen **teljes
+egészében felülírja** egy friss szinkronnal — ha a weben tett módosítás
+közvetlenül ebbe a fájlba írna, a következő szinkron egyszerűen eltüntetné.
+Ezért minden módosítás egy külön, cégenkénti **"függő módosítás" sorba**
+kerül (`data/product-changes.db`), ami sosem érintkezik közvetlenül a
+szinkronizált adatbázissal.
+
+**Ez azt jelenti, hogy ehhez a fejlesztéshez az androidos oldalt is bővíteni
+kell** — enélkül a weben tett módosítás csak "függőben" marad, sosem jelenik
+meg ténylegesen a pénztárgépen. A szerver oldali fele készen áll; az
+androidos fejlesztőnek (vagy akinek hozzáfér az L-NYUGTA GO forráskódjához)
+ezt a szerződést kell implementálnia, **minden szinkron ELŐTT**:
+
+```
+GET /api/sync/pending-changes?adoszam=<a cég adószáma>
+Header: x-api-key: <ugyanaz a kulcs, mint a feltöltésnél>
+```
+
+Válasz:
+```json
+{ "items": [
+  { "id": 1, "type": "cikk_upsert", "payload": { "megnevezes": "Espresso", "me": "Darab", "bruttoar": 700, "afakod": "5%", "csoportNev": "Kávézó kínálat", "vonalkod": null } }
+] }
+```
+
+Az androidos appnak ezeket a `payload`-okat kell beírnia a saját `cikkt` /
+`cikkcsop` tábláiba (upsert `megnevezes` szerint, mivel az egyedi), **mielőtt**
+elküldi a saját friss adatbázisát a megszokott `/api/sync/upload` végpontra.
+
+**Nincs szükség külön visszaigazoló hívásra** — a szerver a következő
+feltöltésben automatikusan felismeri, hogy a kért ár/ÁFA-kód már megegyezik
+a ténylegesen beérkezett adattal, és a módosítást "leszinkronizálva"
+állapotba teszi. Ha egy módosítás egy még nem létező cikkre vonatkozik
+(vadonatúj termék), a rendszer ezt is jelzi ("Új — függőben"), amíg az
+androidos oldal ténylegesen létre nem hozza.
+
+### Excel (CSV) import/export
+
+Igazi bináris `.xlsx` helyett **CSV-t** használ a rendszer (UTF-8 BOM-mal,
+hogy Excelben az ékezetek is helyesen jelenjenek meg) — ez nulla
+függőséggel, natívan megnyitható/menthető Excelben, gyakorlatilag ugyanaz a
+felhasználói élmény. Oszlopok: `Cikknév, Csoport, Egység, Bruttó ár, ÁFA kód,
+Vonalkód` (a `Cikknév`, `Bruttó ár` és `ÁFA kód` kötelező).
+
+- **Minta letöltése** — pár példasorral induló sablon.
+- **Jelenlegi törzs letöltése** — a cég most élő cikktörzse, szerkeszthető
+  formában (pl. tömeges árfrissítéshez Excelben, majd visszatöltve).
+- **Importálás** — a feltöltött CSV minden sorához létrehoz egy függő
+  módosítást.
+
 ## Készlet-nyilvántartás (bevételezés alapú)
 
 A "Készlet" menüpontban rögzíthető, mikor mennyi áru érkezett be (cikk,

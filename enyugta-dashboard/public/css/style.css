@@ -374,6 +374,18 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .stock-form-msg.ok{ color:#2E7D5C; }
 .stock-form-msg.error{ color:var(--brick); }
 .stock-negative{ color:var(--brick); font-weight:700; }
+
+/* ============================================================
+   Cikktörzs nézet
+   ============================================================ */
+.masterdata-search{ width:100%; margin:14px 0; }
+.btn-ghost-light{
+  border:1px solid var(--line); background:#fff; color:var(--text-dim); padding:11px 16px; border-radius:8px;
+  font-size:13px; font-weight:500;
+}
+.btn-ghost-light:hover{ background:var(--paper-dim); }
+.masterdata-io-row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.masterdata-io-row a.btn-tiny{ text-decoration:none; }
 .stock-search{ width:100%; margin:14px 0 12px; }
 .stock-group-tiles{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
 .stock-tile{

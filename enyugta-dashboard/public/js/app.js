@@ -434,9 +434,10 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     btn.classList.add('is-active');
     const view = btn.dataset.view;
     document.querySelectorAll('.view').forEach((v) => { v.hidden = v.dataset.view !== view; });
-    document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt');
+    document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt' || view === 'masterdata');
     if (view === 'revenue') loadRevenueView();
     if (view === 'products') loadProductsView(true);
+    if (view === 'masterdata') loadMasterdataView();
     if (view === 'receipts') loadReceiptsView(true);
     if (view === 'ntak') loadNtakView();
     if (view === 'stock') loadStockView();
@@ -518,6 +519,7 @@ async function refreshAll(spin) {
     if (activeView === 'ntak') await loadNtakView();
     if (activeView === 'stock') await loadStockView();
     if (activeView === 'stock-receipt') await loadStockReceiptLog();
+    if (activeView === 'masterdata') await loadMasterdataView();
   } finally {
     if (spin) setTimeout(() => icon.classList.remove('spin'), 400);
   }
@@ -1023,6 +1025,169 @@ document.getElementById('stock-receipt-form').addEventListener('submit', async (
     msg.textContent = e2.message; msg.className = 'stock-form-msg error';
   } finally {
     btn.disabled = false; btn.textContent = 'Bevételezés rögzítése';
+  }
+});
+
+/* ============================================================
+   Cikktörzs nézet (kétirányú szinkron)
+   ============================================================ */
+let masterdataGroupsLoaded = false;
+let masterdataEditingOriginal = null; // szerkesztés alatt lévő cikk eredeti neve (ha van)
+const masterdataFilter = { q: '' };
+
+async function loadMasterdataGroups() {
+  if (masterdataGroupsLoaded) return;
+  try {
+    const data = await api('/api/products/groups');
+    const list = document.getElementById('md-csoport-list');
+    list.innerHTML = data.items.map((g) => `<option value="${escapeHtml(g.nev)}">`).join('');
+    const select = document.getElementById('bp-csoport-select');
+    select.innerHTML = '<option value="">— válassz —</option>' + data.items.map((g) => `<option value="${escapeHtml(g.nev)}">${escapeHtml(g.nev)}</option>`).join('');
+    masterdataGroupsLoaded = true;
+  } catch (_) { /* nem kritikus */ }
+}
+
+function fillMasterdataForm(item) {
+  masterdataEditingOriginal = item.nev;
+  document.getElementById('md-nev-input').value = item.nev;
+  document.getElementById('md-ar-input').value = item.pendingChange ? item.pendingChange.bruttoar : item.bruttoar;
+  document.getElementById('md-afa-input').value = item.pendingChange ? item.pendingChange.afakod : item.afakod;
+  document.getElementById('md-me-input').value = item.me || '';
+  document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
+  document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
+  document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;
+  document.getElementById('md-cancel-btn').hidden = false;
+  document.getElementById('masterdata-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function resetMasterdataForm() {
+  masterdataEditingOriginal = null;
+  document.getElementById('masterdata-form').reset();
+  document.getElementById('masterdata-form-title').textContent = 'Új cikk / módosítás';
+  document.getElementById('md-cancel-btn').hidden = true;
+}
+document.getElementById('md-cancel-btn').addEventListener('click', resetMasterdataForm);
+
+async function loadMasterdataView() {
+  loadMasterdataGroups();
+  const data = await api('/api/products/master');
+  const q = masterdataFilter.q.toLowerCase();
+  const items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
+
+  const tbody = document.querySelector('#masterdata-table tbody');
+  tbody.innerHTML = '';
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a keresésnek megfelelő cikk.</td></tr>';
+  } else {
+    items.forEach((it) => {
+      const tr = document.createElement('tr');
+      let statusCell;
+      if (it.isNewPending) statusCell = '<span class="ntak-badge pending">Új — függőben</span>';
+      else if (it.pendingChange) statusCell = `<span class="ntak-badge warn">Függőben: ${fmtHuf(it.pendingChange.bruttoar)}</span>`;
+      else statusCell = '<span class="ntak-badge ok">Élő</span>';
+      tr.innerHTML = `
+        <td>${escapeHtml(it.nev)}</td>
+        <td>${escapeHtml(it.csoportNev)}</td>
+        <td class="num">${fmtHuf(it.bruttoar)}</td>
+        <td>${escapeHtml(it.afakod)}</td>
+        <td>${escapeHtml(it.vonalkod || '—')}</td>
+        <td>${statusCell}</td>
+        <td><button class="btn-tiny md-edit-btn" data-nev="${escapeHtml(it.nev)}">Szerkesztés</button></td>`;
+      tbody.appendChild(tr);
+      tr.querySelector('.md-edit-btn').addEventListener('click', () => fillMasterdataForm(it));
+    });
+  }
+
+  const chTbody = document.querySelector('#masterdata-changes-table tbody');
+  chTbody.innerHTML = '';
+  const changes = await api('/api/products/changes');
+  if (!changes.items.length) {
+    chTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Még nincs rögzített módosítás.</td></tr>';
+  } else {
+    changes.items.slice(0, 100).forEach((c) => {
+      const tr = document.createElement('tr');
+      const statusBadge = c.status === 'delivered' ? '<span class="ntak-badge ok">Leszinkronizálva</span>' : '<span class="ntak-badge warn">Függőben</span>';
+      const sourceLabels = { web_form: 'Kézi szerkesztés', web_bulk_price: 'Tömeges árváltoztatás', excel_import: 'CSV import' };
+      tr.innerHTML = `
+        <td>${fmtDateTime(c.createdAt)}</td>
+        <td>${escapeHtml(c.payload.megnevezes || '—')}</td>
+        <td class="num">${c.payload.bruttoar != null ? fmtHuf(c.payload.bruttoar) : '—'}</td>
+        <td>${escapeHtml(sourceLabels[c.source] || c.source || '—')}</td>
+        <td>${statusBadge}</td>`;
+      chTbody.appendChild(tr);
+    });
+  }
+}
+
+let masterdataSearchTimer = null;
+document.getElementById('masterdata-search-input').addEventListener('input', (e) => {
+  clearTimeout(masterdataSearchTimer);
+  masterdataSearchTimer = setTimeout(() => { masterdataFilter.q = e.target.value.trim(); loadMasterdataView(); }, 300);
+});
+
+document.getElementById('masterdata-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('md-save-btn');
+  const msg = document.getElementById('masterdata-form-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Mentés…';
+  try {
+    const body = {
+      megnevezes: document.getElementById('md-nev-input').value.trim(),
+      bruttoar: document.getElementById('md-ar-input').value,
+      afakod: document.getElementById('md-afa-input').value.trim(),
+      me: document.getElementById('md-me-input').value.trim(),
+      csoportNev: document.getElementById('md-csoport-input').value.trim(),
+      vonalkod: document.getElementById('md-vonalkod-input').value.trim(),
+    };
+    await api('/api/products/change', { method: 'POST', body: JSON.stringify(body) });
+    msg.textContent = '✓ Mentve — a következő androidos szinkronig "függőben" marad.'; msg.className = 'stock-form-msg ok';
+    resetMasterdataForm();
+    loadMasterdataView();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Mentés (függőbe téve)';
+  }
+});
+
+document.getElementById('bulk-price-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('bp-submit-btn');
+  const msg = document.getElementById('bulk-price-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  const csoportNev = document.getElementById('bp-csoport-select').value;
+  if (!csoportNev) { msg.textContent = 'Válassz csoportot.'; msg.className = 'stock-form-msg error'; return; }
+  btn.disabled = true; btn.textContent = 'Alkalmazás…';
+  try {
+    const body = { mode: document.getElementById('bp-mode-select').value, value: document.getElementById('bp-value-input').value, csoportNev };
+    const res = await api('/api/products/bulk-price', { method: 'POST', body: JSON.stringify(body) });
+    msg.textContent = `✓ ${res.count} cikk ára módosítva (függőben).`; msg.className = 'stock-form-msg ok';
+    loadMasterdataView();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Alkalmaz a csoportra';
+  }
+});
+
+document.getElementById('md-import-btn').addEventListener('click', () => document.getElementById('md-import-file').click());
+document.getElementById('md-import-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const msg = document.getElementById('md-import-msg');
+  msg.textContent = 'Importálás…'; msg.className = 'stock-form-msg';
+  try {
+    const text = await file.text();
+    const res = await fetch('/api/products/import', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'text/csv' }, body: text });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Ismeretlen hiba');
+    msg.textContent = `✓ ${data.count} cikk importálva (függőben)${data.errors.length ? ` — ${data.errors.length} hibás sor kihagyva` : ''}.`;
+    msg.className = 'stock-form-msg ok';
+    loadMasterdataView();
+  } catch (err) {
+    msg.textContent = err.message; msg.className = 'stock-form-msg error';
+  } finally {
+    e.target.value = '';
   }
 });
 

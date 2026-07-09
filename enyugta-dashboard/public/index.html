@@ -88,6 +88,7 @@
       <button class="nav-item is-active" data-view="overview">Áttekintés</button>
       <button class="nav-item" data-view="revenue">Forgalom</button>
       <button class="nav-item" data-view="products">Cikk eladások</button>
+      <button class="nav-item" data-view="masterdata">Cikktörzs</button>
       <button class="nav-item" data-view="receipts">Nyugták</button>
       <button class="nav-item" data-view="ntak">NTAK</button>
       <button class="nav-item" data-view="stock">Készlet</button>
@@ -233,6 +234,99 @@
             <button class="btn-tiny" id="products-next">Következő ›</button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- --- CIKKTÖRZS --- -->
+    <section class="view" data-view="masterdata" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Cikktörzs</div>
+            <div class="card-subtitle">a módosítások nem azonnal élesek — a következő androidos szinkronig "függőben" maradnak</div>
+          </div>
+        </div>
+        <input type="search" class="search-input masterdata-search" id="masterdata-search-input" placeholder="Keresés a cikkek között…">
+        <table class="data-table" id="masterdata-table">
+          <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title" id="masterdata-form-title">Új cikk / módosítás</div>
+        <form id="masterdata-form" class="stock-receipt-form">
+          <div class="stock-field stock-field-wide">
+            <label for="md-nev-input">Cikk neve</label>
+            <input id="md-nev-input" placeholder="pl. Espresso" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-ar-input">Bruttó ár</label>
+            <input type="number" id="md-ar-input" min="0" step="any" placeholder="pl. 650" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-afa-input">ÁFA kód</label>
+            <input id="md-afa-input" placeholder="pl. 27%" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-me-input">Egység</label>
+            <input id="md-me-input" placeholder="pl. Darab">
+          </div>
+          <div class="stock-field">
+            <label for="md-csoport-input">Csoport</label>
+            <input list="md-csoport-list" id="md-csoport-input" placeholder="pl. Kávézó kínálat">
+            <datalist id="md-csoport-list"></datalist>
+          </div>
+          <div class="stock-field">
+            <label for="md-vonalkod-input">Vonalkód</label>
+            <input id="md-vonalkod-input" placeholder="opcionális">
+          </div>
+          <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
+          <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
+          <div class="stock-form-msg" id="masterdata-form-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Tömeges árváltoztatás</div>
+        <form id="bulk-price-form" class="stock-receipt-form">
+          <div class="stock-field">
+            <label for="bp-csoport-select">Csoport</label>
+            <select id="bp-csoport-select"><option value="">— válassz —</option></select>
+          </div>
+          <div class="stock-field">
+            <label for="bp-mode-select">Módosítás típusa</label>
+            <select id="bp-mode-select">
+              <option value="percent">Százalék (%)</option>
+              <option value="fixed">Fix összeg (Ft)</option>
+            </select>
+          </div>
+          <div class="stock-field">
+            <label for="bp-value-input">Érték</label>
+            <input type="number" id="bp-value-input" step="any" placeholder="pl. 10 vagy -5">
+          </div>
+          <button type="submit" class="btn-primary" id="bp-submit-btn">Alkalmaz a csoportra</button>
+          <div class="stock-form-msg" id="bulk-price-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Excel (CSV) import / export</div>
+        <div class="masterdata-io-row">
+          <a href="/api/products/import-template" class="btn-tiny" download>⬇ Minta letöltése</a>
+          <a href="/api/products/export" class="btn-tiny" download>⬇ Jelenlegi törzs letöltése</a>
+          <input type="file" id="md-import-file" accept=".csv" hidden>
+          <button class="btn-tiny" id="md-import-btn">⬆ CSV importálása</button>
+        </div>
+        <div class="stock-form-msg" id="md-import-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Módosítások állapota</div>
+        <table class="data-table" id="masterdata-changes-table">
+          <thead><tr><th>Időpont</th><th>Cikk</th><th class="td-right">Új ár</th><th>Forrás</th><th>Állapot</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
