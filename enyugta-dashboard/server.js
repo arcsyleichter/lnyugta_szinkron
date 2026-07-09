@@ -171,6 +171,14 @@ stockDb.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_bevetelezesek_company ON bevetelezesek(company_key);
   CREATE INDEX IF NOT EXISTS idx_bevetelezesek_cikk ON bevetelezesek(company_key, cikk_nev);
+
+  CREATE TABLE IF NOT EXISTS keszlet_riasztas (
+    company_key TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('cikk','csoport')),
+    nev TEXT NOT NULL,
+    kuszob NUMERIC NOT NULL,
+    PRIMARY KEY (company_key, scope, nev)
+  );
 `);
 
 // ---------------------------------------------------------------------------
@@ -609,8 +617,10 @@ route('GET', '/api/products/master', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const rows = all(session.companyKey,
-    `SELECT megnevezes AS nev, me, bruttoar, afakod, vonalkod, status
-     FROM cikkt WHERE status = 'A' ORDER BY megnevezes`
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status,
+            IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
+     WHERE c.status = 'A' ORDER BY c.megnevezes`
   );
   sendJson(res, 200, { items: rows });
 });
@@ -620,17 +630,36 @@ route('GET', '/api/products/master', async (req, res) => {
 // bevételezések és a szinkronizált nytet-ből számolt eladások különbségéből
 // adódik a jelenlegi készlet. Teljes, dátumhatár nélküli összesítés (a
 // készlet fizikai állapot, nem egy kiválasztott jelentési időszakra
-// vonatkozik).
+// vonatkozik). MINDEN aktív cikk szerepel a listában, akkor is, ha még
+// egyszer sem volt hozzá bevételezés rögzítve (0-ként) — ez szándékos: a
+// meglévő boltoknak a valós készletet egy nyitó bevételezéssel kell majd
+// feltölteniük, addig természetes, hogy negatív értéket mutat.
 // ---------------------------------------------------------------------------
-route('GET', '/api/stock', async (req, res) => {
+function readThresholds(companyKey) {
+  const rows = stockDb.prepare(`SELECT scope, nev, kuszob FROM keszlet_riasztas WHERE company_key = ?`).all(companyKey);
+  const cikk = new Map(), csoport = new Map();
+  for (const r of rows) (r.scope === 'cikk' ? cikk : csoport).set(r.nev, r.kuszob);
+  return { cikk, csoport };
+}
+
+route('GET', '/api/stock', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const k = session.companyKey;
+  const q = (query.q || '').trim().toLowerCase();
+  const csoportSzuro = (query.csoport || '').trim();
 
+  const products = all(k,
+    `SELECT c.megnevezes AS nev, c.me,
+            IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
+     WHERE c.status = 'A'`
+  );
   const received = stockDb.prepare(
-    `SELECT cikk_nev AS nev, me, SUM(mennyiseg) AS mennyiseg, MAX(datum) AS utolsoBevetelezes
+    `SELECT cikk_nev AS nev, SUM(mennyiseg) AS mennyiseg, MAX(datum) AS utolsoBevetelezes
      FROM bevetelezesek WHERE company_key = ? GROUP BY cikk_nev`
   ).all(k);
+  const receivedMap = new Map(received.map((r) => [r.nev, r]));
   const sold = all(k,
     `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg
      FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
@@ -638,16 +667,39 @@ route('GET', '/api/stock', async (req, res) => {
      GROUP BY nt.megnevezes`
   );
   const soldMap = new Map(sold.map((r) => [r.nev, r.mennyiseg]));
+  const thresholds = readThresholds(k);
 
-  const items = received.map((r) => ({
-    nev: r.nev, me: r.me,
-    bevetelezve: r.mennyiseg,
-    eladva: soldMap.get(r.nev) || 0,
-    keszlet: r.mennyiseg - (soldMap.get(r.nev) || 0),
-    utolsoBevetelezes: r.utolsoBevetelezes,
-  })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+  // olyan cikk is bekerülhet, ami már nincs az aktív cikkt-ben, de van rá
+  // bevételezés vagy eladás (pl. kifutott termék) — ne tűnjön el nyomtalanul
+  const byName = new Map(products.map((p) => [p.nev, p]));
+  for (const r of received) if (!byName.has(r.nev)) byName.set(r.nev, { nev: r.nev, me: null, csoportNev: 'Nincs csoport' });
+  for (const s of sold) if (!byName.has(s.nev)) byName.set(s.nev, { nev: s.nev, me: null, csoportNev: 'Nincs csoport' });
 
-  sendJson(res, 200, { items });
+  let items = [...byName.values()].map((p) => {
+    const r = receivedMap.get(p.nev);
+    const bevetelezve = r ? r.mennyiseg : 0;
+    const eladva = soldMap.get(p.nev) || 0;
+    const keszlet = bevetelezve - eladva;
+    const kuszob = thresholds.cikk.has(p.nev) ? thresholds.cikk.get(p.nev)
+      : (thresholds.csoport.has(p.csoportNev) ? thresholds.csoport.get(p.csoportNev) : null);
+    return {
+      nev: p.nev, me: p.me, csoportNev: p.csoportNev,
+      bevetelezve, eladva, keszlet,
+      utolsoBevetelezes: r ? r.utolsoBevetelezes : null,
+      kuszob, alacsony: kuszob != null && keszlet < kuszob,
+    };
+  });
+
+  // csoportok listája (szűretlen alapon, hogy a csempék ne tűnjenek el szűréskor)
+  const groupCounts = new Map();
+  for (const it of items) groupCounts.set(it.csoportNev, (groupCounts.get(it.csoportNev) || 0) + 1);
+  const groups = [...groupCounts.entries()].map(([nev, cnt]) => ({ nev, cnt, kuszob: thresholds.csoport.has(nev) ? thresholds.csoport.get(nev) : null })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  if (csoportSzuro) items = items.filter((it) => it.csoportNev === csoportSzuro);
+  if (q) items = items.filter((it) => it.nev.toLowerCase().includes(q));
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  sendJson(res, 200, { items, groups });
 });
 
 route('GET', '/api/stock/receipts', async (req, res, query) => {
@@ -690,6 +742,33 @@ route('DELETE', '/api/stock/receipt', async (req, res, query) => {
   if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
   const result = stockDb.prepare(`DELETE FROM bevetelezesek WHERE id = ? AND company_key = ?`).run(id, session.companyKey);
   if (result.changes === 0) return sendJson(res, 404, { error: 'Nem található (vagy nem a te cégedhez tartozik).' });
+  sendJson(res, 200, { ok: true });
+});
+
+// Riasztási küszöb beállítása/törlése cikkre vagy egész csoportra.
+route('POST', '/api/stock/threshold', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const scope = body.scope === 'csoport' ? 'csoport' : 'cikk';
+  const nev = String(body.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
+  const kuszob = parseFloat(body.kuszob);
+  if (!Number.isFinite(kuszob) || kuszob < 0) return sendJson(res, 400, { error: 'A küszöbnek nemnegatív számnak kell lennie.' });
+  stockDb.prepare(
+    `INSERT INTO keszlet_riasztas (company_key, scope, nev, kuszob) VALUES (?, ?, ?, ?)
+     ON CONFLICT(company_key, scope, nev) DO UPDATE SET kuszob = excluded.kuszob`
+  ).run(session.companyKey, scope, nev, kuszob);
+  sendJson(res, 200, { ok: true });
+});
+
+route('DELETE', '/api/stock/threshold', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const scope = query.scope === 'csoport' ? 'csoport' : 'cikk';
+  const nev = String(query.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
+  stockDb.prepare(`DELETE FROM keszlet_riasztas WHERE company_key = ? AND scope = ? AND nev = ?`).run(session.companyKey, scope, nev);
   sendJson(res, 200, { ok: true });
 });
 

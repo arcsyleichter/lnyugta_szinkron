@@ -91,6 +91,7 @@
       <button class="nav-item" data-view="receipts">Nyugták</button>
       <button class="nav-item" data-view="ntak">NTAK</button>
       <button class="nav-item" data-view="stock">Készlet</button>
+      <button class="nav-item nav-subitem" data-view="stock-receipt">↳ Bevételezés</button>
       <button class="nav-item" data-view="sync">Szinkronizáció</button>
     </nav>
     <div class="sidebar-footer">
@@ -104,7 +105,7 @@
   </aside>
 
   <main class="main">
-    <header class="topbar">
+    <header class="topbar" id="main-topbar">
       <div class="date-range" id="date-range-control">
         <select id="range-select" class="range-select">
           <optgroup label="Gyors">
@@ -293,6 +294,28 @@
     <!-- --- KÉSZLET --- -->
     <section class="view" data-view="stock" hidden>
       <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Jelenlegi készlet</div>
+            <div class="card-subtitle">bevételezett mennyiség − összes eddigi eladás, cikkenként</div>
+          </div>
+          <button class="btn-primary" id="stock-goto-receipt-btn">+ Új bevételezés</button>
+        </div>
+
+        <input type="search" class="search-input stock-search" id="stock-search-input" placeholder="Keresés a cikkek között…">
+
+        <div class="stock-group-tiles" id="stock-group-tiles"></div>
+
+        <table class="data-table" id="stock-table">
+          <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th><th>Riasztási küszöb</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- --- BEVÉTELEZÉS --- -->
+    <section class="view" data-view="stock-receipt" hidden>
+      <div class="card">
         <div class="card-title">Új bevételezés</div>
         <form id="stock-receipt-form" class="stock-receipt-form">
           <div class="stock-field stock-field-wide">
@@ -327,19 +350,6 @@
           <button type="submit" class="btn-primary" id="stock-add-btn">Bevételezés rögzítése</button>
           <div class="stock-form-msg" id="stock-form-msg"></div>
         </form>
-      </div>
-
-      <div class="card">
-        <div class="card-title-row">
-          <div>
-            <div class="card-title">Jelenlegi készlet</div>
-            <div class="card-subtitle">bevételezett mennyiség − összes eddigi eladás, cikkenként</div>
-          </div>
-        </div>
-        <table class="data-table" id="stock-table">
-          <thead><tr><th>Cikk</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th></tr></thead>
-          <tbody></tbody>
-        </table>
       </div>
 
       <div class="card">

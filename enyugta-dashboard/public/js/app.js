@@ -352,14 +352,19 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     btn.classList.add('is-active');
     const view = btn.dataset.view;
     document.querySelectorAll('.view').forEach((v) => { v.hidden = v.dataset.view !== view; });
+    document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt');
     if (view === 'revenue') loadRevenueView();
     if (view === 'products') loadProductsView(true);
     if (view === 'receipts') loadReceiptsView(true);
     if (view === 'ntak') loadNtakView();
     if (view === 'stock') loadStockView();
+    if (view === 'stock-receipt') { loadStockProductList(); loadStockReceiptLog(); }
     if (view === 'sync') loadSyncView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
   });
+});
+document.getElementById('stock-goto-receipt-btn').addEventListener('click', () => {
+  document.querySelector('.nav-item[data-view="stock-receipt"]').click();
 });
 
 /* ============================================================
@@ -429,7 +434,8 @@ async function refreshAll(spin) {
     if (activeView === 'products') await loadProductsView(false);
     if (activeView === 'receipts') await loadReceiptsView(false);
     if (activeView === 'ntak') await loadNtakView();
-    if (activeView === 'stock') await loadStockView(false);
+    if (activeView === 'stock') await loadStockView();
+    if (activeView === 'stock-receipt') await loadStockReceiptLog();
   } finally {
     if (spin) setTimeout(() => icon.classList.remove('spin'), 400);
   }
@@ -791,6 +797,7 @@ async function loadNtakView() {
    Készlet nézet
    ============================================================ */
 let stockProductsLoaded = false;
+const stockFilter = { q: '', csoport: '' };
 
 async function loadStockProductList() {
   if (stockProductsLoaded) return;
@@ -802,55 +809,111 @@ async function loadStockProductList() {
   } catch (_) { /* nem kritikus, a mező enélkül is szabadon kitölthető */ }
 }
 
-async function loadStockView(fetchProducts = true) {
-  if (fetchProducts) loadStockProductList();
+function renderStockGroupTiles(groups) {
+  const box = document.getElementById('stock-group-tiles');
+  const allTile = `<button class="stock-tile ${!stockFilter.csoport ? 'is-active' : ''}" data-csoport="">Összes<span class="stock-tile-count">${groups.reduce((s, g) => s + g.cnt, 0)}</span></button>`;
+  const tiles = groups.map((g) => `
+    <div class="stock-tile-wrap">
+      <button class="stock-tile ${stockFilter.csoport === g.nev ? 'is-active' : ''}" data-csoport="${escapeHtml(g.nev)}">
+        ${escapeHtml(g.nev)}<span class="stock-tile-count">${g.cnt}</span>
+      </button>
+      <input type="number" min="0" class="stock-group-threshold-input" placeholder="riasztás" title="Csoportszintű riasztási küszöb (${escapeHtml(g.nev)})" data-csoport="${escapeHtml(g.nev)}" value="${g.kuszob != null ? g.kuszob : ''}">
+    </div>`).join('');
+  box.innerHTML = allTile + tiles;
+  box.querySelectorAll('.stock-tile').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      stockFilter.csoport = btn.dataset.csoport;
+      loadStockView();
+    });
+  });
+  box.querySelectorAll('.stock-group-threshold-input').forEach((inp) => {
+    inp.addEventListener('change', () => saveThreshold('csoport', inp.dataset.csoport, inp.value, inp));
+  });
+}
 
-  const stock = await api('/api/stock');
+async function saveThreshold(scope, nev, kuszob, inputEl) {
+  try {
+    if (kuszob === '' || kuszob == null) {
+      await api(`/api/stock/threshold?scope=${scope}&nev=${encodeURIComponent(nev)}`, { method: 'DELETE' });
+    } else {
+      await api('/api/stock/threshold', { method: 'POST', body: JSON.stringify({ scope, nev, kuszob }) });
+    }
+    inputEl.classList.add('is-saved');
+    setTimeout(() => inputEl.classList.remove('is-saved'), 900);
+  } catch (e) {
+    alert('Nem sikerült menteni a riasztási küszöböt: ' + e.message);
+  }
+}
+
+async function loadStockView() {
+  const params = new URLSearchParams();
+  if (stockFilter.q) params.set('q', stockFilter.q);
+  if (stockFilter.csoport) params.set('csoport', stockFilter.csoport);
+  const stock = await api(`/api/stock?${params.toString()}`);
+
+  renderStockGroupTiles(stock.groups);
+
   const tbody = document.querySelector('#stock-table tbody');
   tbody.innerHTML = '';
   if (!stock.items.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Még nincs egyetlen bevételezés sem — rögzíts egyet fent.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a szűrésnek megfelelő cikk.</td></tr>';
   } else {
     stock.items.forEach((it) => {
       const tr = document.createElement('tr');
       const keszletCls = it.keszlet < 0 ? 'stock-negative' : '';
       tr.innerHTML = `
-        <td>${escapeHtml(it.nev)}</td>
+        <td>${escapeHtml(it.nev)} ${it.alacsony ? '<span class="ntak-badge warn">Alacsony!</span>' : ''}</td>
+        <td>${escapeHtml(it.csoportNev)}</td>
         <td class="num">${it.bevetelezve} ${escapeHtml(it.me || '')}</td>
         <td class="num">${it.eladva} ${escapeHtml(it.me || '')}</td>
         <td class="num ${keszletCls}">${it.keszlet} ${escapeHtml(it.me || '')}</td>
-        <td>${it.utolsoBevetelezes ? fmtDate(it.utolsoBevetelezes) : '—'}</td>`;
+        <td>${it.utolsoBevetelezes ? fmtDate(it.utolsoBevetelezes) : '—'}</td>
+        <td><input type="number" min="0" class="stock-threshold-input" value="${it.kuszob != null ? it.kuszob : ''}" placeholder="—" data-nev="${escapeHtml(it.nev)}"></td>`;
       tbody.appendChild(tr);
     });
+    tbody.querySelectorAll('.stock-threshold-input').forEach((inp) => {
+      inp.addEventListener('change', () => saveThreshold('cikk', inp.dataset.nev, inp.value, inp));
+    });
   }
+}
 
+let stockSearchTimer = null;
+document.getElementById('stock-search-input').addEventListener('input', (e) => {
+  clearTimeout(stockSearchTimer);
+  stockSearchTimer = setTimeout(() => { stockFilter.q = e.target.value.trim(); loadStockView(); }, 300);
+});
+
+/* ============================================================
+   Bevételezés nézet
+   ============================================================ */
+async function loadStockReceiptLog() {
   const receipts = await api('/api/stock/receipts?limit=50');
   const logTbody = document.querySelector('#stock-log-table tbody');
   logTbody.innerHTML = '';
   if (!receipts.items.length) {
     logTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Még nincs rögzített bevételezés.</td></tr>';
-  } else {
-    receipts.items.forEach((r) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${fmtDate(r.datum)}</td>
-        <td>${escapeHtml(r.cikkNev)}</td>
-        <td class="num">${r.mennyiseg} ${escapeHtml(r.me || '')}</td>
-        <td>${escapeHtml(r.szallito || '—')}</td>
-        <td>${escapeHtml(r.megjegyzes || '—')}</td>
-        <td><button class="btn-delete-receipt" data-id="${r.id}" title="Törlés">✕</button></td>`;
-      logTbody.appendChild(tr);
-    });
-    logTbody.querySelectorAll('.btn-delete-receipt').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('Biztosan törlöd ezt a bevételezést?')) return;
-        try {
-          await api(`/api/stock/receipt?id=${btn.dataset.id}`, { method: 'DELETE' });
-          loadStockView(false);
-        } catch (e) { alert('Nem sikerült törölni: ' + e.message); }
-      });
-    });
+    return;
   }
+  receipts.items.forEach((r) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${fmtDate(r.datum)}</td>
+      <td>${escapeHtml(r.cikkNev)}</td>
+      <td class="num">${r.mennyiseg} ${escapeHtml(r.me || '')}</td>
+      <td>${escapeHtml(r.szallito || '—')}</td>
+      <td>${escapeHtml(r.megjegyzes || '—')}</td>
+      <td><button class="btn-delete-receipt" data-id="${r.id}" title="Törlés">✕</button></td>`;
+    logTbody.appendChild(tr);
+  });
+  logTbody.querySelectorAll('.btn-delete-receipt').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Biztosan törlöd ezt a bevételezést?')) return;
+      try {
+        await api(`/api/stock/receipt?id=${btn.dataset.id}`, { method: 'DELETE' });
+        loadStockReceiptLog();
+      } catch (e) { alert('Nem sikerült törölni: ' + e.message); }
+    });
+  });
 }
 
 document.getElementById('stock-receipt-form').addEventListener('submit', async (e) => {
@@ -872,7 +935,8 @@ document.getElementById('stock-receipt-form').addEventListener('submit', async (
     await api('/api/stock/receipt', { method: 'POST', body: JSON.stringify(body) });
     msg.textContent = '✓ Bevételezés rögzítve.'; msg.className = 'stock-form-msg ok';
     document.getElementById('stock-receipt-form').reset();
-    loadStockView(false);
+    document.getElementById('stock-datum-input').value = todayIso();
+    loadStockReceiptLog();
   } catch (e2) {
     msg.textContent = e2.message; msg.className = 'stock-form-msg error';
   } finally {
