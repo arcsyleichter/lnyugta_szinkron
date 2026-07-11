@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L-NYUGTA — élő értékesítési nézegető</title>
+<link rel="icon" type="image/svg+xml" href="/img/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- ===================== BEJELENTKEZÉS ===================== -->
+<section id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA nézegető</div>
+        <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
+      </div>
+    </div>
+    <p class="login-lede">Add meg a céged adószámát és a hozzáférési kódodat a belépéshez. A kódot a cég adminisztrátorától kapod.</p>
+    <form id="login-form" autocomplete="off">
+      <label for="adoszam-input">Adószám</label>
+      <input id="adoszam-input" name="adoszam" type="text" placeholder="pl. 27129430" inputmode="text" required>
+      <label for="code-input">Hozzáférési kód</label>
+      <input id="code-input" name="code" type="password" placeholder="6 jegyű kód" inputmode="numeric" maxlength="6" required>
+      <button type="submit" id="login-btn">Belépés</button>
+      <div class="login-error" id="login-error" hidden></div>
+    </form>
+    <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
+         JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
+         mert bárkinek megmutatja az összes regisztrált cég adószámát. -->
+    <div class="login-hint" id="login-hint" hidden>
+      <div class="login-hint-title">Ideiglenes — teszteléshez érvényes adószámok</div>
+      <ul class="login-hint-list" id="login-hint-list"></ul>
+    </div>
+  </div>
+  <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul, és egy külön hozzáférési kóddal védett.</div>
+  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
+</section>
+
+<!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
+<section id="admin-login-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA admin</div>
+        <div class="brand-sub">összes cég áttekintése</div>
+      </div>
+    </div>
+    <p class="login-lede">Ez a bejelentkezés minden regisztrált cég szinkron-naplóját és NTAK-állapotát megmutatja — csak arra használd, aki erre jogosult.</p>
+    <form id="admin-login-form" autocomplete="off">
+      <label for="admin-password-input">Admin jelszó</label>
+      <input id="admin-password-input" name="password" type="password" placeholder="••••••••" required>
+      <button type="submit" id="admin-login-btn">Belépés</button>
+      <div class="login-error" id="admin-login-error" hidden></div>
+    </form>
+  </div>
+  <div class="admin-entry"><a href="#" id="show-company-login">‹ Vissza a céges bejelentkezéshez</a></div>
+</section>
+
+<!-- ===================== DASHBOARD ===================== -->
+<div id="app-screen" class="app-shell" hidden>
+
+  <button class="hamburger-btn" id="hamburger-btn" aria-label="Menü megnyitása">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-topline">
+      <div class="brand brand--sidebar">
+        <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+        <div>
+          <div class="brand-name">L-NYUGTA</div>
+          <div class="brand-sub" id="company-name">—</div>
+        </div>
+      </div>
+      <button class="sidebar-close-btn" id="sidebar-close-btn" aria-label="Menü bezárása">✕</button>
+    </div>
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="overview">Áttekintés</button>
+      <button class="nav-item" data-view="revenue">Forgalom</button>
+      <button class="nav-item" data-view="products">Cikk eladások</button>
+      <button class="nav-item" data-view="masterdata">Cikktörzs</button>
+      <button class="nav-item" data-view="receipts">Nyugták</button>
+      <button class="nav-item" data-view="ntak">NTAK</button>
+      <button class="nav-item" data-view="stock">Készlet</button>
+      <button class="nav-item nav-subitem" data-view="stock-receipt">↳ Bevételezés</button>
+      <button class="nav-item" data-view="sync">Szinkronizáció</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sync-pill" id="sync-pill">
+        <span class="dot" id="sync-dot"></span>
+        <span id="sync-pill-text">szinkron ellenőrzése…</span>
+      </div>
+      <button class="btn-ghost" id="back-to-admin-btn" hidden>‹ Admin panel</button>
+      <button class="btn-ghost" id="logout-btn">Kilépés</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar" id="main-topbar">
+      <div class="date-range" id="date-range-control">
+        <select id="range-select" class="range-select">
+          <optgroup label="Gyors">
+            <option value="today">Ma</option>
+            <option value="7" selected>7 nap</option>
+            <option value="30">30 nap</option>
+            <option value="90">90 nap</option>
+          </optgroup>
+          <optgroup label="Aktuális időszak">
+            <option value="week-td">Ezen a héten</option>
+            <option value="month-td">Ezen a hónapban</option>
+            <option value="year-td">Idén</option>
+          </optgroup>
+          <optgroup label="Előző időszak">
+            <option value="prev-week">Előző hét</option>
+            <option value="prev-month">Előző hónap</option>
+            <option value="prev-year">Előző év</option>
+          </optgroup>
+          <optgroup label="Egyedi">
+            <option value="single-day">Egy nap</option>
+            <option value="custom">Egyedi tartomány</option>
+          </optgroup>
+        </select>
+        <span class="range-single-input" id="range-single-input" hidden>
+          <input type="date" id="single-day-input">
+          <button class="btn-tiny" id="apply-single-day-btn">Alkalmaz</button>
+        </span>
+        <span class="range-custom-inputs" id="range-custom-inputs" hidden>
+          <input type="date" id="from-input"> – <input type="date" id="to-input">
+          <button class="btn-tiny" id="apply-range-btn">Alkalmaz</button>
+        </span>
+      </div>
+      <span class="range-label" id="range-label"></span>
+      <button class="btn-refresh" id="refresh-btn" title="Adatok frissítése">
+        <span class="refresh-icon">⟳</span> Frissítés
+      </button>
+    </header>
+
+    <!-- --- ÁTTEKINTÉS --- -->
+    <section class="view" data-view="overview">
+      <div class="receipt-strip">
+        <div class="receipt-strip-inner">
+          <div class="kpi">
+            <div class="kpi-label">Forgalom</div>
+            <div class="kpi-value" id="kpi-revenue">—</div>
+            <div class="kpi-trend" id="kpi-revenue-trend"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Nyugták száma</div>
+            <div class="kpi-value" id="kpi-count">—</div>
+            <div class="kpi-trend" id="kpi-count-trend"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Átlagos kosárérték</div>
+            <div class="kpi-value" id="kpi-avg">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Napi forgalom</div>
+          <div id="overview-chart" class="chart-holder"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Fizetési módok szerint</div>
+          <div id="fizmod-list" class="fizmod-list"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Legjobban fogyó cikkek</div>
+        <div id="overview-top-products"></div>
+      </div>
+    </section>
+
+    <!-- --- FORGALOM --- -->
+    <section class="view" data-view="revenue" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Forgalom alakulása</div>
+          <div class="group-toggle" id="group-toggle">
+            <button class="chip is-active" data-group="day">Napi</button>
+            <button class="chip" data-group="week">Heti</button>
+            <button class="chip" data-group="month">Havi</button>
+            <button class="chip" data-group="hour">Óránkénti</button>
+          </div>
+          <div class="group-hint" id="group-hint" hidden></div>
+        </div>
+        <div id="revenue-chart" class="chart-holder chart-holder--tall"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Fizetési módok bontásban</div>
+          <table class="data-table" id="fizmod-table">
+            <thead><tr><th>Fizetési mód</th><th class="td-right">Nyugták</th><th class="td-right">Forgalom</th><th class="td-right">Részarány</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <div class="card-title">Árbevétel ÁFA kulcsok szerint</div>
+          <table class="data-table" id="vat-table">
+            <thead><tr><th>ÁFA kulcs</th><th class="td-right">Nettó</th><th class="td-right">ÁFA</th><th class="td-right">Bruttó</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- CIKK ELADÁSOK --- -->
+    <section class="view" data-view="products" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Cikk eladások</div>
+          <input type="search" class="search-input" id="products-search" placeholder="Termék keresése…">
+        </div>
+        <table class="data-table" id="products-table">
+          <thead><tr><th>Termék</th><th class="td-right">Mennyiség</th><th class="td-right">Nyugtákon</th><th class="td-right">Árbevétel</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="table-footer">
+          <span id="products-count"></span>
+          <div class="pager">
+            <button class="btn-tiny" id="products-prev">‹ Előző</button>
+            <button class="btn-tiny" id="products-next">Következő ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- CIKKTÖRZS --- -->
+    <section class="view" data-view="masterdata" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Cikktörzs</div>
+            <div class="card-subtitle">a módosítások nem azonnal élesek — a következő androidos szinkronig "függőben" maradnak</div>
+          </div>
+        </div>
+        <input type="search" class="search-input masterdata-search" id="masterdata-search-input" placeholder="Keresés a cikkek között…">
+        <table class="data-table" id="masterdata-table">
+          <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title" id="masterdata-form-title">Új cikk / módosítás</div>
+        <form id="masterdata-form" class="stock-receipt-form">
+          <div class="stock-field stock-field-wide">
+            <label for="md-nev-input">Cikk neve</label>
+            <input id="md-nev-input" placeholder="pl. Espresso" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-ar-input">Bruttó ár</label>
+            <input type="number" id="md-ar-input" min="0" step="any" placeholder="pl. 650" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-afa-input">ÁFA kód</label>
+            <input id="md-afa-input" placeholder="pl. 27%" required>
+          </div>
+          <div class="stock-field">
+            <label for="md-me-input">Egység</label>
+            <input id="md-me-input" placeholder="pl. Darab">
+          </div>
+          <div class="stock-field">
+            <label for="md-csoport-input">Csoport</label>
+            <input list="md-csoport-list" id="md-csoport-input" placeholder="pl. Kávézó kínálat">
+            <datalist id="md-csoport-list"></datalist>
+          </div>
+          <div class="stock-field">
+            <label for="md-vonalkod-input">Vonalkód</label>
+            <input id="md-vonalkod-input" placeholder="opcionális">
+          </div>
+          <div class="stock-field">
+            <label for="md-afakodelv-input">Elviteli ÁFA kód</label>
+            <input id="md-afakodelv-input" placeholder="ha eltér a helybenitől, pl. 27%">
+          </div>
+          <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
+          <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
+          <div class="stock-form-msg" id="masterdata-form-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Tömeges árváltoztatás</div>
+        <form id="bulk-price-form" class="stock-receipt-form">
+          <div class="stock-field">
+            <label for="bp-csoport-select">Csoport</label>
+            <select id="bp-csoport-select"><option value="">— válassz —</option></select>
+          </div>
+          <div class="stock-field">
+            <label for="bp-mode-select">Módosítás típusa</label>
+            <select id="bp-mode-select">
+              <option value="percent">Százalék (%)</option>
+              <option value="fixed">Fix összeg (Ft)</option>
+            </select>
+          </div>
+          <div class="stock-field">
+            <label for="bp-value-input">Érték</label>
+            <input type="number" id="bp-value-input" step="any" placeholder="pl. 10 vagy -5">
+          </div>
+          <button type="submit" class="btn-primary" id="bp-submit-btn">Alkalmaz a csoportra</button>
+          <div class="stock-form-msg" id="bulk-price-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Excel (CSV) import / export</div>
+        <div class="masterdata-io-row">
+          <a href="/api/products/import-template" class="btn-tiny" download>⬇ Minta letöltése</a>
+          <a href="/api/products/export" class="btn-tiny" download>⬇ Jelenlegi törzs letöltése</a>
+          <input type="file" id="md-import-file" accept=".csv" hidden>
+          <button class="btn-tiny" id="md-import-btn">⬆ CSV importálása</button>
+        </div>
+        <div class="stock-form-msg" id="md-import-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Módosítások állapota</div>
+        <table class="data-table" id="masterdata-changes-table">
+          <thead><tr><th>Időpont</th><th>Cikk</th><th class="td-right">Új ár</th><th>Forrás</th><th>Állapot</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- --- NYUGTÁK --- -->
+    <section class="view" data-view="receipts" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title">Nyugták</div>
+          <input type="search" class="search-input" id="receipts-search" placeholder="Nyugtaszám keresése…">
+        </div>
+        <div class="filters-row">
+          <select id="receipts-fizmod">
+            <option value="">Minden fizetési mód</option>
+            <option value="kp">Készpénz</option>
+            <option value="bankkártya">Bankkártya</option>
+            <option value="egyéb">Egyéb</option>
+          </select>
+          <input type="number" id="receipts-min" placeholder="Min. összeg">
+          <input type="number" id="receipts-max" placeholder="Max. összeg">
+          <button class="btn-tiny" id="receipts-filter-btn">Szűrés</button>
+        </div>
+        <table class="data-table" id="receipts-table">
+          <thead><tr><th>Nyugtaszám</th><th>Dátum</th><th>Fizetési mód</th><th class="td-right">Összeg</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="table-footer">
+          <span id="receipts-count"></span>
+          <div class="pager">
+            <button class="btn-tiny" id="receipts-prev">‹ Előző</button>
+            <button class="btn-tiny" id="receipts-next">Következő ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- NTAK --- -->
+    <section class="view" data-view="ntak" hidden>
+      <div class="card">
+        <div class="card-title">NTAK adatküldések állapota</div>
+        <div class="ntak-summary-row" id="ntak-status-summary"></div>
+        <div class="ntak-summary-row" id="ntak-type-summary"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Legutóbbi adatküldések</div>
+        <table class="data-table" id="ntak-submissions-table">
+          <thead><tr><th>Típus</th><th>Küldve</th><th>Válasz</th><th>Állapot</th><th>UUID</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title">Napi nyitás–zárás</div>
+        <table class="data-table" id="ntak-napzaras-table">
+          <thead><tr><th>Nap</th><th>Nyitás</th><th>Zárás</th><th>Nap típusa</th><th class="td-right">Borravaló</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- --- KÉSZLET --- -->
+    <section class="view" data-view="stock" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Jelenlegi készlet</div>
+            <div class="card-subtitle">bevételezett mennyiség − összes eddigi eladás, cikkenként</div>
+          </div>
+          <button class="btn-primary" id="stock-goto-receipt-btn">+ Új bevételezés</button>
+        </div>
+
+        <input type="search" class="search-input stock-search" id="stock-search-input" placeholder="Keresés a cikkek között…">
+
+        <div class="stock-group-tiles" id="stock-group-tiles"></div>
+
+        <table class="data-table" id="stock-table">
+          <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th><th>Riasztási küszöb</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- --- BEVÉTELEZÉS --- -->
+    <section class="view" data-view="stock-receipt" hidden>
+      <div class="card">
+        <div class="card-title">Új bevételezés</div>
+        <form id="stock-receipt-form" class="stock-receipt-form">
+          <div class="stock-field stock-field-wide">
+            <label for="stock-cikk-input">Cikk</label>
+            <input list="stock-cikk-list" id="stock-cikk-input" placeholder="pl. Espresso" required>
+            <datalist id="stock-cikk-list"></datalist>
+          </div>
+          <div class="stock-field">
+            <label for="stock-mennyiseg-input">Mennyiség</label>
+            <input type="number" id="stock-mennyiseg-input" step="any" min="0" placeholder="pl. 50" required>
+          </div>
+          <div class="stock-field">
+            <label for="stock-me-input">Egység</label>
+            <input id="stock-me-input" placeholder="pl. Darab">
+          </div>
+          <div class="stock-field">
+            <label for="stock-ar-input">Besz. ár / egység</label>
+            <input type="number" id="stock-ar-input" step="any" min="0" placeholder="opcionális">
+          </div>
+          <div class="stock-field">
+            <label for="stock-szallito-input">Szállító</label>
+            <input id="stock-szallito-input" placeholder="opcionális">
+          </div>
+          <div class="stock-field">
+            <label for="stock-datum-input">Dátum</label>
+            <input type="date" id="stock-datum-input">
+          </div>
+          <div class="stock-field stock-field-wide">
+            <label for="stock-megjegyzes-input">Megjegyzés</label>
+            <input id="stock-megjegyzes-input" placeholder="opcionális">
+          </div>
+          <button type="submit" class="btn-primary" id="stock-add-btn">Bevételezés rögzítése</button>
+          <div class="stock-form-msg" id="stock-form-msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Bevételezési napló</div>
+        <table class="data-table" id="stock-log-table">
+          <thead><tr><th>Dátum</th><th>Cikk</th><th class="td-right">Mennyiség</th><th>Szállító</th><th>Megjegyzés</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- --- SZINKRONIZÁCIÓ --- -->
+    <section class="view" data-view="sync" hidden>
+      <div class="card">
+        <div class="card-title">Élő kapcsolat az androidos alkalmazással</div>
+        <p class="muted">
+          A nézegető a bejelentkezett céghez tartozó, saját adatbázis-pillanatképből
+          dolgozik (a szerver minden céget külön fájlban tart, egymástól elkülönítve).
+          Ez a fájl egy előre beállított időközönként frissül, amikor a cég androidos
+          L-NYUGTA GO appja elküldi a saját adatbázisát a szerver
+          <code>/api/sync/upload</code> végpontjára.
+        </p>
+        <div class="sync-status-box" id="sync-status-box">Betöltés…</div>
+        <button class="btn-secondary" id="sync-request-btn">Szinkron lekérdezése most</button>
+        <div id="sync-request-result" class="muted" style="margin-top:10px;"></div>
+      </div>
+    </section>
+
+    <!-- --- NYUGTA RÉSZLETEK MODAL --- -->
+    <div class="modal-backdrop" id="receipt-modal-backdrop" hidden>
+      <div class="modal receipt-modal">
+        <button class="modal-close" id="receipt-modal-close">✕</button>
+        <div id="receipt-modal-content"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ===================== ADMIN PANEL ===================== -->
+<div id="admin-screen" class="admin-shell" hidden>
+  <header class="admin-topbar">
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA <span class="admin-badge">Admin</span></div>
+        <div class="brand-sub">összes cég áttekintése</div>
+      </div>
+    </div>
+    <button class="btn-ghost" id="admin-logout-btn">Kilépés</button>
+  </header>
+
+  <main class="admin-main">
+    <div class="receipt-strip admin-kpi-strip">
+      <div class="receipt-strip-inner">
+        <div class="kpi">
+          <div class="kpi-label">Regisztrált cégek</div>
+          <div class="kpi-value" id="admin-kpi-companies">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Sikertelen szinkron (napló)</div>
+          <div class="kpi-value" id="admin-kpi-failed">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">NTAK probléma (részben/teljesen hibás)</div>
+          <div class="kpi-value" id="admin-kpi-ntak-problems">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-email-warning" id="admin-email-warning" hidden>
+      ⚠️ Az email-küldés nincs beállítva a szerveren (hiányzó <code>BREVO_API_KEY</code> / <code>BREVO_SENDER_EMAIL</code> környezeti változó) — a "Küldés" gombok nem fognak működni, amíg ezt be nem állítod (lásd README).
+    </div>
+
+    <div class="card">
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">Cégek</div>
+          <div class="card-subtitle"><span id="admin-company-count">0</span> regisztrálva</div>
+        </div>
+      </div>
+      <table class="data-table" id="admin-companies-table">
+        <thead><tr><th>Cégnév</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">NTAK állapot</div>
+          <div class="card-subtitle">minden cég, akinél van adatküldés</div>
+        </div>
+      </div>
+      <table class="data-table" id="admin-ntak-table">
+        <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title-row">
+        <div>
+          <div class="card-title">Tevékenység-napló</div>
+          <div class="card-subtitle">minden esemény, cégenként és típusonként csoportosítva</div>
+        </div>
+      </div>
+
+      <table class="data-table activity-summary-table" id="activity-summary-table">
+        <thead><tr><th>Cég</th><th class="td-right">Összesen</th><th>Legutóbbi esemény</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <div class="activity-filters">
+        <select id="activity-company-select"><option value="">Összes cég</option></select>
+        <div class="activity-type-chips" id="activity-type-chips"></div>
+      </div>
+
+      <table class="data-table" id="activity-log-table">
+        <thead><tr><th>Időpont</th><th>Cég</th><th>Típus</th><th>Állapot</th><th>Részlet</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
