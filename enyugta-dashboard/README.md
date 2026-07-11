@@ -365,6 +365,47 @@ a ténylegesen beérkezett adattal, és a módosítást "leszinkronizálva"
 (vadonatúj termék), a rendszer ezt is jelzi ("Új — függőben"), amíg az
 androidos oldal ténylegesen létre nem hozza.
 
+## Szinkron kérése igény szerint (nem csak időzítve)
+
+Alapesetben az androidos app a saját ütemezése szerint (pl. 5–15 percenként)
+küldi a friss adatbázist. Emellett most már **igény szerint is kérhető**
+szinkron — bejelentkezéskor automatikusan, vagy kézzel egy gombbal —, de
+fontos megérteni, **mit jelent ez technikailag**:
+
+A szerver **nem tud kapcsolatot kezdeményezni egy telefon felé** (nincs
+push-értesítés / Firebase beállítva) — csak arra tud válaszolni, ami hozzá
+beérkezik. Ezért ez nem "azonnali kihívás", hanem egy **jelző**, amit a
+telefonnak kell rendszeresen lekérdeznie (ugyanabban a hívásban, amit a
+cikktörzs-szinkronhoz is meg kell valósítania):
+
+```
+GET /api/sync/pending-changes?adoszam=<a cég adószáma>
+Header: x-api-key: <a szinkron API kulcs>
+```
+
+A válasz mostantól egy `syncRequested` mezőt is tartalmaz:
+```json
+{ "items": [...], "syncRequested": true, "syncRequestedAt": "2026-07-10T07:04:10.517Z" }
+```
+
+Ha `syncRequested: true`, az androidos appnak **azonnal el kell indítania a
+szokásos teljes szinkront** (a megszokott `POST /api/sync/upload`-dal) —
+nincs szükség külön visszaigazolásra, a jelző automatikusan törlődik, amint
+a feltöltés ténylegesen megérkezik.
+
+**Mikor kerül fel a jelző:**
+- amikor valaki bejelentkezik a cég adószámával a weben,
+- amikor az admin megnyit egy céget ("Megnyitás" gomb),
+- amikor valaki a "Szinkronizáció" oldalon a "Frissítés lekérdezése most"
+  gombra kattint.
+
+Ha az androidos oldal ritkán (pl. csak óránként) kérdez le, a jelző addig
+"várakozik" — a következő rendes lekérdezéskor úgyis felveszi. Ha valóban
+azonnali, néhány másodperces reakcióidő kell, az már push-értesítést
+(Firebase Cloud Messaging) igényelne — az jelentősen több androidos oldali
+munkával jár, és a szervernek is regisztrált eszköz-tokent kellene tárolnia
+cégenként. Szólj, ha ez felé szeretnél elmozdulni.
+
 ### Teszteléshez: `scripts/simulate_android_pull.py`
 
 Mielőtt az androidos oldal ténylegesen implementálja a fenti szerződést, ezzel
@@ -387,6 +428,44 @@ python3 scripts/simulate_android_pull.py --url https://lnyugta-szinkron-1.onrend
 Utána a módosított fájlt visszatöltve az `upload_sync.py`-jal, a szerver a
 következő feltöltésben automatikusan "leszinkronizálva" állapotba teszi a
 teljesült módosításokat — nincs szükség külön visszaigazoló hívásra.
+
+### NTAK-kötelezettség és kötelező cikk-adatok ellenőrzése
+
+Az NTAK (turisztikai adatszolgáltatás) szigorúan előírja, hogy minden
+értékesített terméknek legyen **fő- és alkategóriája**, **NTAK szerinti
+mennyiségi egysége** és **váltószáma** — enélkül az NTAK visszautasíthatja
+az adatküldést. Ezt a `cikkt` tábla `fokatjson`, `alkatjson`, `ntakme`,
+`ntakszorzo` mezői tárolják.
+
+A Cikktörzs oldal tetején van egy kapcsoló: **"Ez a cég NTAK
+adatszolgáltatásra kötelezett"**. Cégenként tárolt beállítás
+(`data/ntak-settings.json`), amit a cég (vagy admin, rájuk belépve) maga
+kapcsol be — nincs automatikus felismerés, mert ez jogi/üzleti besorolás.
+
+- **Ha ki van kapcsolva** (alapértelmezett): a cikk-szerkesztő űrlap nem
+  mutatja az NTAK-mezőket, és nem is kéri őket — ezeknél a cégeknél a
+  `cikkt` táblában ezek a mezők egyszerűen `NULL`/üresek maradnak
+  (a mezők maguk mindenkinél megvannak a sémában, csak nem kitöltve).
+- **Ha be van kapcsolva:** a cikk-szerkesztő űrlap megmutatja a
+  fő-/alkategória, NTAK mennyiségi egység és váltószám mezőket, és
+  **kötelezővé teszi** a kitöltésüket — hiányos adattal a mentés (vagy CSV
+  import sor) elutasításra kerül, világos hibaüzenettel.
+
+**Fontos, amit tudni kell:** a fő-/alkategóriák hivatalos, teljes
+értékkészletét az NTAK időről időre frissíti — ennek nincs nálunk
+garantáltan friss, teljes másolata, ezért **nem kényszerítünk ki egy zárt
+legördülő listát**. Ehelyett a mezők szabad szövegesek, autocomplete
+javaslattal, amit a **cégek saját, ténylegesen már használt** (és NTAK
+által elfogadott) kategóriaértékeiből építünk (`GET
+/api/ntak/category-suggestions`) — ez segít a begépelésben, de sosem
+korlátoz egy esetleg még nem látott, de valójában érvényes értékre.
+
+**Ellenőrzés a ténylegesen beérkezett adaton is:** minden valódi androidos
+szinkron feltöltés után (`POST /api/sync/upload`), ha a cég NTAK-köteles,
+a rendszer automatikusan összeveti a kért NTAK-mezőket is a beérkezett
+adattal (nem csak az árat/ÁFA-kódot) — a "NTAK" menüpontban egy
+figyelmeztető kártya listázza, ha bármelyik cikk hiányos NTAK-besorolással
+érkezett meg (`GET /api/ntak/incomplete-products`).
 
 ### Excel (CSV) import/export
 
