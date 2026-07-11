@@ -1,0 +1,27 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Ingyenes csomaghoz készült. FONTOS: az ingyenes Render web service-hez nem
+# lehet tartós lemezt csatolni, tehát minden újraindításkor / spin-down után
+# (15 perc inaktivitás) a data/companies/ mappa visszaáll a git repóban lévő
+# állapotra — az azóta érkezett androidos szinkronok elvesznek. Ez demózáshoz/
+# teszteléshez rendben van. Ha ez éles, folyamatosan szinkronizáló rendszer
+# lesz, váltsatok Starter (vagy magasabb) csomagra, és vegyétek ki a
+# kommentből az alul lévő "disk:" blokkot, hogy a data/ mappa tartósan
+# megmaradjon (lásd README.md "Telepítés Renderre" szakasza).
+services:
+  - type: web
+    name: l-nyugta-dashboard
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SYNC_API_KEY
+        generateValue: true
+    # disk:
+    #   name: l-nyugta-data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1
