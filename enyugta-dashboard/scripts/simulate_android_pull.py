@@ -47,12 +47,13 @@ import urllib.parse
 import urllib.request
 
 
-def fetch_pending(url: str, adoszam: str, api_key: str, timeout: int) -> dict:
+def fetch_pending(url: str, adoszam: str, api_key: str, timeout: int) -> list:
     endpoint = url.rstrip("/") + "/api/sync/pending-changes?adoszam=" + urllib.parse.quote(adoszam)
     req = urllib.request.Request(endpoint, headers={"x-api-key": api_key})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("items", [])
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
         try:
@@ -115,20 +116,13 @@ def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
 
 
 def run_once(args) -> None:
-    data = fetch_pending(args.url, args.adoszam, args.api_key, args.timeout)
-    items = data.get("items", [])
+    items = fetch_pending(args.url, args.adoszam, args.api_key, args.timeout)
     ts = time.strftime("%H:%M:%S")
-
-    if data.get("syncRequested"):
-        print(f"[{ts}] ⏳ SZINKRON-KÉRÉS jelezve ({data.get('syncRequestedAt') or '?'}) — egy valódi androidos appnak most azonnal el kellene indítania a teljes szinkront (upload_sync.py).")
-    else:
-        print(f"[{ts}] Nincs aktív szinkron-kérés.")
-
     if not items:
-        print(f"  Nincs függő cikktörzs-módosítás ehhez az adószámhoz.")
+        print(f"[{ts}] Nincs függő módosítás ehhez az adószámhoz.")
         return
 
-    print(f"  {len(items)} függő cikktörzs-módosítás érkezett:")
+    print(f"[{ts}] {len(items)} függő módosítás érkezett:")
     for it in items:
         p = it["payload"]
         if it["type"] == "cikk_upsert":

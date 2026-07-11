@@ -245,22 +245,8 @@
             <div class="card-title">Cikktörzs</div>
             <div class="card-subtitle">a módosítások nem azonnal élesek — a következő androidos szinkronig "függőben" maradnak</div>
           </div>
-          <label class="ntak-toggle">
-            <input type="checkbox" id="ntak-toggle-checkbox">
-            <span>Ez a cég NTAK adatszolgáltatásra kötelezett</span>
-          </label>
-        </div>
-        <div class="ntak-toggle-hint" id="ntak-toggle-hint" hidden>
-          NTAK-kötelezettség bekapcsolva — minden új/módosított cikknél kötelező a fő-/alkategória, NTAK mennyiségi egység és váltószám megadása.
         </div>
         <input type="search" class="search-input masterdata-search" id="masterdata-search-input" placeholder="Keresés a cikkek között…">
-
-        <div class="new-group-row">
-          <input id="new-group-input" placeholder="Új termékcsoport neve…">
-          <button class="btn-tiny" id="new-group-btn">+ Csoport létrehozása</button>
-          <span class="stock-form-msg" id="new-group-msg"></span>
-        </div>
-
         <table class="data-table" id="masterdata-table">
           <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
           <tbody></tbody>
@@ -295,34 +281,6 @@
             <label for="md-vonalkod-input">Vonalkód</label>
             <input id="md-vonalkod-input" placeholder="opcionális">
           </div>
-          <div class="stock-field">
-            <label for="md-afakodelv-input">Elviteli ÁFA kód</label>
-            <input id="md-afakodelv-input" placeholder="ha eltér a helybenitől, pl. 27%">
-          </div>
-
-          <div class="ntak-fields-group" id="ntak-fields-group" hidden>
-            <div class="ntak-fields-title">NTAK adatszolgáltatáshoz kötelező adatok</div>
-            <div class="stock-field">
-              <label for="md-fokategoria-input">Fő kategória</label>
-              <input list="ntak-fokategoria-list" id="md-fokategoria-input" placeholder="pl. ETEL">
-              <datalist id="ntak-fokategoria-list"></datalist>
-            </div>
-            <div class="stock-field">
-              <label for="md-alkategoria-input">Alkategória</label>
-              <input list="ntak-alkategoria-list" id="md-alkategoria-input" placeholder="pl. FOETEL">
-              <datalist id="ntak-alkategoria-list"></datalist>
-            </div>
-            <div class="stock-field">
-              <label for="md-ntakme-input">NTAK mennyiségi egység</label>
-              <input list="ntak-me-list" id="md-ntakme-input" placeholder="pl. Darab">
-              <datalist id="ntak-me-list"></datalist>
-            </div>
-            <div class="stock-field">
-              <label for="md-ntakszorzo-input">NTAK váltószám</label>
-              <input type="number" id="md-ntakszorzo-input" min="0" step="any" placeholder="pl. 1">
-            </div>
-          </div>
-
           <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
           <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
           <div class="stock-form-msg" id="masterdata-form-msg"></div>
@@ -406,18 +364,6 @@
 
     <!-- --- NTAK --- -->
     <section class="view" data-view="ntak" hidden>
-      <div class="card" id="ntak-incomplete-card" hidden>
-        <div class="card-title-row">
-          <div>
-            <div class="card-title">⚠ Hiányos NTAK-besorolású cikkek</div>
-            <div class="card-subtitle">a ténylegesen szinkronizált cikktörzsben — ezeket a fő-/alkategória, mennyiségi egység vagy váltószám hiánya miatt az NTAK visszautasíthatja</div>
-          </div>
-        </div>
-        <table class="data-table" id="ntak-incomplete-table">
-          <thead><tr><th>Cikk</th><th>Fő kategória</th><th>Alkategória</th><th>Mennyiségi egység</th><th class="td-right">Váltószám</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
       <div class="card">
         <div class="card-title">NTAK adatküldések állapota</div>
         <div class="ntak-summary-row" id="ntak-status-summary"></div>
