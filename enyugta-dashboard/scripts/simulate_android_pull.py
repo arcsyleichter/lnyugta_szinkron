@@ -94,6 +94,7 @@ def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
     bruttoar = payload["bruttoar"]
     afakod = payload["afakod"]
     vonalkod = payload.get("vonalkod") or ""
+    afakod_elviteli = payload.get("afakodElviteli")
     csoport_nev = payload.get("csoportNev")
     csopazon = "1"
     if csoport_nev:
@@ -102,15 +103,15 @@ def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
     row = conn.execute("SELECT azon FROM cikkt WHERE megnevezes = ?", (megnevezes,)).fetchone()
     if row:
         conn.execute(
-            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, csopazon = ? WHERE megnevezes = ?",
-            (bruttoar, afakod, me, vonalkod, csopazon, megnevezes),
+            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, csopazon = ?, afakodelv = ? WHERE megnevezes = ?",
+            (bruttoar, afakod, me, vonalkod, csopazon, afakod_elviteli, megnevezes),
         )
         return "frissítve"
     azon = next_azon(conn, "cikkt")
     conn.execute(
-        "INSERT INTO cikkt (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'A')",
-        (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon),
+        "INSERT INTO cikkt (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, status, afakodelv) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'A', ?)",
+        (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, afakod_elviteli),
     )
     return "létrehozva"
 
