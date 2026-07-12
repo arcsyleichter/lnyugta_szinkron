@@ -103,8 +103,6 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     loggedIn = true;
     state.viaAdmin = false;
     stockProductsLoaded = false;
-    masterdataGroupsLoaded = false;
-    ntakSuggestionsLoaded = false;
     showApp();
     boot();
   } catch (e2) {
@@ -238,8 +236,6 @@ async function loadAdminOverview() {
         loggedIn = true;
         state.viaAdmin = true;
         stockProductsLoaded = false;
-        masterdataGroupsLoaded = false;
-        ntakSuggestionsLoaded = false;
         showApp();
         boot();
       } catch (e) {
@@ -283,12 +279,6 @@ const ACTIVITY_TYPE_LABELS = {
   admin_regen_code: 'Kód újragenerálva',
   admin_send_code: 'Kód kiküldve emailben',
   sync_upload: 'Szinkron feltöltés',
-  sync_request: 'Szinkron kérve',
-  ntak_setting_change: 'NTAK-beállítás módosítva',
-  product_change_add: 'Cikk módosítás rögzítve',
-  product_group_add: 'Új termékcsoport',
-  product_bulk_price: 'Tömeges árváltoztatás',
-  product_import: 'CSV cikktörzs-import',
   stock_receipt_add: 'Bevételezés rögzítve',
   stock_receipt_delete: 'Bevételezés törölve',
   stock_threshold_set: 'Riasztási küszöb beállítva',
@@ -835,24 +825,6 @@ function ntakStatusBadge(status) {
 
 async function loadNtakView() {
   const { from, to } = state.range;
-
-  try {
-    const incomplete = await api('/api/ntak/incomplete-products');
-    const card = document.getElementById('ntak-incomplete-card');
-    card.hidden = !incomplete.ntakEnabled || !incomplete.items.length;
-    if (!card.hidden) {
-      const tbody = document.querySelector('#ntak-incomplete-table tbody');
-      tbody.innerHTML = incomplete.items.map((it) => `
-        <tr>
-          <td>${escapeHtml(it.nev)}</td>
-          <td>${escapeHtml(it.fokategoria || '—')}</td>
-          <td>${escapeHtml(it.alkategoria || '—')}</td>
-          <td>${escapeHtml(it.ntakme || '—')}</td>
-          <td class="num">${it.ntakszorzo || '—'}</td>
-        </tr>`).join('');
-    }
-  } catch (_) { /* nem kritikus, csak a figyelmeztetés marad el */ }
-
   const data = await api(`/api/ntak/summary?from=${from}&to=${to}`);
 
   const statusBox = document.getElementById('ntak-status-summary');
@@ -1062,43 +1034,6 @@ document.getElementById('stock-receipt-form').addEventListener('submit', async (
 let masterdataGroupsLoaded = false;
 let masterdataEditingOriginal = null; // szerkesztés alatt lévő cikk eredeti neve (ha van)
 const masterdataFilter = { q: '' };
-let ntakEnabled = false;
-let ntakSuggestionsLoaded = false;
-
-async function loadNtakToggleState() {
-  try {
-    const data = await api('/api/ntak/settings');
-    ntakEnabled = data.ntakEnabled;
-    document.getElementById('ntak-toggle-checkbox').checked = ntakEnabled;
-    document.getElementById('ntak-toggle-hint').hidden = !ntakEnabled;
-    document.getElementById('ntak-fields-group').hidden = !ntakEnabled;
-    if (ntakEnabled) loadNtakSuggestions();
-  } catch (_) { /* nem kritikus */ }
-}
-async function loadNtakSuggestions() {
-  if (ntakSuggestionsLoaded) return;
-  try {
-    const data = await api('/api/ntak/category-suggestions');
-    document.getElementById('ntak-fokategoria-list').innerHTML = data.fokategoriak.map((v) => `<option value="${escapeHtml(v)}">`).join('');
-    document.getElementById('ntak-alkategoria-list').innerHTML = data.alkategoriak.map((v) => `<option value="${escapeHtml(v)}">`).join('');
-    document.getElementById('ntak-me-list').innerHTML = data.mennyisegiEgysegek.map((v) => `<option value="${escapeHtml(v)}">`).join('');
-    ntakSuggestionsLoaded = true;
-  } catch (_) { /* nem kritikus */ }
-}
-document.getElementById('ntak-toggle-checkbox').addEventListener('change', async (e) => {
-  const checked = e.target.checked;
-  try {
-    await api('/api/ntak/settings', { method: 'POST', body: JSON.stringify({ ntakEnabled: checked }) });
-    ntakEnabled = checked;
-    document.getElementById('ntak-toggle-hint').hidden = !checked;
-    document.getElementById('ntak-fields-group').hidden = !checked;
-    if (checked) loadNtakSuggestions();
-    loadMasterdataView();
-  } catch (err) {
-    e.target.checked = !checked;
-    alert('Nem sikerült menteni: ' + err.message);
-  }
-});
 
 async function loadMasterdataGroups() {
   if (masterdataGroupsLoaded) return;
@@ -1120,10 +1055,6 @@ function fillMasterdataForm(item) {
   document.getElementById('md-me-input').value = item.me || '';
   document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
   document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
-  document.getElementById('md-fokategoria-input').value = (item.pendingChange ? item.pendingChange.fokategoria : item.fokategoria) || '';
-  document.getElementById('md-alkategoria-input').value = (item.pendingChange ? item.pendingChange.alkategoria : item.alkategoria) || '';
-  document.getElementById('md-ntakme-input').value = (item.pendingChange ? item.pendingChange.ntakMe : item.ntakme) || '';
-  document.getElementById('md-ntakszorzo-input').value = (item.pendingChange ? item.pendingChange.ntakSzorzo : item.ntakszorzo) || '';
   document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodElviteli : item.afakodElviteli) || '';
   document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;
   document.getElementById('md-cancel-btn').hidden = false;
@@ -1139,7 +1070,6 @@ document.getElementById('md-cancel-btn').addEventListener('click', resetMasterda
 
 async function loadMasterdataView() {
   loadMasterdataGroups();
-  loadNtakToggleState();
   const data = await api('/api/products/master');
   const q = masterdataFilter.q.toLowerCase();
   const items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
@@ -1155,7 +1085,6 @@ async function loadMasterdataView() {
       if (it.isNewPending) statusCell = '<span class="ntak-badge pending">Új — függőben</span>';
       else if (it.pendingChange) statusCell = `<span class="ntak-badge warn">Függőben: ${fmtHuf(it.pendingChange.bruttoar)}</span>`;
       else statusCell = '<span class="ntak-badge ok">Élő</span>';
-      if (it.ntakHianyos) statusCell += ' <span class="ntak-badge error">NTAK hiányos</span>';
       tr.innerHTML = `
         <td>${escapeHtml(it.nev)}</td>
         <td>${escapeHtml(it.csoportNev)}</td>
@@ -1210,10 +1139,6 @@ document.getElementById('masterdata-form').addEventListener('submit', async (e) 
       me: document.getElementById('md-me-input').value.trim(),
       csoportNev: document.getElementById('md-csoport-input').value.trim(),
       vonalkod: document.getElementById('md-vonalkod-input').value.trim(),
-      fokategoria: document.getElementById('md-fokategoria-input').value.trim(),
-      alkategoria: document.getElementById('md-alkategoria-input').value.trim(),
-      ntakMe: document.getElementById('md-ntakme-input').value.trim(),
-      ntakSzorzo: document.getElementById('md-ntakszorzo-input').value,
       afakodElviteli: document.getElementById('md-afakodelv-input').value.trim(),
     };
     await api('/api/products/change', { method: 'POST', body: JSON.stringify(body) });
@@ -1275,11 +1200,9 @@ async function loadSyncView() {
   const box = document.getElementById('sync-status-box');
   try {
     const meta = await api('/api/sync/status');
-    let text = meta.lastSync
+    box.textContent = meta.lastSync
       ? `Utolsó szinkron: ${fmtDateTime(meta.lastSync)}\nForrás: ${meta.source || 'ismeretlen'}${meta.bytes ? '\nMéret: ' + Math.round(meta.bytes / 1024) + ' KB' : ''}`
       : 'Még nem történt élő szinkronizáció.';
-    if (meta.syncRequested) text += `\n\n⏳ Szinkron-kérés jelezve (${fmtDateTime(meta.syncRequestedAt)}) — az androidos appra vár.`;
-    box.textContent = text;
   } catch (_) { box.textContent = 'Nem sikerült lekérni a szinkron állapotát.'; }
 }
 document.getElementById('sync-request-btn').addEventListener('click', async () => {

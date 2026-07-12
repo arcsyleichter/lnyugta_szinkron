@@ -243,14 +243,11 @@ function reconcileProductChanges(companyKey) {
     let matches = false;
     try {
       if (row.change_type === 'cikk_upsert') {
-        const current = get(companyKey, `SELECT bruttoar, afakod, fokatjson, alkatjson, ntakme, ntakszorzo FROM cikkt WHERE megnevezes = ?`, [payload.megnevezes]);
+        const current = get(companyKey, `SELECT bruttoar, afakod, afakodelv FROM cikkt WHERE megnevezes = ?`, [payload.megnevezes]);
         matches = !!current
           && Number(current.bruttoar) === Number(payload.bruttoar)
           && String(current.afakod) === String(payload.afakod)
-          && (!payload.fokategoria || String(current.fokatjson) === String(payload.fokategoria))
-          && (!payload.alkategoria || String(current.alkatjson) === String(payload.alkategoria))
-          && (!payload.ntakMe || String(current.ntakme) === String(payload.ntakMe))
-          && (!payload.ntakSzorzo || Number(current.ntakszorzo) === Number(payload.ntakSzorzo));
+          && (!payload.afakodElviteli || String(current.afakodelv) === String(payload.afakodElviteli));
       } else if (row.change_type === 'csoport_upsert') {
         matches = !!get(companyKey, `SELECT azon FROM cikkcsop WHERE megnevezes = ?`, [payload.megnevezes]);
       }
@@ -301,35 +298,6 @@ function readSyncMeta() {
 }
 function writeSyncMeta(meta) {
   fs.writeFileSync(SYNC_META_PATH, JSON.stringify(meta, null, 2));
-}
-
-// ---------------------------------------------------------------------------
-// "Szinkronizálj most" kérés-jelző — a szerver NEM tudja kezdeményezni a
-// kapcsolatot a telefon felé (nincs push-értesítés beállítva), ezért csak
-// egy jelzőt tehet fel cégenként, amit az androidos appnak úgyis rendszeresen
-// le kell kérdeznie (lásd GET /api/sync/pending-changes — ugyanabba a
-// válaszba kerül bele a "syncRequested" mező). Amint az app ezt meglátja,
-// azonnal el kell indítania a szokásos szinkront; a jelző automatikusan
-// törlődik, amint a szinkron ténylegesen megérkezik (/api/sync/upload).
-// data/sync-requests.json-ban tárolva: { "<companyKey>": { requestedAt } }
-// ---------------------------------------------------------------------------
-const SYNC_REQUESTS_PATH = path.join(DATA_DIR, 'sync-requests.json');
-
-function readSyncRequests() {
-  try { return JSON.parse(fs.readFileSync(SYNC_REQUESTS_PATH, 'utf8')); }
-  catch (_) { return {}; }
-}
-function writeSyncRequests(requests) {
-  fs.writeFileSync(SYNC_REQUESTS_PATH, JSON.stringify(requests, null, 2));
-}
-function requestSync(companyKey, reason) {
-  const requests = readSyncRequests();
-  requests[companyKey] = { requestedAt: new Date().toISOString(), reason };
-  writeSyncRequests(requests);
-}
-function clearSyncRequest(companyKey) {
-  const requests = readSyncRequests();
-  if (requests[companyKey]) { delete requests[companyKey]; writeSyncRequests(requests); }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,47 +385,6 @@ function ensureAccessCodes() {
   return codes;
 }
 ensureAccessCodes();
-
-// ---------------------------------------------------------------------------
-// NTAK-kötelezettség cégenként — EXPLICIT, a cég/admin által bekapcsolt
-// beállítás (nem auto-detektált), mert ez jogi/üzleti besorolás, amit a
-// cégnek magának kell megerősítenie. Ha be van kapcsolva, a Cikktörzs
-// felület megköveteli a fő-/alkategória, NTAK mennyiségi egység és
-// váltószám megadását minden új/módosított cikknél.
-// data/ntak-settings.json: { "<companyKey>": true }
-// ---------------------------------------------------------------------------
-const NTAK_SETTINGS_PATH = path.join(DATA_DIR, 'ntak-settings.json');
-
-function readNtakSettings() {
-  try { return JSON.parse(fs.readFileSync(NTAK_SETTINGS_PATH, 'utf8')); }
-  catch (_) { return {}; }
-}
-function writeNtakSettings(settings) {
-  fs.writeFileSync(NTAK_SETTINGS_PATH, JSON.stringify(settings, null, 2));
-}
-function isNtakEnabled(companyKey) {
-  return !!readNtakSettings()[companyKey];
-}
-
-// A hivatalos NTAK fő-/alkategória lista időről időre frissül, és nincs
-// garantáltan friss, teljes másolatunk róla — ezért NEM kényszerítünk ki
-// egy zárt, kőbe vésett listát. Ehelyett a cégek SAJÁT, ténylegesen már
-// használt (és NTAK által elfogadott) kategóriaértékeiből építünk egy
-// javaslat-listát, ami segít a begépelésben, de nem korlátoz.
-function collectNtakCategorySuggestions() {
-  const fokat = new Set(), alkat = new Set(), me = new Set();
-  for (const key of companyIndex.keys()) {
-    try {
-      const rows = all(key, `SELECT DISTINCT fokatjson, alkatjson, ntakme FROM cikkt WHERE fokatjson IS NOT NULL AND fokatjson != ''`);
-      for (const r of rows) {
-        if (r.fokatjson) fokat.add(r.fokatjson);
-        if (r.alkatjson) alkat.add(r.alkatjson);
-        if (r.ntakme) me.add(r.ntakme);
-      }
-    } catch (_) { /* egy-egy cég hibája ne akassza meg a többit */ }
-  }
-  return { fokategoriak: [...fokat].sort(), alkategoriak: [...alkat].sort(), mennyisegiEgysegek: [...me].sort() };
-}
 
 // ---------------------------------------------------------------------------
 // Email küldés Brevón keresztül — a hozzáférési kód kiküldéséhez az admin
@@ -624,7 +551,6 @@ route('POST', '/api/auth/login', async (req, res) => {
   const payload = { companyKey: key, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
-  requestSync(key, 'company_login');
   logActivity({ type: 'company_login', ok: true, companyKey: key, nev: entry.nev, detail: 'Sikeres bejelentkezés.', ip });
   sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
 });
@@ -710,9 +636,27 @@ route('GET', '/api/revenue-series', async (req, res, query) => {
      FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat ORDER BY keltdat`,
     [from, to]
   );
-  if (group === 'day') return sendJson(res, 200, { group, points: daily });
+
+  // A GROUP BY keltdat csak azokat a napokat adja vissza, amiken tényleg volt
+  // forgalom — forgalom nélküli napokra NULLA-val ki kell tölteni a sorozatot,
+  // különben a grafikon elszórt pontokat kap folytonos vonal helyett, ha a
+  // tartományban csak néhány napon volt adat.
+  const dailyMap = new Map(daily.map((r) => [r.d, r]));
+  const allDays = [];
+  {
+    const cursor = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    while (cursor <= end) {
+      const iso = cursor.toISOString().slice(0, 10);
+      const row = dailyMap.get(iso);
+      allDays.push({ d: iso, revenue: row ? row.revenue : 0, cnt: row ? row.cnt : 0 });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  }
+
+  if (group === 'day') return sendJson(res, 200, { group, points: allDays });
   const buckets = new Map();
-  for (const row of daily) {
+  for (const row of allDays) {
     const d = new Date(row.d);
     let key;
     if (group === 'month') {
@@ -810,10 +754,8 @@ route('GET', '/api/vat-breakdown', async (req, res, query) => {
 route('GET', '/api/products/master', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const ntakOn = isNtakEnabled(session.companyKey);
   const rows = all(session.companyKey,
-    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status,
-            c.fokatjson AS fokategoria, c.alkatjson AS alkategoria, c.ntakme, c.ntakszorzo, c.afakodelv AS afakodElviteli,
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status, c.afakodelv AS afakodElviteli,
             IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
      WHERE c.status = 'A' ORDER BY c.megnevezes`
@@ -826,64 +768,14 @@ route('GET', '/api/products/master', async (req, res) => {
   } catch (_) {}
   const pendingMap = new Map();
   for (const p of pendingRows) { try { const pl = JSON.parse(p.payload); pendingMap.set(pl.megnevezes, pl); } catch (_) {} }
-  const ntakComplete = (r) => !!(r.fokategoria && r.alkategoria && r.ntakme && r.ntakszorzo);
-  const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null, ntakHianyos: ntakOn && !ntakComplete(r) }));
+  const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null }));
   // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
   const existingNames = new Set(rows.map((r) => r.nev));
   for (const [nev, pl] of pendingMap) {
-    if (!existingNames.has(nev)) {
-      items.push({
-        nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A',
-        csoportNev: pl.csoportNev || 'Nincs csoport', pendingChange: pl, isNewPending: true,
-        fokategoria: pl.fokategoria, alkategoria: pl.alkategoria, ntakme: pl.ntakMe, ntakszorzo: pl.ntakSzorzo, afakodElviteli: pl.afakodElviteli,
-        ntakHianyos: ntakOn && !ntakComplete({ fokategoria: pl.fokategoria, alkategoria: pl.alkategoria, ntakme: pl.ntakMe, ntakszorzo: pl.ntakSzorzo }),
-      });
-    }
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodElviteli, pendingChange: pl, isNewPending: true });
   }
   items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
-  sendJson(res, 200, { items, ntakEnabled: ntakOn });
-});
-
-route('GET', '/api/ntak/settings', async (req, res) => {
-  const session = requireAuth(req);
-  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  sendJson(res, 200, { ntakEnabled: isNtakEnabled(session.companyKey) });
-});
-
-route('POST', '/api/ntak/settings', async (req, res) => {
-  const session = requireAuth(req);
-  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const body = await readJsonBody(req);
-  const settings = readNtakSettings();
-  settings[session.companyKey] = !!body.ntakEnabled;
-  writeNtakSettings(settings);
-  logActivity({ type: 'ntak_setting_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: settings[session.companyKey] ? 'NTAK-kötelezettség bekapcsolva' : 'NTAK-kötelezettség kikapcsolva' });
-  sendJson(res, 200, { ok: true, ntakEnabled: settings[session.companyKey] });
-});
-
-route('GET', '/api/ntak/category-suggestions', async (req, res) => {
-  const session = requireAuth(req);
-  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  sendJson(res, 200, collectNtakCategorySuggestions());
-});
-
-// Ez a friss, ténylegesen szinkronizált (androidról beérkezett) cikktörzsben
-// néz körül — ha egy NTAK-köteles cégnél hiányos besorolású cikket talál,
-// azt listázza. Ez a "ellenőriznünk kell szinkronizálásnál" rész: a
-// szinkronban ténylegesen megérkezett adatot nézi, nem csak a webes
-// szándékot.
-route('GET', '/api/ntak/incomplete-products', async (req, res) => {
-  const session = requireAuth(req);
-  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  if (!isNtakEnabled(session.companyKey)) return sendJson(res, 200, { ntakEnabled: false, items: [] });
-  const rows = all(session.companyKey,
-    `SELECT megnevezes AS nev, fokatjson AS fokategoria, alkatjson AS alkategoria, ntakme, ntakszorzo
-     FROM cikkt WHERE status = 'A'
-     AND (fokatjson IS NULL OR fokatjson = '' OR alkatjson IS NULL OR alkatjson = ''
-          OR ntakme IS NULL OR ntakme = '' OR ntakszorzo IS NULL OR ntakszorzo = 0)
-     ORDER BY megnevezes`
-  );
-  sendJson(res, 200, { ntakEnabled: true, items: rows });
+  sendJson(res, 200, { items });
 });
 
 route('GET', '/api/products/groups', async (req, res) => {
@@ -908,28 +800,8 @@ route('POST', '/api/products/change', async (req, res) => {
   const me = String(body.me || '').trim() || 'Darab';
   const csoportNev = String(body.csoportNev || '').trim() || null;
   const vonalkod = String(body.vonalkod || '').trim() || null;
-
-  const fokategoria = String(body.fokategoria || '').trim() || null;
-  const alkategoria = String(body.alkategoria || '').trim() || null;
-  const ntakMe = String(body.ntakMe || '').trim() || null;
-  const ntakSzorzo = body.ntakSzorzo !== undefined && body.ntakSzorzo !== '' ? parseFloat(body.ntakSzorzo) : null;
   const afakodElviteli = String(body.afakodElviteli || '').trim() || null;
-
-  if (isNtakEnabled(session.companyKey)) {
-    const hianyzik = [];
-    if (!fokategoria) hianyzik.push('fő kategória');
-    if (!alkategoria) hianyzik.push('alkategória');
-    if (!ntakMe) hianyzik.push('NTAK mennyiségi egység');
-    if (!Number.isFinite(ntakSzorzo) || ntakSzorzo <= 0) hianyzik.push('NTAK váltószám');
-    if (hianyzik.length) {
-      return sendJson(res, 400, { error: `Ez a cég NTAK-adatszolgáltatásra kötelezett — hiányzik: ${hianyzik.join(', ')}.` });
-    }
-  }
-
-  addProductChange(session.companyKey, 'cikk_upsert', {
-    megnevezes, me, bruttoar, afakod, csoportNev, vonalkod,
-    fokategoria, alkategoria, ntakMe, ntakSzorzo, afakodElviteli,
-  }, 'web_form');
+  addProductChange(session.companyKey, 'cikk_upsert', { megnevezes, me, bruttoar, afakod, csoportNev, vonalkod, afakodElviteli }, 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
 });
@@ -992,58 +864,40 @@ route('GET', '/api/products/changes', async (req, res) => {
 });
 
 // CSV export — a jelenlegi, élő cikktörzs letöltése Excelben szerkeszthető formában.
-const CSV_HEADERS = ['Cikknév', 'Csoport', 'Egység', 'Bruttó ár', 'ÁFA kód', 'Vonalkód', 'NTAK fő kategória', 'NTAK alkategória', 'NTAK mennyiségi egység', 'NTAK váltószám', 'Elviteli ÁFA kód'];
+const CSV_HEADERS = ['Cikknév', 'Csoport', 'Egység', 'Bruttó ár', 'ÁFA kód', 'Vonalkód', 'Elviteli ÁFA kód'];
 
 route('GET', '/api/products/export', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const rows = all(session.companyKey,
-    `SELECT c.megnevezes AS nev, IFNULL(g.megnevezes,'') AS csoport, c.me, c.bruttoar, c.afakod, IFNULL(c.vonalkod,'') AS vonalkod,
-            IFNULL(c.fokatjson,'') AS fokategoria, IFNULL(c.alkatjson,'') AS alkategoria, IFNULL(c.ntakme,'') AS ntakme,
-            IFNULL(c.ntakszorzo,'') AS ntakszorzo, IFNULL(c.afakodelv,'') AS afakodelv
+    `SELECT c.megnevezes AS nev, IFNULL(g.megnevezes,'') AS csoport, c.me, c.bruttoar, c.afakod, IFNULL(c.vonalkod,'') AS vonalkod, IFNULL(c.afakodelv,'') AS afakodelv
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A' ORDER BY c.megnevezes`
   );
   const csv = toCsv(
-    rows.map((r) => ({
-      'Cikknév': r.nev, 'Csoport': r.csoport, 'Egység': r.me, 'Bruttó ár': r.bruttoar, 'ÁFA kód': r.afakod, 'Vonalkód': r.vonalkod,
-      'NTAK fő kategória': r.fokategoria, 'NTAK alkategória': r.alkategoria, 'NTAK mennyiségi egység': r.ntakme,
-      'NTAK váltószám': r.ntakszorzo, 'Elviteli ÁFA kód': r.afakodelv,
-    })),
+    rows.map((r) => ({ 'Cikknév': r.nev, 'Csoport': r.csoport, 'Egység': r.me, 'Bruttó ár': r.bruttoar, 'ÁFA kód': r.afakod, 'Vonalkód': r.vonalkod, 'Elviteli ÁFA kód': r.afakodelv })),
     CSV_HEADERS
   );
   res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs.csv"' });
   res.end(csv);
 });
 
-// Letölthető minta CSV (üres kiindulási sablon, pár példasorral). Az NTAK
-// oszlopok akkor is szerepelnek, ha a cég nem NTAK-köteles — ilyenkor
-// egyszerűen üresen hagyhatók (lásd README: "nem NTAK-osoknak is legyen
-// benne az oszlop, csak üres/NULL adattal").
+// Letölthető minta CSV (üres kiindulási sablon, pár példasorral).
 route('GET', '/api/products/import-template', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const ntakOn = isNtakEnabled(session.companyKey);
-  const example = ntakOn
-    ? [
-        { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '5%', 'Vonalkód': '', 'NTAK fő kategória': 'ALKMENTESITAL_HELYBEN', 'NTAK alkategória': 'KAVE', 'NTAK mennyiségi egység': 'Darab', 'NTAK váltószám': 1, 'Elviteli ÁFA kód': '' },
-        { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '', 'NTAK fő kategória': 'ETEL', 'NTAK alkategória': 'DESSZERT', 'NTAK mennyiségi egység': 'Darab', 'NTAK váltószám': 1, 'Elviteli ÁFA kód': '27%' },
-      ]
-    : [
-        { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '5%', 'Vonalkód': '', 'NTAK fő kategória': '', 'NTAK alkategória': '', 'NTAK mennyiségi egység': '', 'NTAK váltószám': '', 'Elviteli ÁFA kód': '' },
-        { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '', 'NTAK fő kategória': '', 'NTAK alkategória': '', 'NTAK mennyiségi egység': '', 'NTAK váltószám': '', 'Elviteli ÁFA kód': '' },
-      ];
+  const example = [
+    { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '5%', 'Vonalkód': '', 'Elviteli ÁFA kód': '' },
+    { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '', 'Elviteli ÁFA kód': '27%' },
+  ];
   const csv = toCsv(example, CSV_HEADERS);
   res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs-minta.csv"' });
   res.end(csv);
 });
 
-// CSV import — soronként egy függő cikk-módosítást hoz létre. Ha a cég
-// NTAK-köteles, a hiányos NTAK-besorolású sorokat elutasítja (hibaként
-// sorolja fel, a többi sort attól még beimportálja).
+// CSV import — soronként egy függő cikk-módosítást hoz létre.
 route('POST', '/api/products/import', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const ntakOn = isNtakEnabled(session.companyKey);
   const buf = await readBody(req, 5 * 1024 * 1024);
   const text = buf.toString('utf8');
   const rows = parseCsv(text);
@@ -1052,44 +906,28 @@ route('POST', '/api/products/import', async (req, res) => {
   const idx = {
     nev: header.indexOf('Cikknév'), csoport: header.indexOf('Csoport'), me: header.indexOf('Egység'),
     ar: header.indexOf('Bruttó ár'), afa: header.indexOf('ÁFA kód'), vonalkod: header.indexOf('Vonalkód'),
-    fokat: header.indexOf('NTAK fő kategória'), alkat: header.indexOf('NTAK alkategória'),
-    ntakme: header.indexOf('NTAK mennyiségi egység'), ntakszorzo: header.indexOf('NTAK váltószám'),
     afakodelv: header.indexOf('Elviteli ÁFA kód'),
   };
   if (idx.nev === -1 || idx.ar === -1 || idx.afa === -1) {
     return sendJson(res, 400, { error: 'Hiányzó kötelező oszlop (Cikknév, Bruttó ár, ÁFA kód). Használd a letölthető mintát.' });
   }
-  const cell = (r, i) => (i > -1 && r[i]) ? r[i].trim() : '';
   let count = 0;
   const errors = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
-    const nev = cell(r, idx.nev);
+    const nev = (r[idx.nev] || '').trim();
     if (!nev) continue;
     const ar = parseFloat(r[idx.ar]);
-    const afa = cell(r, idx.afa);
-    if (!Number.isFinite(ar) || ar < 0 || !afa) { errors.push(`${i + 1}. sor (${nev || '?'}): hiányos vagy érvénytelen ár/ÁFA-kód`); continue; }
-
-    const fokategoria = cell(r, idx.fokat) || null;
-    const alkategoria = cell(r, idx.alkat) || null;
-    const ntakMe = cell(r, idx.ntakme) || null;
-    const ntakSzorzoRaw = cell(r, idx.ntakszorzo);
-    const ntakSzorzo = ntakSzorzoRaw ? parseFloat(ntakSzorzoRaw) : null;
-    const afakodElviteli = cell(r, idx.afakodelv) || null;
-
-    if (ntakOn && (!fokategoria || !alkategoria || !ntakMe || !Number.isFinite(ntakSzorzo) || ntakSzorzo <= 0)) {
-      errors.push(`${i + 1}. sor (${nev}): NTAK-köteles cégnél kötelező a fő-/alkategória, mennyiségi egység és váltószám`);
-      continue;
-    }
-
+    const afa = (r[idx.afa] || '').trim();
+    if (!Number.isFinite(ar) || ar < 0 || !afa) { errors.push(`${i + 1}. sor: hiányos vagy érvénytelen adat`); continue; }
     addProductChange(session.companyKey, 'cikk_upsert', {
       megnevezes: nev,
-      me: cell(r, idx.me) || 'Darab',
+      me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
       bruttoar: ar,
       afakod: afa,
-      csoportNev: cell(r, idx.csoport) || null,
-      vonalkod: cell(r, idx.vonalkod) || null,
-      fokategoria, alkategoria, ntakMe, ntakSzorzo, afakodElviteli,
+      csoportNev: (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null,
+      vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
+      afakodElviteli: (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null,
     }, 'excel_import');
     count++;
   }
@@ -1304,12 +1142,7 @@ route('GET', '/api/sync/status', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const meta = readSyncMeta();
-  const requests = readSyncRequests();
-  sendJson(res, 200, {
-    ...(meta[session.companyKey] || { lastSync: null, source: null }),
-    syncRequested: !!requests[session.companyKey],
-    syncRequestedAt: requests[session.companyKey]?.requestedAt || null,
-  });
+  sendJson(res, 200, meta[session.companyKey] || { lastSync: null, source: null });
 });
 
 // Ide küldi az androidos app időzítve a friss adatbázis-fájlt — CÉGENKÉNT.
@@ -1335,7 +1168,15 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   }
 
   let buf;
-  try { buf = await readBody(req, 100 * 1024 * 1024); }
+  // A korábbi 100 MB-os korlát önkényes volt, semmi köze a git/GitHub-hoz
+  // (az egy teljesen más, a repóba kerülő induló mintaadatokra vonatkozott).
+  // Itt most gyakorlatilag korlátlanra emeltük (2 GB) — ennél nagyobb valódi
+  // POS-adatbázis nem valószínű, de ha mégis kellene, ez a szám bátran
+  // tovább emelhető. A nulla/valóban végtelen limitet szándékosan nem
+  // állítottuk be, mert a teljes törzs egyszerre kerül memóriába feltöltés
+  // közben — egy hibás/rosszindulatú kérés így sem tudja korlátlanul
+  // felzabálni a szerver memóriáját.
+  try { buf = await readBody(req, 2 * 1024 * 1024 * 1024); }
   catch (_) {
     logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: 'A feltöltött fájl túl nagy.', ip });
     return sendJson(res, 413, { error: 'A feltöltött fájl túl nagy.' });
@@ -1371,7 +1212,6 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   const meta = readSyncMeta();
   meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity.nev };
   writeSyncMeta(meta);
-  clearSyncRequest(key); // a kért szinkron megérkezett, a jelzőt levehetjük
 
   logActivity({ type: 'sync_upload', ok: true, companyKey: key, nev: identity.nev, detail: `${Math.round(buf.length / 1024)} KB${isNew ? ' — új cég regisztrálva' : ''}`, ip });
   console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ CÉG regisztrálva' : ''}`);
@@ -1397,21 +1237,17 @@ route('GET', '/api/sync/pending-changes', async (req, res, query) => {
     `SELECT id, change_type AS type, payload FROM product_changes WHERE company_key = ? AND status = 'pending' ORDER BY id ASC`
   ).all(key);
   const items = rows.map((r) => ({ id: r.id, type: r.type, payload: JSON.parse(r.payload) }));
-  const requests = readSyncRequests();
-  const syncRequested = !!requests[key];
-  sendJson(res, 200, { items, syncRequested, syncRequestedAt: requests[key]?.requestedAt || null });
+  sendJson(res, 200, { items });
 });
 
 route('POST', '/api/sync/request', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  requestSync(session.companyKey, 'manual_button');
-  logActivity({ type: 'sync_request', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Kézi szinkron-kérés a Szinkronizáció oldalról.' });
   const meta = readSyncMeta();
   sendJson(res, 200, {
     ok: true,
-    triggered: true,
-    message: 'Kérés jelezve. A szerver nem tud közvetlenül "kihívni" egy telefont — az androidos appnak kell rendszeresen lekérdeznie ezt a jelzőt, és amint meglátja, azonnal szinkronizál. Ha az androidos oldal ezt még nem valósítja meg, a kérés jelezve marad, amíg a következő rendes (időzített) szinkron meg nem érkezik.',
+    triggered: false,
+    message: 'Élő eszközkapcsolat még nincs beállítva ezen a szerveren — az androidos appnak kell HTTP POST-tal elküldenie az adatbázist a /api/sync/upload végpontra, a saját adószámával (lásd README.md). Addig ez a pillanatkép aktív.',
     meta: meta[session.companyKey] || { lastSync: null, source: null },
   });
 });
@@ -1617,7 +1453,6 @@ route('POST', '/api/admin/impersonate', async (req, res) => {
   const payload = { companyKey, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
-  requestSync(companyKey, 'admin_impersonate');
   logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a cég nézetét.' });
   sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
 });
