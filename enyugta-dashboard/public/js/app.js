@@ -1067,7 +1067,11 @@ document.getElementById('new-group-btn').addEventListener('click', async () => {
 
 function fillMasterdataForm(item) {
   masterdataEditingOriginal = item.nev;
-  document.getElementById('md-nev-input').value = item.nev;
+  const nevInput = document.getElementById('md-nev-input');
+  nevInput.value = item.nev;
+  nevInput.readOnly = true;
+  nevInput.title = 'Szerkesztés közben a cikk neve nem módosítható — ez azonosítja a cikket a szinkronban. Átnevezéshez törölni és újra felvenni kell.';
+  document.getElementById('md-nev-hint').hidden = false;
   document.getElementById('md-ar-input').value = item.pendingChange ? item.pendingChange.bruttoar : item.bruttoar;
   document.getElementById('md-afa-input').value = item.pendingChange ? item.pendingChange.afakod : item.afakod;
   document.getElementById('md-me-input').value = item.me || '';
@@ -1081,6 +1085,10 @@ function fillMasterdataForm(item) {
 function resetMasterdataForm() {
   masterdataEditingOriginal = null;
   document.getElementById('masterdata-form').reset();
+  const nevInput = document.getElementById('md-nev-input');
+  nevInput.readOnly = false;
+  nevInput.title = '';
+  document.getElementById('md-nev-hint').hidden = true;
   document.getElementById('masterdata-form-title').textContent = 'Új cikk / módosítás';
   document.getElementById('md-cancel-btn').hidden = true;
 }
@@ -1148,10 +1156,16 @@ document.getElementById('masterdata-form').addEventListener('submit', async (e) 
   const btn = document.getElementById('md-save-btn');
   const msg = document.getElementById('masterdata-form-msg');
   msg.textContent = ''; msg.className = 'stock-form-msg';
+  const megnevezesValue = document.getElementById('md-nev-input').value.trim();
+  if (masterdataEditingOriginal && megnevezesValue !== masterdataEditingOriginal) {
+    msg.textContent = 'A cikk neve szerkesztés közben nem térhet el az eredetitől. Töröld a "Mégse" gombbal, és kezdd újra.';
+    msg.className = 'stock-form-msg error';
+    return;
+  }
   btn.disabled = true; btn.textContent = 'Mentés…';
   try {
     const body = {
-      megnevezes: document.getElementById('md-nev-input').value.trim(),
+      megnevezes: megnevezesValue,
       bruttoar: document.getElementById('md-ar-input').value,
       afakod: document.getElementById('md-afa-input').value.trim(),
       me: document.getElementById('md-me-input').value.trim(),

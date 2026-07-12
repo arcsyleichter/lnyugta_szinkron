@@ -389,6 +389,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .new-group-row{ display:flex; align-items:center; gap:8px; margin:0 0 14px; flex-wrap:wrap; }
 .new-group-row input{ border:1px solid var(--line); border-radius:7px; padding:8px 10px; font-size:13px; min-width:200px; flex:0 1 260px; }
 .new-group-row .stock-form-msg{ margin:0; }
+.stock-field input[readonly]{ background:var(--paper-dim); color:var(--text-dim); cursor:not-allowed; }
+.field-hint{ display:block; font-size:11px; color:var(--text-dim); margin-top:4px; }
 .stock-search{ width:100%; margin:14px 0 12px; }
 .stock-group-tiles{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
 .stock-tile{
