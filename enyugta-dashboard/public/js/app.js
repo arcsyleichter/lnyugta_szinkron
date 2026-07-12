@@ -181,8 +181,9 @@ async function selectTelephely(kod) {
 
 function updateTelephelyBadge(telephelyNev) {
   const box = document.getElementById('telephely-current');
-  if (telephelyNev) {
-    document.getElementById('telephely-current-nev').textContent = telephelyNev;
+  const clean = (telephelyNev && telephelyNev !== 'undefined' && telephelyNev !== 'null') ? String(telephelyNev).trim() : '';
+  if (clean) {
+    document.getElementById('telephely-current-nev').textContent = clean;
     box.hidden = false;
   } else {
     box.hidden = true;

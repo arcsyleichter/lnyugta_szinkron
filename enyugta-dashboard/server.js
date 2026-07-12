@@ -120,7 +120,12 @@ function ensureTelephely(cegKulcs, kod, nev) {
   if (!data[cegKulcs]) data[cegKulcs] = [];
   kod = normalizeTelephelyKod(kod);
   if (!data[cegKulcs].some((t) => t.kod === kod)) {
-    data[cegKulcs].push({ kod, nev: nev || `Telephely ${kod}`, cim: '', letrehozva: new Date().toISOString() });
+    // A "01" mindig az alapértelmezett/első telephely — akkor is "Fő
+    // telephely" legyen a neve, ha a telephelyek.json valamiért elveszett
+    // és újra kell generálni (pl. tárhely-visszaállítás után), ne csak az
+    // első, ténylegesen migrált alkalommal.
+    const fallbackNev = kod === '01' ? 'Fő telephely' : `Telephely ${kod}`;
+    data[cegKulcs].push({ kod, nev: nev || fallbackNev, cim: '', letrehozva: new Date().toISOString() });
     writeTelephelyek(data);
     return true; // új volt
   }
@@ -706,7 +711,12 @@ route('GET', '/api/telephelyek', async (req, res) => {
     const site = companyIndex.get(siteKey);
     return {
       kod: t.kod, nev: t.nev, cim: t.cim || (site ? site.cim : ''),
-      vanAdat: !!site, utolsoSzinkron: meta[siteKey]?.lastSync || null,
+      vanAdat: !!site,
+      // csak akkor mutatunk szinkron-időpontot, ha a telephelynek TÉNYLEGESEN
+      // van élő adata is — különben egy elárvult sync-meta bejegyzés (pl.
+      // ideiglenes tárhely-törlés után) ellentmondásos képet adna
+      // ("MÉG NINCS ADAT" jelzés, de mégis van szinkron-dátum)
+      utolsoSzinkron: site ? (meta[siteKey]?.lastSync || null) : null,
     };
   });
   sendJson(res, 200, { cegNev: session.nev, adoszam: session.adoszam, telephelyValasztva: !!session.telephelyKod, telephelyek });
