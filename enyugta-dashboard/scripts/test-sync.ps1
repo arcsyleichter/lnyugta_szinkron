@@ -1,4 +1,4 @@
-# test-sync.ps1 — leszimulálja az androidos app szinkronját egy helyi teszt
+﻿# test-sync.ps1 — leszimulálja az androidos app szinkronját egy helyi teszt
 # adatbázison, és megmutatja, PONTOSAN mit módosított a szinkron (előtte/utána
 # összehasonlítással) — cikkenként, jól látható táblázatban.
 #
@@ -22,12 +22,12 @@ param(
 )
 
 if (-not $ApiKey) {
-    Write-Host "✗ Nincs API-kulcs megadva. Add meg a -ApiKey kapcsolóval, vagy állítsd be:" -ForegroundColor Red
+    Write-Host "[HIBA] Nincs API-kulcs megadva. Add meg a -ApiKey kapcsolóval, vagy állítsd be:" -ForegroundColor Red
     Write-Host '  $env:SYNC_API_KEY = "..."' -ForegroundColor Red
     exit 1
 }
 if (-not (Test-Path $Db)) {
-    Write-Host "✗ Nem található az adatbázis: $Db" -ForegroundColor Red
+    Write-Host "[HIBA] Nem található az adatbázis: $Db" -ForegroundColor Red
     exit 1
 }
 
@@ -35,17 +35,17 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dumpScript = Join-Path $scriptDir "dump_products.py"
 $pullScript = Join-Path $scriptDir "simulate_android_pull.py"
 
-Write-Host "→ Pillanatkép készítése szinkron ELŐTT ($Db)..." -ForegroundColor Cyan
+Write-Host "-> Pillanatkép készítése szinkron ELŐTT ($Db)..." -ForegroundColor Cyan
 $beforeJson = python3 $dumpScript $Db
 $before = $beforeJson | ConvertFrom-Json
 $beforeMap = @{}
 foreach ($item in $before) { $beforeMap[$item.nev] = $item }
 
-Write-Host "→ Függő módosítások lekérdezése és alkalmazása..." -ForegroundColor Cyan
+Write-Host "-> Függő módosítások lekérdezése és alkalmazása..." -ForegroundColor Cyan
 python3 $pullScript --url $Url --adoszam $Adoszam --api-key $ApiKey --apply-to $Db
 
 Write-Host ""
-Write-Host "→ Pillanatkép készítése szinkron UTÁN..." -ForegroundColor Cyan
+Write-Host "-> Pillanatkép készítése szinkron UTÁN..." -ForegroundColor Cyan
 $afterJson = python3 $dumpScript $Db
 $after = $afterJson | ConvertFrom-Json
 $afterMap = @{}
@@ -59,14 +59,14 @@ foreach ($nev in $afterMap.Keys) {
     $new = $afterMap[$nev]
     if (-not $beforeMap.ContainsKey($nev)) {
         Write-Host "ÚJ CIKK    " -ForegroundColor Green -NoNewline
-        Write-Host "  $nev  →  $($new.ar) Ft ($($new.afa))"
+        Write-Host "  $nev  ->  $($new.ar) Ft ($($new.afa))"
         $changedCount++
         continue
     }
     $old = $beforeMap[$nev]
     if ($old.ar -ne $new.ar -or $old.afa -ne $new.afa -or $old.afaElv -ne $new.afaElv) {
         Write-Host "MÓDOSULT   " -ForegroundColor Magenta -NoNewline
-        Write-Host "  $nev  :  $($old.ar) Ft ($($old.afa))  →  $($new.ar) Ft ($($new.afa))"
+        Write-Host "  $nev  :  $($old.ar) Ft ($($old.afa))  ->  $($new.ar) Ft ($($new.afa))"
         $changedCount++
     }
 }
@@ -86,5 +86,5 @@ if ($changedCount -eq 0) {
 
 Write-Host "========================================================" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "→ Most töltsd fel, mintha az androidos app tenné:" -ForegroundColor Cyan
+Write-Host "-> Most töltsd fel, mintha az androidos app tenné:" -ForegroundColor Cyan
 Write-Host "  python3 $scriptDir\upload_sync.py --url $Url --db $Db --adoszam $Adoszam"
