@@ -247,6 +247,13 @@
           </div>
         </div>
         <input type="search" class="search-input masterdata-search" id="masterdata-search-input" placeholder="Keresés a cikkek között…">
+
+        <div class="new-group-row">
+          <input id="new-group-input" placeholder="Új termékcsoport neve…">
+          <button class="btn-tiny" id="new-group-btn">+ Csoport létrehozása</button>
+          <span class="stock-form-msg" id="new-group-msg"></span>
+        </div>
+
         <table class="data-table" id="masterdata-table">
           <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
           <tbody></tbody>
@@ -266,7 +273,12 @@
           </div>
           <div class="stock-field">
             <label for="md-afa-input">ÁFA kód</label>
-            <input id="md-afa-input" placeholder="pl. 27%" required>
+            <select id="md-afa-input" required>
+              <option value="">— válassz —</option>
+              <option value="27%">27% (általános)</option>
+              <option value="18%">18% (kedvezményes)</option>
+              <option value="05%">5% (kedvezményes)</option>
+            </select>
           </div>
           <div class="stock-field">
             <label for="md-me-input">Egység</label>
@@ -283,7 +295,12 @@
           </div>
           <div class="stock-field">
             <label for="md-afakodelv-input">Elviteli ÁFA kód</label>
-            <input id="md-afakodelv-input" placeholder="ha eltér a helybenitől, pl. 27%">
+            <select id="md-afakodelv-input">
+              <option value="">— nincs eltérés a helybenitől —</option>
+              <option value="27%">27% (általános)</option>
+              <option value="18%">18% (kedvezményes)</option>
+              <option value="05%">5% (kedvezményes)</option>
+            </select>
           </div>
           <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
           <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>

@@ -522,6 +522,11 @@ function resolveRange(query) {
 }
 
 const NOT_STORNO = "(IFNULL(storno,'N') != 'I' AND IFNULL(stornozott,'N') != 'I')";
+// A Magyarországon jelenleg érvényes ÁFA kulcsok (Áfa tv. 82. §) — 27%
+// általános, 18% és 5% kedvezményes. A "05%" (vezető nullás) formátum
+// szándékos: pontosan ez a jelölés van már használatban a valódi,
+// androidról szinkronizált adatokban (cikkt.afakod), ehhez igazodunk.
+const VALID_AFA_CODES = ['27%', '18%', '05%'];
 function notStorno(alias) { return `(IFNULL(${alias}.storno,'N') != 'I' AND IFNULL(${alias}.stornozott,'N') != 'I')`; }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +787,22 @@ route('GET', '/api/products/groups', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const rows = all(session.companyKey, `SELECT megnevezes AS nev FROM cikkcsop WHERE status = 'A' ORDER BY megnevezes`);
-  sendJson(res, 200, { items: rows });
+  const names = new Set(rows.map((r) => r.nev));
+  let pending = [];
+  try {
+    pending = productChangesDb.prepare(
+      `SELECT payload FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'csoport_upsert'`
+    ).all(session.companyKey);
+  } catch (_) {}
+  const items = rows.map((r) => ({ nev: r.nev, isNewPending: false }));
+  for (const p of pending) {
+    try {
+      const pl = JSON.parse(p.payload);
+      if (pl.megnevezes && !names.has(pl.megnevezes)) { items.push({ nev: pl.megnevezes, isNewPending: true }); names.add(pl.megnevezes); }
+    } catch (_) {}
+  }
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+  sendJson(res, 200, { items });
 });
 
 // Egyedi cikk létrehozása/módosítása — függő módosításként kerül be, NEM
@@ -797,10 +817,12 @@ route('POST', '/api/products/change', async (req, res) => {
   if (!Number.isFinite(bruttoar) || bruttoar < 0) return sendJson(res, 400, { error: 'Érvénytelen bruttó ár.' });
   const afakod = String(body.afakod || '').trim();
   if (!afakod) return sendJson(res, 400, { error: 'Az ÁFA kód kötelező.' });
+  if (!VALID_AFA_CODES.includes(afakod)) return sendJson(res, 400, { error: `Érvénytelen ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
   const me = String(body.me || '').trim() || 'Darab';
   const csoportNev = String(body.csoportNev || '').trim() || null;
   const vonalkod = String(body.vonalkod || '').trim() || null;
   const afakodElviteli = String(body.afakodElviteli || '').trim() || null;
+  if (afakodElviteli && !VALID_AFA_CODES.includes(afakodElviteli)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
   addProductChange(session.companyKey, 'cikk_upsert', { megnevezes, me, bruttoar, afakod, csoportNev, vonalkod, afakodElviteli }, 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
@@ -886,7 +908,7 @@ route('GET', '/api/products/import-template', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const example = [
-    { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '5%', 'Vonalkód': '', 'Elviteli ÁFA kód': '' },
+    { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '05%', 'Vonalkód': '', 'Elviteli ÁFA kód': '' },
     { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '', 'Elviteli ÁFA kód': '27%' },
   ];
   const csv = toCsv(example, CSV_HEADERS);
@@ -920,6 +942,9 @@ route('POST', '/api/products/import', async (req, res) => {
     const ar = parseFloat(r[idx.ar]);
     const afa = (r[idx.afa] || '').trim();
     if (!Number.isFinite(ar) || ar < 0 || !afa) { errors.push(`${i + 1}. sor: hiányos vagy érvénytelen adat`); continue; }
+    if (!VALID_AFA_CODES.includes(afa)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen ÁFA kód (${afa}) — megengedett: ${VALID_AFA_CODES.join(', ')}`); continue; }
+    const afakodElvitelRaw = (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null;
+    if (afakodElvitelRaw && !VALID_AFA_CODES.includes(afakodElvitelRaw)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen elviteli ÁFA kód (${afakodElvitelRaw})`); continue; }
     addProductChange(session.companyKey, 'cikk_upsert', {
       megnevezes: nev,
       me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
@@ -927,7 +952,7 @@ route('POST', '/api/products/import', async (req, res) => {
       afakod: afa,
       csoportNev: (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null,
       vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
-      afakodElviteli: (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null,
+      afakodElviteli: afakodElvitelRaw,
     }, 'excel_import');
     count++;
   }

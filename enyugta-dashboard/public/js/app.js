@@ -1042,10 +1042,28 @@ async function loadMasterdataGroups() {
     const list = document.getElementById('md-csoport-list');
     list.innerHTML = data.items.map((g) => `<option value="${escapeHtml(g.nev)}">`).join('');
     const select = document.getElementById('bp-csoport-select');
-    select.innerHTML = '<option value="">— válassz —</option>' + data.items.map((g) => `<option value="${escapeHtml(g.nev)}">${escapeHtml(g.nev)}</option>`).join('');
+    select.innerHTML = '<option value="">— válassz —</option>' +
+      data.items.map((g) => `<option value="${escapeHtml(g.nev)}">${escapeHtml(g.nev)}${g.isNewPending ? ' (még függőben)' : ''}</option>`).join('');
     masterdataGroupsLoaded = true;
   } catch (_) { /* nem kritikus */ }
 }
+
+document.getElementById('new-group-btn').addEventListener('click', async () => {
+  const input = document.getElementById('new-group-input');
+  const msg = document.getElementById('new-group-msg');
+  const nev = input.value.trim();
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  if (!nev) { msg.textContent = 'Adj meg egy nevet.'; msg.className = 'stock-form-msg error'; return; }
+  try {
+    await api('/api/products/group', { method: 'POST', body: JSON.stringify({ megnevezes: nev }) });
+    msg.textContent = '✓ Létrehozva (függőben) — a következő szinkronig még nem él.'; msg.className = 'stock-form-msg ok';
+    input.value = '';
+    masterdataGroupsLoaded = false; // hogy a legördülők/datalist frissüljön az új csoporttal
+    loadMasterdataGroups();
+  } catch (err) {
+    msg.textContent = err.message; msg.className = 'stock-form-msg error';
+  }
+});
 
 function fillMasterdataForm(item) {
   masterdataEditingOriginal = item.nev;

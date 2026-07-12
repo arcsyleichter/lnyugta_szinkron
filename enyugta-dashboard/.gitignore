@@ -1,0 +1,23 @@
+# Automatikusan generált titkok — SOHA ne kerüljön verziókezelésbe
+data/.secrets.json
+data/access-codes.json
+
+# Futásidőben növekvő tevékenység-napló — nem "kiindulási" adat
+data/activity-log.jsonl
+
+# Készlet-nyilvántartás — a szerver automatikusan létrehozza első induláskor,
+# nem kell előre a repóba tenni
+data/stock.db
+
+# Cikktörzs kétirányú szinkron függő módosításai — szintén automatikusan
+# létrejön első induláskor
+data/product-changes.db
+
+# Feltöltés közbeni ideiglenes fájlok
+data/companies/*.db.uploading
+
+# OS / szerkesztő
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc
