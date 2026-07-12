@@ -58,7 +58,7 @@ def validate_sqlite_file(path: str) -> bytes:
     return data
 
 
-def upload_once(url: str, api_key: str, adoszam: str, data: bytes, timeout: int) -> None:
+def upload_once(url: str, api_key: str, adoszam: str, telephely: str, data: bytes, timeout: int) -> None:
     endpoint = url.rstrip("/") + "/api/sync/upload"
     req = urllib.request.Request(
         endpoint,
@@ -67,6 +67,7 @@ def upload_once(url: str, api_key: str, adoszam: str, data: bytes, timeout: int)
         headers={
             "x-api-key": api_key,
             "x-adoszam": adoszam,
+            "x-telephely": telephely,
             "Content-Type": "application/octet-stream",
         },
     )
@@ -108,6 +109,10 @@ def main() -> None:
         help="A cég adószáma (legalább az első 8 számjegy) — ez azonosítja, melyik céghez tartozik a feltöltés"
     )
     parser.add_argument(
+        "--telephely", default="01",
+        help="Telephely-kód (alapértelmezett: 01, ha a cégnek csak egy telephelye van)"
+    )
+    parser.add_argument(
         "--api-key", default=os.environ.get("SYNC_API_KEY"),
         help="A szerver szinkron API kulcsa. Ha nincs megadva, a SYNC_API_KEY környezeti változóból olvassa."
     )
@@ -129,18 +134,18 @@ def main() -> None:
         )
 
     data = validate_sqlite_file(args.db)
-    print(f"→ {args.db} ({human_size(len(data))}) feltöltése ide: {args.url}  [adószám: {args.adoszam}]")
+    print(f"→ {args.db} ({human_size(len(data))}) feltöltése ide: {args.url}  [adószám: {args.adoszam}, telephely: {args.telephely}]")
 
     if args.interval > 0:
         print(f"→ Folyamatos mód: feltöltés {args.interval} másodpercenként. Leállítás: Ctrl+C.")
         try:
             while True:
-                upload_once(args.url, args.api_key, args.adoszam, data, args.timeout)
+                upload_once(args.url, args.api_key, args.adoszam, args.telephely, data, args.timeout)
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\n→ Leállítva.")
     else:
-        upload_once(args.url, args.api_key, args.adoszam, data, args.timeout)
+        upload_once(args.url, args.api_key, args.adoszam, args.telephely, data, args.timeout)
 
 
 if __name__ == "__main__":

@@ -73,18 +73,21 @@ const state = {
    Bejelentkezés
    ============================================================ */
 const loginScreen = document.getElementById('login-screen');
+const telephelyScreen = document.getElementById('telephely-screen');
 const appScreen = document.getElementById('app-screen');
 const adminLoginScreen = document.getElementById('admin-login-screen');
 const adminScreen = document.getElementById('admin-screen');
 
 function hideAllScreens() {
   loginScreen.hidden = true;
+  telephelyScreen.hidden = true;
   appScreen.hidden = true;
   adminLoginScreen.hidden = true;
   adminScreen.hidden = true;
   if (state.pollTimer) clearInterval(state.pollTimer);
 }
 function showLogin() { hideAllScreens(); loginScreen.hidden = false; }
+function showTelephelyScreen() { hideAllScreens(); telephelyScreen.hidden = false; }
 function showApp() { hideAllScreens(); appScreen.hidden = false; document.getElementById('back-to-admin-btn').hidden = !state.viaAdmin; }
 function showAdminLogin() { hideAllScreens(); adminLoginScreen.hidden = false; }
 function showAdmin() { hideAllScreens(); adminScreen.hidden = false; }
@@ -99,12 +102,18 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     const adoszam = document.getElementById('adoszam-input').value;
     const code = document.getElementById('code-input').value;
     const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam, code }) });
-    document.getElementById('company-name').textContent = data.company.nev;
     loggedIn = true;
     state.viaAdmin = false;
     stockProductsLoaded = false;
-    showApp();
-    boot();
+    if (!data.telephelyValasztva) {
+      showTelephelyScreen();
+      loadTelephelyPicker(data.company.nev);
+    } else {
+      document.getElementById('company-name').textContent = data.company.nev;
+      updateTelephelyBadge(data.company.telephelyNev);
+      showApp();
+      boot();
+    }
   } catch (e2) {
     err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Munkamenet lejárt.' : e2.message;
     err.hidden = false;
@@ -130,6 +139,89 @@ document.getElementById('back-to-admin-btn').addEventListener('click', () => {
    ============================================================ */
 document.getElementById('show-admin-login').addEventListener('click', (e) => { e.preventDefault(); showAdminLogin(); });
 document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+
+/* ============================================================
+   Telephely-választó és -karbantartó
+   ============================================================ */
+async function loadTelephelyPicker(cegNevFallback) {
+  document.getElementById('telephely-ceg-nev').textContent = cegNevFallback || '—';
+  try {
+    const data = await api('/api/telephelyek');
+    document.getElementById('telephely-ceg-nev').textContent = data.cegNev;
+    const list = document.getElementById('telephely-list');
+    list.innerHTML = '';
+    data.telephelyek.forEach((t) => {
+      const btn = document.createElement('button');
+      btn.className = 'telephely-item';
+      btn.innerHTML = `
+        <div>
+          <div class="telephely-item-nev">${escapeHtml(t.nev)}</div>
+          <div class="telephely-item-meta">${escapeHtml(t.cim || 'nincs megadva cím')}${t.utolsoSzinkron ? ' · szinkron: ' + fmtDateTime(t.utolsoSzinkron) : ''}</div>
+        </div>
+        ${!t.vanAdat ? '<span class="telephely-item-badge">még nincs adat</span>' : ''}`;
+      btn.addEventListener('click', () => selectTelephely(t.kod));
+      list.appendChild(btn);
+    });
+  } catch (e) {
+    alert('Nem sikerült betölteni a telephelyeket: ' + e.message);
+  }
+}
+
+async function selectTelephely(kod) {
+  try {
+    const data = await api('/api/telephely/select', { method: 'POST', body: JSON.stringify({ telephelyKod: kod }) });
+    document.getElementById('company-name').textContent = data.company.nev;
+    updateTelephelyBadge(data.company.telephelyNev);
+    showApp();
+    boot();
+  } catch (e) {
+    alert('Nem sikerült kiválasztani a telephelyet: ' + e.message);
+  }
+}
+
+function updateTelephelyBadge(telephelyNev) {
+  const box = document.getElementById('telephely-current');
+  if (telephelyNev) {
+    document.getElementById('telephely-current-nev').textContent = telephelyNev;
+    box.hidden = false;
+  } else {
+    box.hidden = true;
+  }
+}
+
+document.getElementById('telephely-new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('telephely-new-btn');
+  const err = document.getElementById('telephely-new-error');
+  err.hidden = true;
+  btn.disabled = true; btn.textContent = 'Létrehozás…';
+  try {
+    const kod = document.getElementById('telephely-new-kod').value.trim();
+    const nev = document.getElementById('telephely-new-nev').value.trim();
+    const cim = document.getElementById('telephely-new-cim').value.trim();
+    await api('/api/telephely/create', { method: 'POST', body: JSON.stringify({ kod, nev, cim }) });
+    document.getElementById('telephely-new-form').reset();
+    loadTelephelyPicker();
+  } catch (e2) {
+    err.textContent = e2.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Létrehozás';
+  }
+});
+
+document.getElementById('telephely-switch-link').addEventListener('click', (e) => {
+  e.preventDefault();
+  showTelephelyScreen();
+  loadTelephelyPicker();
+});
+
+document.getElementById('telephely-logout-link').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) {}
+  loggedIn = false;
+  showLogin();
+});
 
 document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -173,6 +265,7 @@ async function loadAdminOverview() {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${escapeHtml(c.nev)}</td>
+      <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
       <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
       <td>${escapeHtml(c.varos || '—')}</td>
       <td>
@@ -233,6 +326,7 @@ async function loadAdminOverview() {
       try {
         const data2 = await api('/api/admin/impersonate', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
         document.getElementById('company-name').textContent = data2.company.nev;
+        updateTelephelyBadge(data2.company.telephelyNev);
         loggedIn = true;
         state.viaAdmin = true;
         stockProductsLoaded = false;
@@ -1075,9 +1169,9 @@ function fillMasterdataForm(item) {
   document.getElementById('md-ar-input').value = item.pendingChange ? item.pendingChange.bruttoar : item.bruttoar;
   document.getElementById('md-afa-input').value = item.pendingChange ? item.pendingChange.afakod : item.afakod;
   document.getElementById('md-me-input').value = item.me || '';
-  document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
+  document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoport?.megnevezes : item.csoportNev) || '';
   document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
-  document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodElviteli : item.afakodElviteli) || '';
+  document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodelv : item.afakodElviteli) || '';
   document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;
   document.getElementById('md-cancel-btn').hidden = false;
   document.getElementById('masterdata-form').scrollIntoView({ behavior: 'smooth', block: 'center' });

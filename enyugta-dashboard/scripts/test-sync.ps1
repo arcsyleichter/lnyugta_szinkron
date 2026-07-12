@@ -10,13 +10,15 @@
 #
 # Használat:
 #   $env:SYNC_API_KEY = "a szinkron API-kulcsod"
-#   .\scripts\test-sync.ps1 -Url https://lnyugta-szinkron-1.onrender.com -Adoszam 18774455 -DbPath .\proba-corvin-presszo-teszt2.db
+#   .\scripts\test-sync.ps1 -Url https://lnyugta-szinkron-1.onrender.com -Adoszam 18774455 -Telephely 01 -DbPath .\proba-corvin-presszo-teszt2.db
 #
 # Ha a -DbPath paramétert nem adod meg, alapból ".\proba-corvin-presszo-teszt2.db"-t használja.
+# Ha a -Telephely paramétert nem adod meg, alapból "01"-et használja (egytelephelyes cégeknél ez a helyes).
 
 param(
     [Parameter(Mandatory = $true)][string]$Url,
     [Parameter(Mandatory = $true)][string]$Adoszam,
+    [string]$Telephely = "01",
     [string]$ApiKey = $env:SYNC_API_KEY,
     [string]$DbPath = ".\proba-corvin-presszo-teszt2.db"
 )
@@ -42,7 +44,7 @@ $beforeMap = @{}
 foreach ($item in $before) { $beforeMap[$item.nev] = $item }
 
 Write-Host "-> Függő módosítások lekérdezése és alkalmazása..." -ForegroundColor Cyan
-python3 $pullScript --url $Url --adoszam $Adoszam --api-key $ApiKey --apply-to $DbPath
+python3 $pullScript --url $Url --adoszam $Adoszam --telephely $Telephely --api-key $ApiKey --apply-to $DbPath
 
 Write-Host ""
 Write-Host "-> Pillanatkép készítése szinkron UTÁN..." -ForegroundColor Cyan
@@ -87,4 +89,4 @@ if ($changedCount -eq 0) {
 Write-Host "========================================================" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "-> Most töltsd fel, mintha az androidos app tenné:" -ForegroundColor Cyan
-Write-Host "  python3 $scriptDir\upload_sync.py --url $Url --db $DbPath --adoszam $Adoszam"
+Write-Host "  python3 $scriptDir\upload_sync.py --url $Url --db $DbPath --adoszam $Adoszam --telephely $Telephely"

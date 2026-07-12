@@ -69,23 +69,72 @@ if (!process.env.ADMIN_PASSWORD) {
 function normalizeAdoszam(s) {
   return String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 }
-// A cég "kulcsa" mindenhol az adószám első 8 számjegye — ez azonosítja
-// egyértelműen a fájlnevet, a bejelentkezést és a nyitott kapcsolatot is.
+// A cég "kulcsa" mindenhol az adószám első 8 számjegye.
 function companyKeyFromAdoszam(adoszam) {
   return normalizeAdoszam(adoszam).slice(0, 8);
 }
-function dbFileForKey(key) {
-  return path.join(COMPANIES_DIR, `${key}.db`);
+// A telephely-kód szabad, rövid azonosító (pl. "01", "BUDA") — csak
+// alfanumerikus, hogy biztonságosan része lehessen fájlnévnek/kulcsnak.
+function normalizeTelephelyKod(s) {
+  const norm = String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 12);
+  return norm || '01';
+}
+// ÖSSZETETT KULCS: "cégkulcs:telephelykód" (pl. "18774455:01") — ez az,
+// amit a rendszer mindenhol egyetlen átlátszó "key" stringként kezel
+// (session.companyKey, stock.db/product-changes.db company_key oszlopa
+// stb.) — így a meglévő kód nagy része VÁLTOZATLANUL működik, csak most
+// már telephely-szinten különül el, nem csak cég-szinten.
+function makeSiteKey(cegKulcs, telephelyKod) {
+  return `${cegKulcs}:${normalizeTelephelyKod(telephelyKod)}`;
+}
+function splitSiteKey(siteKey) {
+  const idx = siteKey.indexOf(':');
+  if (idx === -1) return { cegKulcs: siteKey, telephelyKod: null };
+  return { cegKulcs: siteKey.slice(0, idx), telephelyKod: siteKey.slice(idx + 1) };
+}
+function dbFileForKey(siteKey) {
+  const { cegKulcs, telephelyKod } = splitSiteKey(siteKey);
+  return path.join(COMPANIES_DIR, cegKulcs, `${telephelyKod}.db`);
 }
 
 // ---------------------------------------------------------------------------
-// Cégindex — memóriában tartott lista arról, milyen cégek (.db fájlok)
+// Telephelyek nyilvántartása — cégenként, adminisztratív módon kezelve
+// (nem csak a ténylegesen szinkronizált .db fájlokból derül ki, hanem egy
+// telephely már a szinkron ELŐTT is felvehető a karbantartóban).
+// data/telephelyek.json: { "<cégkulcs>": [ { kod, nev, cim, letrehozva } ] }
+// ---------------------------------------------------------------------------
+const TELEPHELYEK_PATH = path.join(DATA_DIR, 'telephelyek.json');
+
+function readTelephelyek() {
+  try { return JSON.parse(fs.readFileSync(TELEPHELYEK_PATH, 'utf8')); }
+  catch (_) { return {}; }
+}
+function writeTelephelyek(data) {
+  fs.writeFileSync(TELEPHELYEK_PATH, JSON.stringify(data, null, 2));
+}
+function listTelephelyek(cegKulcs) {
+  return readTelephelyek()[cegKulcs] || [];
+}
+function ensureTelephely(cegKulcs, kod, nev) {
+  const data = readTelephelyek();
+  if (!data[cegKulcs]) data[cegKulcs] = [];
+  kod = normalizeTelephelyKod(kod);
+  if (!data[cegKulcs].some((t) => t.kod === kod)) {
+    data[cegKulcs].push({ kod, nev: nev || `Telephely ${kod}`, cim: '', letrehozva: new Date().toISOString() });
+    writeTelephelyek(data);
+    return true; // új volt
+  }
+  return false; // már létezett
+}
+
+// ---------------------------------------------------------------------------
+// Cégindex — memóriában tartott lista arról, milyen TELEPHELYEK (.db fájlok)
 // érhetők el, és mi az adataik (cégnév, adószám, város, cím). A tényleges
 // forgalmi adatokat NEM tartalmazza — azokat lekérdezéskor olvassuk ki
 // a megfelelő adatbázisból.
 // ---------------------------------------------------------------------------
 
-const companyIndex = new Map(); // key(8 jegy) -> { cegid, nev, adoszam, varos, cim, dbFile }
+const companyIndex = new Map(); // siteKey ("cégkulcs:telephelykód") -> { cegid, nev, adoszam, varos, cim, dbFile, cegKulcs, telephelyKod }
 
 function readCompanyIdentity(dbFile) {
   const tmp = new DatabaseSync(dbFile, { readOnly: true });
@@ -96,21 +145,54 @@ function readCompanyIdentity(dbFile) {
   }
 }
 
-function scanCompanies() {
-  companyIndex.clear();
-  const files = fs.readdirSync(COMPANIES_DIR).filter((f) => f.endsWith('.db'));
-  for (const f of files) {
-    const key = f.replace(/\.db$/, '');
-    const dbFile = path.join(COMPANIES_DIR, f);
-    try {
-      const identity = readCompanyIdentity(dbFile);
-      if (identity) companyIndex.set(key, { ...identity, dbFile });
-      else console.warn(`[warn] ${f}: nincs szallitot sor, kihagyva.`);
-    } catch (e) {
-      console.error(`[warn] nem sikerült beolvasni: ${f} — ${e.message}`);
+// Egyszeri migráció: a korábbi, lapos "data/companies/<cégkulcs>.db"
+// elrendezést átalakítja "data/companies/<cégkulcs>/01.db"-re, és
+// regisztrálja az "01" ("Fő telephely") telephelyet — hogy a régebbi,
+// egytelephelyes cégek adatai ne vesszenek el ennél a szerkezetváltásnál.
+function migrateFlatCompanyFiles() {
+  const entries = fs.readdirSync(COMPANIES_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.db')) {
+      const cegKulcs = entry.name.replace(/\.db$/, '');
+      const oldPath = path.join(COMPANIES_DIR, entry.name);
+      const newDir = path.join(COMPANIES_DIR, cegKulcs);
+      const newPath = path.join(newDir, '01.db');
+      fs.mkdirSync(newDir, { recursive: true });
+      if (!fs.existsSync(newPath)) {
+        fs.renameSync(oldPath, newPath);
+        console.log(`[migráció] ${entry.name} -> ${cegKulcs}/01.db (Fő telephely)`);
+      }
+      ensureTelephely(cegKulcs, '01', 'Fő telephely');
     }
   }
-  console.log(`[info] ${companyIndex.size} cég betöltve a data/companies/ mappából.`);
+}
+
+function scanCompanies() {
+  migrateFlatCompanyFiles();
+  companyIndex.clear();
+  const cegDirs = fs.readdirSync(COMPANIES_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
+  for (const cegDir of cegDirs) {
+    const cegKulcs = cegDir.name;
+    const cegPath = path.join(COMPANIES_DIR, cegKulcs);
+    const files = fs.readdirSync(cegPath).filter((f) => f.endsWith('.db'));
+    for (const f of files) {
+      const telephelyKod = f.replace(/\.db$/, '');
+      const dbFile = path.join(cegPath, f);
+      const siteKey = makeSiteKey(cegKulcs, telephelyKod);
+      try {
+        const identity = readCompanyIdentity(dbFile);
+        if (identity) {
+          companyIndex.set(siteKey, { ...identity, dbFile, cegKulcs, telephelyKod });
+          ensureTelephely(cegKulcs, telephelyKod, null); // ha admin még nem nevezte el, kapjon alap nevet
+        } else {
+          console.warn(`[warn] ${cegKulcs}/${f}: nincs szallitot sor, kihagyva.`);
+        }
+      } catch (e) {
+        console.error(`[warn] nem sikerült beolvasni: ${cegKulcs}/${f} — ${e.message}`);
+      }
+    }
+  }
+  console.log(`[info] ${companyIndex.size} telephely betöltve a data/companies/ mappából.`);
 }
 scanCompanies();
 
@@ -247,7 +329,7 @@ function reconcileProductChanges(companyKey) {
         matches = !!current
           && Number(current.bruttoar) === Number(payload.bruttoar)
           && String(current.afakod) === String(payload.afakod)
-          && (!payload.afakodElviteli || String(current.afakodelv) === String(payload.afakodElviteli));
+          && (!payload.afakodelv || String(current.afakodelv) === String(payload.afakodelv));
       } else if (row.change_type === 'csoport_upsert') {
         matches = !!get(companyKey, `SELECT azon FROM cikkcsop WHERE megnevezes = ?`, [payload.megnevezes]);
       }
@@ -378,8 +460,9 @@ function generateAccessCode() {
 function ensureAccessCodes() {
   const codes = readAccessCodes();
   let changed = false;
-  for (const key of companyIndex.keys()) {
-    if (!codes[key]) { codes[key] = { code: generateAccessCode(), email: '' }; changed = true; }
+  const cegKulcsok = new Set([...companyIndex.values()].map((e) => e.cegKulcs));
+  for (const cegKulcs of cegKulcsok) {
+    if (!codes[cegKulcs]) { codes[cegKulcs] = { code: generateAccessCode(), email: '' }; changed = true; }
   }
   if (changed) writeAccessCodes(codes);
   return codes;
@@ -499,6 +582,17 @@ function requireAuth(req) {
   return session;
 }
 
+// Cég-szintű ellenőrzés — elfogadja MIND a telephely-választás előtti
+// (companyKey == cégkulcs), MIND a már teljes (companyKey == "cégkulcs:kód")
+// munkameneteket. Ezt használja a telephely-lista lekérdezése, a
+// telephely-választás és a telephely-karbantartó.
+function requireCegAuth(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enysession);
+  if (!session || !session.cegKulcs) return null;
+  return session;
+}
+
 // Admin munkamenet — KÜLÖN cookie-ban (enyadmin), nem keverendő a cégenkénti
 // bejelentkezéssel. Az admin jelszava a data/.secrets.json-ban (vagy
 // ADMIN_PASSWORD env változóban) van, teljesen független a szinkron API kulcstól.
@@ -541,23 +635,50 @@ route('POST', '/api/auth/login', async (req, res) => {
   const { adoszam, code } = await readJsonBody(req);
   const wanted = normalizeAdoszam(adoszam);
   if (wanted.length < 8) return sendJson(res, 400, { error: 'Adj meg legalább 8 számjegyet az adószámból.' });
-  const key = wanted.slice(0, 8);
-  const entry = companyIndex.get(key);
-  if (!entry) {
-    logActivity({ type: 'company_login', ok: false, companyKey: key, nev: null, detail: 'Ismeretlen adószám.', ip });
+  const cegKulcs = wanted.slice(0, 8);
+
+  const telephelyek = listTelephelyek(cegKulcs);
+  if (!telephelyek.length) {
+    logActivity({ type: 'company_login', ok: false, companyKey: cegKulcs, nev: null, detail: 'Ismeretlen adószám.', ip });
     return sendJson(res, 401, { error: 'Ismeretlen adószám. Ellenőrizd, és próbáld újra.' });
   }
+
   const codes = readAccessCodes();
-  const expected = codes[key]?.code;
+  const expected = codes[cegKulcs]?.code;
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  const displayNev = anySite ? anySite.nev : 'Új cég (még nincs szinkronizált adat)';
+
   if (!expected || !code || String(code).trim() !== expected) {
-    logActivity({ type: 'company_login', ok: false, companyKey: key, nev: entry.nev, detail: 'Hibás hozzáférési kód.', ip });
+    logActivity({ type: 'company_login', ok: false, companyKey: cegKulcs, nev: displayNev, detail: 'Hibás hozzáférési kód.', ip });
     return sendJson(res, 401, { error: 'Hibás hozzáférési kód. Kérd el a céged adminisztrátorától.' });
   }
-  const payload = { companyKey: key, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
+
+  logActivity({ type: 'company_login', ok: true, companyKey: cegKulcs, nev: displayNev, detail: 'Sikeres bejelentkezés.', ip });
+
+  if (telephelyek.length === 1) {
+    // Csak egy telephely van — nincs szükség választásra, azonnal teljes munkamenetet kap.
+    const t = telephelyek[0];
+    const siteKey = makeSiteKey(cegKulcs, t.kod);
+    const site = companyIndex.get(siteKey);
+    const payload = {
+      companyKey: siteKey, cegKulcs, telephelyKod: t.kod,
+      nev: site ? site.nev : displayNev, adoszam: site ? site.adoszam : wanted,
+      exp: Date.now() + SESSION_MAX_AGE_MS,
+    };
+    const token = signSession(payload);
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+    return sendJson(res, 200, {
+      ok: true, telephelyValasztva: true,
+      company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
+    }, { 'Set-Cookie': cookie });
+  }
+
+  // Több telephely — cég-szintű (telephely nélküli) munkamenet; a webes
+  // felületnek a telephely-választó képernyőt kell megjelenítenie.
+  const payload = { companyKey: cegKulcs, cegKulcs, telephelyKod: null, nev: displayNev, adoszam: wanted, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
-  logActivity({ type: 'company_login', ok: true, companyKey: key, nev: entry.nev, detail: 'Sikeres bejelentkezés.', ip });
-  sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
+  sendJson(res, 200, { ok: true, telephelyValasztva: false, company: { nev: displayNev, adoszam: wanted } }, { 'Set-Cookie': cookie });
 });
 
 route('POST', '/api/auth/logout', async (req, res) => {
@@ -571,6 +692,75 @@ route('GET', '/api/me', async (req, res) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const meta = readSyncMeta();
   sendJson(res, 200, { company: { nev: session.nev, adoszam: session.adoszam }, sync: meta[session.companyKey] || { lastSync: null, source: null } });
+});
+
+// Telephelyek listája a bejelentkezett céghez — a telephely-választó
+// képernyő és a telephely-karbantartó felület használja. Cég-szintű
+// hitelesítés is elég hozzá (nem kell, hogy már ki legyen választva).
+route('GET', '/api/telephelyek', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  const telephelyek = listTelephelyek(session.cegKulcs).map((t) => {
+    const siteKey = makeSiteKey(session.cegKulcs, t.kod);
+    const site = companyIndex.get(siteKey);
+    return {
+      kod: t.kod, nev: t.nev, cim: t.cim || (site ? site.cim : ''),
+      vanAdat: !!site, utolsoSzinkron: meta[siteKey]?.lastSync || null,
+    };
+  });
+  sendJson(res, 200, { cegNev: session.nev, adoszam: session.adoszam, telephelyValasztva: !!session.telephelyKod, telephelyek });
+});
+
+// Telephely kiválasztása (vagy váltás egy másikra, ha már volt kiválasztva) —
+// új, teljes (telephely-szintű) munkamenetet ad.
+route('POST', '/api/telephely/select', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { telephelyKod } = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(telephelyKod);
+  const telephelyek = listTelephelyek(session.cegKulcs);
+  const t = telephelyek.find((x) => x.kod === kod);
+  if (!t) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+
+  const siteKey = makeSiteKey(session.cegKulcs, kod);
+  const site = companyIndex.get(siteKey);
+  const payload = {
+    companyKey: siteKey, cegKulcs: session.cegKulcs, telephelyKod: kod,
+    nev: site ? site.nev : session.nev, adoszam: site ? site.adoszam : session.adoszam,
+    exp: Date.now() + SESSION_MAX_AGE_MS,
+  };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  logActivity({ type: 'telephely_select', ok: true, companyKey: siteKey, nev: payload.nev, detail: `Telephely kiválasztva: ${t.nev} (${kod})` });
+  sendJson(res, 200, {
+    ok: true,
+    company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
+    vanAdat: !!site,
+  }, { 'Set-Cookie': cookie });
+});
+
+// Új telephely felvétele (telephely-karbantartó). Cég-szintű hitelesítés
+// is elég — ki lehet bővíteni a telephely-választó képernyőről is,
+// anélkül hogy előbb ki kéne választani egy meglévőt.
+route('POST', '/api/telephely/create', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.kod);
+  const nev = String(body.nev || '').trim();
+  const cim = String(body.cim || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+
+  const data = readTelephelyek();
+  if (!data[session.cegKulcs]) data[session.cegKulcs] = [];
+  if (data[session.cegKulcs].some((t) => t.kod === kod)) {
+    return sendJson(res, 400, { error: `Már létezik telephely "${kod}" kóddal — válassz másikat.` });
+  }
+  data[session.cegKulcs].push({ kod, nev, cim, letrehozva: new Date().toISOString() });
+  writeTelephelyek(data);
+  logActivity({ type: 'telephely_create', ok: true, companyKey: session.cegKulcs, nev: session.nev, detail: `Új telephely: ${nev} (${kod})` });
+  sendJson(res, 200, { ok: true, kod, nev, cim });
 });
 
 route('GET', '/api/summary', async (req, res, query) => {
@@ -777,7 +967,7 @@ route('GET', '/api/products/master', async (req, res) => {
   // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
   const existingNames = new Set(rows.map((r) => r.nev));
   for (const [nev, pl] of pendingMap) {
-    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodElviteli, pendingChange: pl, isNewPending: true });
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoport?.megnevezes || 'Nincs csoport', afakodElviteli: pl.afakodelv, pendingChange: pl, isNewPending: true });
   }
   items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
   sendJson(res, 200, { items });
@@ -807,6 +997,16 @@ route('GET', '/api/products/groups', async (req, res) => {
 
 // Egyedi cikk létrehozása/módosítása — függő módosításként kerül be, NEM
 // közvetlenül a szinkronizált adatbázisba (lásd fenti magyarázat).
+// A payload mezőnevei PONTOSAN a cikkt / cikkcsop táblák oszlopneveivel
+// kell, hogy egyezzenek (kisbetűvel) — az androidos oldal ezek alapján ír
+// közvetlenül a saját adatbázisába, nem tud kitalálni egyedi elnevezéseket,
+// amiket a webes felület esetleg máshogy hívna.
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }) {
+  const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
+  if (csoportNev) payload.csoport = { megnevezes: csoportNev }; // cikkcsop.megnevezes-nek megfelelő elnevezés
+  return payload;
+}
+
 route('POST', '/api/products/change', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
@@ -821,9 +1021,9 @@ route('POST', '/api/products/change', async (req, res) => {
   const me = String(body.me || '').trim() || 'Darab';
   const csoportNev = String(body.csoportNev || '').trim() || null;
   const vonalkod = String(body.vonalkod || '').trim() || null;
-  const afakodElviteli = String(body.afakodElviteli || '').trim() || null;
-  if (afakodElviteli && !VALID_AFA_CODES.includes(afakodElviteli)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
-  addProductChange(session.companyKey, 'cikk_upsert', { megnevezes, me, bruttoar, afakod, csoportNev, vonalkod, afakodElviteli }, 'web_form');
+  const afakodelv = String(body.afakodElviteli || '').trim() || null;
+  if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
 });
@@ -855,7 +1055,7 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
   if (!csoportNev && !names) return sendJson(res, 400, { error: 'Válassz csoportot vagy cikkeket.' });
 
   let products = all(session.companyKey,
-    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.afakodelv, IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A'`
   );
   if (csoportNev) products = products.filter((p) => p.csoportNev === csoportNev);
@@ -866,7 +1066,7 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
     let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
     newPrice = Math.max(0, Math.round(newPrice));
     addProductChange(session.companyKey, 'cikk_upsert',
-      { megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, csoportNev: p.csoportNev, vonalkod: p.vonalkod },
+      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev }),
       'web_bulk_price');
   }
   logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
@@ -945,15 +1145,15 @@ route('POST', '/api/products/import', async (req, res) => {
     if (!VALID_AFA_CODES.includes(afa)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen ÁFA kód (${afa}) — megengedett: ${VALID_AFA_CODES.join(', ')}`); continue; }
     const afakodElvitelRaw = (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null;
     if (afakodElvitelRaw && !VALID_AFA_CODES.includes(afakodElvitelRaw)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen elviteli ÁFA kód (${afakodElvitelRaw})`); continue; }
-    addProductChange(session.companyKey, 'cikk_upsert', {
+    addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({
       megnevezes: nev,
       me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
       bruttoar: ar,
       afakod: afa,
       csoportNev: (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null,
       vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
-      afakodElviteli: afakodElvitelRaw,
-    }, 'excel_import');
+      afakodelv: afakodElvitelRaw,
+    }), 'excel_import');
     count++;
   }
   logActivity({ type: 'product_import', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${count} cikk importálva${errors.length ? `, ${errors.length} hibás sor` : ''}` });
@@ -1186,11 +1386,17 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   }
 
   const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
-  const key = companyKeyFromAdoszam(adoszamRaw);
-  if (key.length < 8) {
+  const cegKulcs = companyKeyFromAdoszam(adoszamRaw);
+  if (cegKulcs.length < 8) {
     logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Hiányzó vagy érvénytelen x-adoszam.', ip });
     return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter — melyik céghez tartozik a feltöltés?' });
   }
+  // Új: x-telephely fejléc — melyik telephelyről érkezik a feltöltés.
+  // Ha egy még nem frissített androidos app nem küldi, "01"-re esik
+  // vissza (visszafelé kompatibilitás az egytelephelyes cégekkel).
+  const telephelyRaw = req.headers['x-telephely'] || query.telephely;
+  const telephelyKod = normalizeTelephelyKod(telephelyRaw);
+  const key = makeSiteKey(cegKulcs, telephelyKod);
 
   let buf;
   // A korábbi 100 MB-os korlát önkényes volt, semmi köze a git/GitHub-hoz
@@ -1212,6 +1418,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   }
 
   const dbFile = dbFileForKey(key);
+  fs.mkdirSync(path.dirname(dbFile), { recursive: true }); // új cég/telephely esetén a mappa még nem létezik
   const tmpPath = dbFile + '.uploading';
   try {
     fs.writeFileSync(tmpPath, buf);
@@ -1225,8 +1432,11 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   let identity = null;
   try { identity = readCompanyIdentity(dbFile); } catch (e) { console.error(`[hiba] identitás-olvasás sikertelen (${key}):`, e.message); }
   const isNew = !companyIndex.has(key);
-  if (identity) companyIndex.set(key, { ...identity, dbFile });
-  if (isNew) ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
+  if (identity) companyIndex.set(key, { ...identity, dbFile, cegKulcs, telephelyKod });
+  if (isNew) {
+    ensureTelephely(cegKulcs, telephelyKod, null); // ha adminisztratívan még nem lett felvéve, most regisztráljuk
+    ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
+  }
   if (identity) reconcileProductChanges(key); // friss adat -> nézzük, teljesült-e valamelyik függő cikktörzs-módosítás
 
   if (!identity) {
@@ -1238,8 +1448,8 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
   meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity.nev };
   writeSyncMeta(meta);
 
-  logActivity({ type: 'sync_upload', ok: true, companyKey: key, nev: identity.nev, detail: `${Math.round(buf.length / 1024)} KB${isNew ? ' — új cég regisztrálva' : ''}`, ip });
-  console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ CÉG regisztrálva' : ''}`);
+  logActivity({ type: 'sync_upload', ok: true, companyKey: key, nev: identity.nev, detail: `${Math.round(buf.length / 1024)} KB${isNew ? ' — új telephely regisztrálva' : ''}`, ip });
+  console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ TELEPHELY regisztrálva' : ''}`);
   sendJson(res, 200, { ok: true, companyKey: key, newCompany: isNew, ...meta[key] });
 });
 
@@ -1256,8 +1466,10 @@ route('GET', '/api/sync/pending-changes', async (req, res, query) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey || apiKey !== SECRETS.syncApiKey) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
   const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
-  const key = companyKeyFromAdoszam(adoszamRaw);
-  if (key.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter.' });
+  const cegKulcs = companyKeyFromAdoszam(adoszamRaw);
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter.' });
+  const telephelyRaw = req.headers['x-telephely'] || query.telephely;
+  const key = makeSiteKey(cegKulcs, telephelyRaw);
   const rows = productChangesDb.prepare(
     `SELECT id, change_type AS type, payload FROM product_changes WHERE company_key = ? AND status = 'pending' ORDER BY id ASC`
   ).all(key);
@@ -1364,13 +1576,16 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
   const codes = ensureAccessCodes();
   const companies = [...companyIndex.entries()]
     .map(([key, entry]) => {
+      const cegKulcs = entry.cegKulcs;
       let fallbackEmail = '';
-      if (!codes[key]?.email) {
+      if (!codes[cegKulcs]?.email) {
         try { fallbackEmail = get(key, 'SELECT email FROM szallitot LIMIT 1')?.email || ''; } catch (_) {}
       }
+      const telephelyInfo = listTelephelyek(cegKulcs).find((t) => t.kod === entry.telephelyKod);
       return {
-        key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
-        code: codes[key]?.code, email: codes[key]?.email || fallbackEmail,
+        key, cegKulcs, telephelyKod: entry.telephelyKod, telephelyNev: telephelyInfo?.nev || entry.telephelyKod,
+        nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+        code: codes[cegKulcs]?.code, email: codes[cegKulcs]?.email || fallbackEmail,
         ...(meta[key] || { lastSync: null, source: null, bytes: null }),
       };
     })
@@ -1418,13 +1633,14 @@ route('POST', '/api/admin/regenerate-code', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const { companyKey } = await readJsonBody(req);
-  const entry = companyIndex.get(companyKey);
-  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const cegKulcs = splitSiteKey(companyKey).cegKulcs; // elfogadja akár a puszta cégkulcsot, akár egy telephely-kulcsot is
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
   const codes = readAccessCodes();
-  codes[companyKey] = { ...(codes[companyKey] || {}), code: generateAccessCode() };
+  codes[cegKulcs] = { ...(codes[cegKulcs] || {}), code: generateAccessCode() };
   writeAccessCodes(codes);
-  logActivity({ type: 'admin_regen_code', ok: true, companyKey, nev: entry.nev, detail: 'Hozzáférési kód újragenerálva.' });
-  sendJson(res, 200, { ok: true, companyKey, code: codes[companyKey].code });
+  logActivity({ type: 'admin_regen_code', ok: true, companyKey: cegKulcs, nev: anySite?.nev, detail: 'Hozzáférési kód újragenerálva.' });
+  sendJson(res, 200, { ok: true, companyKey: cegKulcs, code: codes[cegKulcs].code });
 });
 
 // Admin kiküldi a cég hozzáférési kódját emailben, Brevón keresztül.
@@ -1432,37 +1648,39 @@ route('POST', '/api/admin/send-code', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const { companyKey, email } = await readJsonBody(req);
-  const entry = companyIndex.get(companyKey);
-  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const cegKulcs = splitSiteKey(companyKey).cegKulcs;
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const nevPlain = anySite?.nev || 'Ismeretlen cég';
+  const adoszamPlain = anySite?.adoszam || cegKulcs;
   const cleanEmail = String(email || '').trim();
   if (!cleanEmail || !cleanEmail.includes('@')) return sendJson(res, 400, { error: 'Érvénytelen email cím.' });
 
   const codes = ensureAccessCodes();
-  const code = codes[companyKey]?.code;
-  const nev = escapeHtmlServer(entry.nev);
+  const code = codes[cegKulcs]?.code;
+  const nev = escapeHtmlServer(nevPlain);
   const html = `
     <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
       <p>Kedves <strong>${nev}</strong>!</p>
       <p>Az L-NYUGTA nézegetőbe való belépéshez az alábbi adatokat használd:</p>
       <table style="margin:16px 0;border-collapse:collapse;">
-        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Adószám</td><td style="padding:4px 0;font-weight:600;">${escapeHtmlServer(entry.adoszam)}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Adószám</td><td style="padding:4px 0;font-weight:600;">${escapeHtmlServer(adoszamPlain)}</td></tr>
         <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Hozzáférési kód</td><td style="padding:4px 0;font-weight:700;font-size:20px;letter-spacing:3px;">${escapeHtmlServer(code)}</td></tr>
       </table>
       <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt az emailt, kérjük hagyd figyelmen kívül.</p>
     </div>`;
 
   try {
-    await sendBrevoEmail({ toEmail: cleanEmail, toName: entry.nev, subject: 'L-NYUGTA — hozzáférési kódod', html });
+    await sendBrevoEmail({ toEmail: cleanEmail, toName: nevPlain, subject: 'L-NYUGTA — hozzáférési kódod', html });
   } catch (e) {
-    logActivity({ type: 'admin_send_code', ok: false, companyKey, nev: entry.nev, detail: `Sikertelen küldés (${cleanEmail}): ${e.message}` });
+    logActivity({ type: 'admin_send_code', ok: false, companyKey: cegKulcs, nev: nevPlain, detail: `Sikertelen küldés (${cleanEmail}): ${e.message}` });
     return sendJson(res, 502, { error: `Nem sikerült elküldeni: ${e.message}` });
   }
-  logActivity({ type: 'admin_send_code', ok: true, companyKey, nev: entry.nev, detail: `Kód kiküldve ide: ${cleanEmail}` });
+  logActivity({ type: 'admin_send_code', ok: true, companyKey: cegKulcs, nev: nevPlain, detail: `Kód kiküldve ide: ${cleanEmail}` });
 
-  // elmentjük az email címet, hogy legközelebb ne kelljen újra beírni
-  codes[companyKey] = { ...(codes[companyKey] || {}), email: cleanEmail };
+  codes[cegKulcs] = { ...(codes[cegKulcs] || {}), email: cleanEmail };
   writeAccessCodes(codes);
-  console.log(`[email] kód elküldve: ${entry.nev} (${companyKey}) -> ${cleanEmail}`);
+  console.log(`[email] kód elküldve: ${nevPlain} (${cegKulcs}) -> ${cleanEmail}`);
   sendJson(res, 200, { ok: true });
 });
 
@@ -1473,13 +1691,17 @@ route('POST', '/api/admin/impersonate', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const { companyKey } = await readJsonBody(req);
-  const entry = companyIndex.get(companyKey);
-  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
-  const payload = { companyKey, cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const entry = companyIndex.get(companyKey); // companyKey itt egy teljes telephely-kulcs ("cégkulcs:kód")
+  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  const payload = {
+    companyKey, cegKulcs: entry.cegKulcs, telephelyKod: entry.telephelyKod,
+    cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS,
+  };
   const token = signSession(payload);
   const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
-  logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a cég nézetét.' });
-  sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim } }, { 'Set-Cookie': cookie });
+  const telephelyInfo = listTelephelyek(entry.cegKulcs).find((t) => t.kod === entry.telephelyKod);
+  logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a telephely nézetét.' });
+  sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim, telephelyNev: telephelyInfo?.nev || entry.telephelyKod } }, { 'Set-Cookie': cookie });
 });
 
 // ---------------------------------------------------------------------------

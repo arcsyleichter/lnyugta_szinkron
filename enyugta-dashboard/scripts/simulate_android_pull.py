@@ -47,9 +47,9 @@ import urllib.parse
 import urllib.request
 
 
-def fetch_pending(url: str, adoszam: str, api_key: str, timeout: int) -> list:
+def fetch_pending(url: str, adoszam: str, api_key: str, timeout: int, telephely: str = "01") -> list:
     endpoint = url.rstrip("/") + "/api/sync/pending-changes?adoszam=" + urllib.parse.quote(adoszam)
-    req = urllib.request.Request(endpoint, headers={"x-api-key": api_key})
+    req = urllib.request.Request(endpoint, headers={"x-api-key": api_key, "x-telephely": telephely})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -94,30 +94,30 @@ def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
     bruttoar = payload["bruttoar"]
     afakod = payload["afakod"]
     vonalkod = payload.get("vonalkod") or ""
-    afakod_elviteli = payload.get("afakodElviteli")
-    csoport_nev = payload.get("csoportNev")
+    afakodelv = payload.get("afakodelv")
+    csoport = payload.get("csoport")  # {"megnevezes": "..."} vagy None
     csopazon = "1"
-    if csoport_nev:
-        csopazon, _ = apply_csoport(conn, csoport_nev)
+    if csoport and csoport.get("megnevezes"):
+        csopazon, _ = apply_csoport(conn, csoport["megnevezes"])
 
     row = conn.execute("SELECT azon FROM cikkt WHERE megnevezes = ?", (megnevezes,)).fetchone()
     if row:
         conn.execute(
             "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, csopazon = ?, afakodelv = ? WHERE megnevezes = ?",
-            (bruttoar, afakod, me, vonalkod, csopazon, afakod_elviteli, megnevezes),
+            (bruttoar, afakod, me, vonalkod, csopazon, afakodelv, megnevezes),
         )
         return "frissítve"
     azon = next_azon(conn, "cikkt")
     conn.execute(
         "INSERT INTO cikkt (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, status, afakodelv) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, 'A', ?)",
-        (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, afakod_elviteli),
+        (csopazon, megnevezes, me, bruttoar, afakod, vonalkod, azon, afakodelv),
     )
     return "létrehozva"
 
 
 def run_once(args) -> None:
-    items = fetch_pending(args.url, args.adoszam, args.api_key, args.timeout)
+    items = fetch_pending(args.url, args.adoszam, args.api_key, args.timeout, args.telephely)
     ts = time.strftime("%H:%M:%S")
     if not items:
         print(f"[{ts}] Nincs függő módosítás ehhez az adószámhoz.")
@@ -127,7 +127,8 @@ def run_once(args) -> None:
     for it in items:
         p = it["payload"]
         if it["type"] == "cikk_upsert":
-            print(f"  #{it['id']} CIKK     {p['megnevezes']!r} → {p['bruttoar']} Ft ({p['afakod']}), csoport: {p.get('csoportNev') or '—'}")
+            csoport_nev = (p.get("csoport") or {}).get("megnevezes")
+            print(f"  #{it['id']} CIKK     {p['megnevezes']!r} → {p['bruttoar']} Ft ({p['afakod']}), csoport: {csoport_nev or '—'}")
         elif it["type"] == "csoport_upsert":
             print(f"  #{it['id']} CSOPORT  {p['megnevezes']!r}")
         else:
@@ -168,6 +169,7 @@ def main() -> None:
     )
     parser.add_argument("--url", required=True, help="A szerver alap URL-je, pl. https://lnyugta-szinkron-1.onrender.com")
     parser.add_argument("--adoszam", required=True, help="A cég adószáma (legalább az első 8 számjegy)")
+    parser.add_argument("--telephely", default="01", help="Telephely-kód (alapértelmezett: 01, ha a cégnek csak egy telephelye van)")
     parser.add_argument("--api-key", default=os.environ.get("SYNC_API_KEY"), help="Szinkron API kulcs (vagy SYNC_API_KEY env változó)")
     parser.add_argument("--apply-to", help="Helyi .db fájl, amire ténylegesen alkalmazza a lekérdezett módosításokat")
     parser.add_argument("--interval", type=int, default=0, help="Ha megadod (mp), folyamatosan, ennyi időnként újra lekérdez (Ctrl+C-ig)")
@@ -180,7 +182,7 @@ def main() -> None:
             "  SYNC_API_KEY környezeti változót (a szerver data/.secrets.json fájljában található)."
         )
 
-    print(f"→ Függő módosítások lekérdezése: {args.url}  [adószám: {args.adoszam}]")
+    print(f"→ Függő módosítások lekérdezése: {args.url}  [adószám: {args.adoszam}, telephely: {args.telephely}]")
     if args.interval > 0:
         print(f"→ Folyamatos mód: lekérdezés {args.interval} másodpercenként. Leállítás: Ctrl+C.")
         try:

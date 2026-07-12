@@ -43,6 +43,34 @@
   <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
 </section>
 
+<!-- ===================== TELEPHELY-VÁLASZTÓ ===================== -->
+<section id="telephely-screen" class="login-screen" hidden>
+  <div class="login-card telephely-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name" id="telephely-ceg-nev">—</div>
+        <div class="brand-sub">válaszd ki, melyik telephellyel szeretnél dolgozni</div>
+      </div>
+    </div>
+
+    <div class="telephely-list" id="telephely-list"></div>
+
+    <div class="telephely-new-box">
+      <div class="telephely-new-title">+ Új telephely felvétele</div>
+      <form id="telephely-new-form" autocomplete="off">
+        <input id="telephely-new-kod" placeholder="Rövid kód (pl. 02)" maxlength="12" required>
+        <input id="telephely-new-nev" placeholder="Telephely neve (pl. Belvárosi bolt)" required>
+        <input id="telephely-new-cim" placeholder="Cím (opcionális)">
+        <button type="submit" id="telephely-new-btn">Létrehozás</button>
+      </form>
+      <div class="login-error" id="telephely-new-error" hidden></div>
+    </div>
+  </div>
+  <div class="admin-entry"><a href="#" id="telephely-logout-link">‹ Kijelentkezés</a></div>
+</section>
+
 <!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
 <section id="admin-login-screen" class="login-screen" hidden>
   <div class="login-card">
@@ -80,6 +108,9 @@
         <div>
           <div class="brand-name">L-NYUGTA</div>
           <div class="brand-sub" id="company-name">—</div>
+          <div class="brand-sub telephely-current" id="telephely-current" hidden>
+            📍 <span id="telephely-current-nev"></span> — <a href="#" id="telephely-switch-link">váltás</a>
+          </div>
         </div>
       </div>
       <button class="sidebar-close-btn" id="sidebar-close-btn" aria-label="Menü bezárása">✕</button>
@@ -548,7 +579,7 @@
         </div>
       </div>
       <table class="data-table" id="admin-companies-table">
-        <thead><tr><th>Cégnév</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
+        <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
