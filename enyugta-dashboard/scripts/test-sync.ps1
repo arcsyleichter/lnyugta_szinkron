@@ -10,15 +10,15 @@
 #
 # Használat:
 #   $env:SYNC_API_KEY = "a szinkron API-kulcsod"
-#   .\scripts\test-sync.ps1 -Url https://lnyugta-szinkron-1.onrender.com -Adoszam 18774455 -Db .\proba-corvin-presszo-teszt2.db
+#   .\scripts\test-sync.ps1 -Url https://lnyugta-szinkron-1.onrender.com -Adoszam 18774455 -DbPath .\proba-corvin-presszo-teszt2.db
 #
-# Ha a -Db paramétert nem adod meg, alapból ".\proba-corvin-presszo-teszt2.db"-t használja.
+# Ha a -DbPath paramétert nem adod meg, alapból ".\proba-corvin-presszo-teszt2.db"-t használja.
 
 param(
     [Parameter(Mandatory = $true)][string]$Url,
     [Parameter(Mandatory = $true)][string]$Adoszam,
     [string]$ApiKey = $env:SYNC_API_KEY,
-    [string]$Db = ".\proba-corvin-presszo-teszt2.db"
+    [string]$DbPath = ".\proba-corvin-presszo-teszt2.db"
 )
 
 if (-not $ApiKey) {
@@ -26,8 +26,8 @@ if (-not $ApiKey) {
     Write-Host '  $env:SYNC_API_KEY = "..."' -ForegroundColor Red
     exit 1
 }
-if (-not (Test-Path $Db)) {
-    Write-Host "[HIBA] Nem található az adatbázis: $Db" -ForegroundColor Red
+if (-not (Test-Path $DbPath)) {
+    Write-Host "[HIBA] Nem található az adatbázis: $DbPath" -ForegroundColor Red
     exit 1
 }
 
@@ -35,18 +35,18 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dumpScript = Join-Path $scriptDir "dump_products.py"
 $pullScript = Join-Path $scriptDir "simulate_android_pull.py"
 
-Write-Host "-> Pillanatkép készítése szinkron ELŐTT ($Db)..." -ForegroundColor Cyan
-$beforeJson = python3 $dumpScript $Db
+Write-Host "-> Pillanatkép készítése szinkron ELŐTT ($DbPath)..." -ForegroundColor Cyan
+$beforeJson = python3 $dumpScript $DbPath
 $before = $beforeJson | ConvertFrom-Json
 $beforeMap = @{}
 foreach ($item in $before) { $beforeMap[$item.nev] = $item }
 
 Write-Host "-> Függő módosítások lekérdezése és alkalmazása..." -ForegroundColor Cyan
-python3 $pullScript --url $Url --adoszam $Adoszam --api-key $ApiKey --apply-to $Db
+python3 $pullScript --url $Url --adoszam $Adoszam --api-key $ApiKey --apply-to $DbPath
 
 Write-Host ""
 Write-Host "-> Pillanatkép készítése szinkron UTÁN..." -ForegroundColor Cyan
-$afterJson = python3 $dumpScript $Db
+$afterJson = python3 $dumpScript $DbPath
 $after = $afterJson | ConvertFrom-Json
 $afterMap = @{}
 foreach ($item in $after) { $afterMap[$item.nev] = $item }
@@ -87,4 +87,4 @@ if ($changedCount -eq 0) {
 Write-Host "========================================================" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "-> Most töltsd fel, mintha az androidos app tenné:" -ForegroundColor Cyan
-Write-Host "  python3 $scriptDir\upload_sync.py --url $Url --db $Db --adoszam $Adoszam"
+Write-Host "  python3 $scriptDir\upload_sync.py --url $Url --db $DbPath --adoszam $Adoszam"
