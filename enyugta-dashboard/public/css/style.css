@@ -266,11 +266,36 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 
 .card{ background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; box-shadow:var(--shadow); }
+.table-scroll{ overflow-x:auto; margin:0 -4px; padding:0 4px; }
+.table-scroll .data-table{ min-width:1080px; }
+.table-scroll .data-table td, .table-scroll .data-table th{ white-space:nowrap; }
+.table-scroll .data-table td:nth-child(6){ white-space:normal; } /* Email cella maradjon tördelhető */
 .card-title{ font-family:var(--font-display); font-weight:600; font-size:15px; margin-bottom:14px; }
 .card-title-row{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px; }
 .card-title-row .card-title{ margin-bottom:0; }
 .card-subtitle{ font-size:12px; color:var(--text-dim); margin-top:2px; }
 .muted{ color:var(--text-dim); font-size:13px; line-height:1.6; }
+
+.licenc-mock-badge{
+  font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+  padding:4px 10px; border-radius:20px; background:#FAEEDA; color:#854F0B; white-space:nowrap;
+}
+.licenc-mock-lede{ font-size:13px; color:var(--text-dim); line-height:1.6; margin:0 0 16px; max-width:760px; }
+.licenc-badge{
+  display:inline-flex; align-items:center; font-size:12px; font-weight:600;
+  padding:3px 12px; border-radius:20px; white-space:nowrap;
+}
+.licenc-badge--ok{ background:#EAF3DE; color:#3B6D11; }
+.licenc-badge--warn{ background:#FAEEDA; color:#854F0B; }
+.licenc-badge--expired{ background:#FCEBEB; color:#791F1F; }
+.licenc-badge--none{ background:#F1EFE8; color:#5F5E5A; }
+.licenc-status{
+  display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:20px; font-weight:600; font-size:12.5px;
+}
+.licenc-status--ok{ background:#EAF3DE; color:#3B6D11; }
+.licenc-status--warn{ background:#FAEEDA; color:#854F0B; }
+.licenc-status--expired{ background:#FCEBEB; color:#791F1F; }
+.licenc-status--none{ background:var(--paper-dim); color:var(--text-dim); }
 
 .chart-holder{ width:100%; }
 .chart-holder--tall svg{ height:280px; }
@@ -321,7 +346,9 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
 .admin-entry a:hover{ color:rgba(250,249,245,0.8); }
 
-.admin-shell{ min-height:100vh; background:var(--paper-dim); }
+.admin-shell{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; background:var(--paper-dim); }
+.admin-nav-item{ } /* a .nav-item stílust örökli, ez csak egy elkülönített JS-hook */
+.admin-view{ display:flex; flex-direction:column; gap:18px; }
 .admin-topbar{
   display:flex; align-items:center; justify-content:space-between; background:var(--ink);
   padding:18px 30px; box-shadow:var(--shadow); border-bottom:3px solid var(--jade-deep);
@@ -459,11 +486,14 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 #admin-companies-table tbody tr:hover, #admin-ntak-table tbody tr:hover, #admin-synclog-table tbody tr:hover{ background:var(--paper-dim); }
 #admin-companies-table td, #admin-ntak-table td, #admin-synclog-table td{ padding:10px; border-bottom:1px solid var(--line); }
+/* A táblázat sok oszlopot tartalmaz — asztali nézeten is elférhet a
+   képernyőnél szélesebb tartalom (pl. a gombok kilógtak korábban).
+   Vízszintes görgetéssel oldjuk meg, ahelyett hogy összepréselnénk. */
+.admin-shell .card{ overflow-x:auto; }
 
 @media (max-width:880px){
   .admin-topbar{ padding:14px 16px; }
   .admin-main{ padding:18px 14px 40px; }
-  .admin-shell .card{ overflow-x:auto; }
 }
 .pager{ display:flex; gap:6px; }
 .btn-tiny{ background:var(--paper-dim); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; }

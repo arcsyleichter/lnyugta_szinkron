@@ -93,7 +93,42 @@ function showTelephelyScreen() { hideAllScreens(); telephelyScreen.hidden = fals
 function showTelephelyWaitingScreen() { hideAllScreens(); telephelyWaitingScreen.hidden = false; }
 function showApp() { hideAllScreens(); appScreen.hidden = false; document.getElementById('back-to-admin-btn').hidden = !state.viaAdmin; }
 function showAdminLogin() { hideAllScreens(); adminLoginScreen.hidden = false; }
-function showAdmin() { hideAllScreens(); adminScreen.hidden = false; }
+function showAdmin() { hideAllScreens(); adminScreen.hidden = false; showAdminView('overview'); renderLicencMock(); }
+
+/* ============================================================
+   Admin — navigációs menü (blokkonként külön nézet)
+   ============================================================ */
+function showAdminView(view) {
+  document.querySelectorAll('.admin-view').forEach((el) => { el.hidden = el.dataset.adminView !== view; });
+  document.querySelectorAll('.admin-nav-item').forEach((btn) => { btn.classList.toggle('is-active', btn.dataset.adminView === view); });
+  closeAdminMobileSidebar(); // mobil nézetben a menü válaszottás után csukódjon be
+}
+document.querySelectorAll('.admin-nav-item').forEach((btn) => {
+  btn.addEventListener('click', () => showAdminView(btn.dataset.adminView));
+});
+
+/* ============================================================
+   Admin — Licenc-kezelés (MINTA adatok, nem élő)
+   ============================================================ */
+const LICENC_MOCK_ROWS = [
+  { nev: 'Corvin Presszó Kft.', adoszam: '18774455-1-42', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.132.132', allapot: 'ok', allapotSzoveg: 'érvényes', regDatum: '2026-04-14' },
+  { nev: 'Zöld Kanál Vendéglő Kft.', adoszam: '24681357-2-09', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.118.118', allapot: 'warn', allapotSzoveg: '6 napon belül lejár', regDatum: '2026-01-06' },
+  { nev: 'PACHIRA GROUP Kft.', adoszam: '27129430-2-41', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.122.122', allapot: 'expired', allapotSzoveg: 'lejárt', regDatum: '2026-03-21' },
+  { nev: 'Kis Bolt (telephely)', adoszam: '18774455-1-42', telephely: 'Kis Bolt', program: '—', verzio: '—', allapot: 'none', allapotSzoveg: 'nincs regisztráció', regDatum: '—' },
+];
+function renderLicencMock() {
+  const tbody = document.querySelector('#admin-licenc-table tbody');
+  tbody.innerHTML = LICENC_MOCK_ROWS.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.nev)}</td>
+      <td class="ntak-uuid">${escapeHtml(r.adoszam)}</td>
+      <td>${escapeHtml(r.telephely)}</td>
+      <td>${escapeHtml(r.program)}</td>
+      <td>${escapeHtml(r.verzio)}</td>
+      <td><span class="licenc-badge licenc-badge--${r.allapot}">${escapeHtml(r.allapotSzoveg)}</span></td>
+      <td>${escapeHtml(r.regDatum)}</td>
+    </tr>`).join('');
+}
 
 document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -560,6 +595,23 @@ document.getElementById('hamburger-btn').addEventListener('click', () => {
 });
 document.getElementById('sidebar-overlay').addEventListener('click', closeMobileSidebar);
 document.getElementById('sidebar-close-btn').addEventListener('click', closeMobileSidebar);
+
+function closeAdminMobileSidebar() {
+  document.getElementById('admin-sidebar').classList.remove('is-open');
+  document.getElementById('admin-sidebar-overlay').hidden = true;
+  document.getElementById('admin-hamburger-btn').classList.remove('is-hidden');
+}
+function openAdminMobileSidebar() {
+  document.getElementById('admin-sidebar').classList.add('is-open');
+  document.getElementById('admin-sidebar-overlay').hidden = false;
+  document.getElementById('admin-hamburger-btn').classList.add('is-hidden');
+}
+document.getElementById('admin-hamburger-btn').addEventListener('click', () => {
+  const sidebar = document.getElementById('admin-sidebar');
+  if (sidebar.classList.contains('is-open')) closeAdminMobileSidebar(); else openAdminMobileSidebar();
+});
+document.getElementById('admin-sidebar-overlay').addEventListener('click', closeAdminMobileSidebar);
+document.getElementById('admin-sidebar-close-btn').addEventListener('click', closeAdminMobileSidebar);
 
 /* ============================================================
    Navigáció / nézetváltás

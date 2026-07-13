@@ -565,87 +565,138 @@
 
 <!-- ===================== ADMIN PANEL ===================== -->
 <div id="admin-screen" class="admin-shell" hidden>
-  <header class="admin-topbar">
-    <div class="brand">
-      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
-      <div>
-        <div class="brand-name">L-NYUGTA <span class="admin-badge">Admin</span></div>
-        <div class="brand-sub">összes cég áttekintése</div>
-      </div>
-    </div>
-    <button class="btn-ghost" id="admin-logout-btn">Kilépés</button>
-  </header>
 
-  <main class="admin-main">
-    <div class="receipt-strip admin-kpi-strip">
-      <div class="receipt-strip-inner">
-        <div class="kpi">
-          <div class="kpi-label">Regisztrált cégek</div>
-          <div class="kpi-value" id="admin-kpi-companies">—</div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Sikertelen szinkron (napló)</div>
-          <div class="kpi-value" id="admin-kpi-failed">—</div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">NTAK probléma (részben/teljesen hibás)</div>
-          <div class="kpi-value" id="admin-kpi-ntak-problems">—</div>
-        </div>
-      </div>
-    </div>
+  <button class="hamburger-btn" id="admin-hamburger-btn" aria-label="Menü megnyitása">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="sidebar-overlay" id="admin-sidebar-overlay" hidden></div>
 
-    <div class="admin-email-warning" id="admin-email-warning" hidden>
-      ⚠️ Az email-küldés nincs beállítva a szerveren (hiányzó <code>BREVO_API_KEY</code> / <code>BREVO_SENDER_EMAIL</code> környezeti változó) — a "Küldés" gombok nem fognak működni, amíg ezt be nem állítod (lásd README).
-    </div>
-
-    <div class="card">
-      <div class="card-title-row">
+  <aside class="sidebar" id="admin-sidebar">
+    <div class="sidebar-topline">
+      <div class="brand brand--sidebar">
+        <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
         <div>
-          <div class="card-title">Cégek</div>
-          <div class="card-subtitle"><span id="admin-company-count">0</span> regisztrálva</div>
+          <div class="brand-name">L-NYUGTA <span class="admin-badge">Admin</span></div>
+          <div class="brand-sub">összes cég áttekintése</div>
         </div>
       </div>
-      <table class="data-table" id="admin-companies-table">
-        <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th>Licenc</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <button class="sidebar-close-btn" id="admin-sidebar-close-btn" aria-label="Menü bezárása">✕</button>
+    </div>
+    <nav class="nav">
+      <button class="nav-item admin-nav-item is-active" data-admin-view="overview">Áttekintés</button>
+      <button class="nav-item admin-nav-item" data-admin-view="companies">Cégek</button>
+      <button class="nav-item admin-nav-item" data-admin-view="ntak">NTAK állapot</button>
+      <button class="nav-item admin-nav-item" data-admin-view="activity">Tevékenység-napló</button>
+      <button class="nav-item admin-nav-item" data-admin-view="licenc">Licenc-kezelés</button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn-ghost" id="admin-logout-btn">Kilépés</button>
+    </div>
+  </aside>
+
+  <main class="main admin-main">
+    <div class="admin-view" data-admin-view="overview">
+      <div class="receipt-strip admin-kpi-strip">
+        <div class="receipt-strip-inner">
+          <div class="kpi">
+            <div class="kpi-label">Regisztrált cégek</div>
+            <div class="kpi-value" id="admin-kpi-companies">—</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Sikertelen szinkron (napló)</div>
+            <div class="kpi-value" id="admin-kpi-failed">—</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">NTAK probléma (részben/teljesen hibás)</div>
+            <div class="kpi-value" id="admin-kpi-ntak-problems">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="admin-email-warning" id="admin-email-warning" hidden>
+        ⚠️ Az email-küldés nincs beállítva a szerveren (hiányzó <code>BREVO_API_KEY</code> / <code>BREVO_SENDER_EMAIL</code> környezeti változó) — a "Küldés" gombok nem fognak működni, amíg ezt be nem állítod (lásd README).
+      </div>
     </div>
 
-    <div class="card">
-      <div class="card-title-row">
-        <div>
-          <div class="card-title">NTAK állapot</div>
-          <div class="card-subtitle">minden cég, akinél van adatküldés</div>
+    <div class="admin-view" data-admin-view="companies" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Cégek</div>
+            <div class="card-subtitle"><span id="admin-company-count">0</span> regisztrálva</div>
+          </div>
+        </div>
+        <div class="table-scroll">
+        <table class="data-table" id="admin-companies-table">
+          <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th>Licenc</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
         </div>
       </div>
-      <table class="data-table" id="admin-ntak-table">
-        <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
-        <tbody></tbody>
-      </table>
     </div>
 
-    <div class="card">
-      <div class="card-title-row">
-        <div>
-          <div class="card-title">Tevékenység-napló</div>
-          <div class="card-subtitle">minden esemény, cégenként és típusonként csoportosítva</div>
+    <div class="admin-view" data-admin-view="ntak" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">NTAK állapot</div>
+            <div class="card-subtitle">minden cég, akinél van adatküldés</div>
+          </div>
         </div>
+        <table class="data-table" id="admin-ntak-table">
+          <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
+    </div>
 
-      <table class="data-table activity-summary-table" id="activity-summary-table">
-        <thead><tr><th>Cég</th><th class="td-right">Összesen</th><th>Legutóbbi esemény</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div class="admin-view" data-admin-view="activity" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Tevékenység-napló</div>
+            <div class="card-subtitle">minden esemény, cégenként és típusonként csoportosítva</div>
+          </div>
+        </div>
 
-      <div class="activity-filters">
-        <select id="activity-company-select"><option value="">Összes cég</option></select>
-        <div class="activity-type-chips" id="activity-type-chips"></div>
+        <table class="data-table activity-summary-table" id="activity-summary-table">
+          <thead><tr><th>Cég</th><th class="td-right">Összesen</th><th>Legutóbbi esemény</th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <div class="activity-filters">
+          <select id="activity-company-select"><option value="">Összes cég</option></select>
+          <div class="activity-type-chips" id="activity-type-chips"></div>
+        </div>
+
+        <table class="data-table" id="activity-log-table">
+          <thead><tr><th>Időpont</th><th>Cég</th><th>Típus</th><th>Állapot</th><th>Részlet</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
+    </div>
 
-      <table class="data-table" id="activity-log-table">
-        <thead><tr><th>Időpont</th><th>Cég</th><th>Típus</th><th>Állapot</th><th>Részlet</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div class="admin-view" data-admin-view="licenc" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Licenc-kezelés</div>
+            <div class="card-subtitle">koncepció-terv — az lszamla rendszerrel való jövőbeli összekapcsolásról, MINTA adatokkal</div>
+          </div>
+          <span class="licenc-mock-badge">Minta felület — nem élő adat</span>
+        </div>
+        <p class="licenc-mock-lede">
+          Ez a nézet azt mutatja meg, hogyan nézne ki a licenc-adatok integrációja, ha
+          egyszer élő kapcsolat lenne az lszamla rendszerrel (kulcs-alapú export vagy API
+          — jelszó-alapú, automatikus lekérdezést a szerver biztonsági okból nem végezhet).
+          Az alábbi táblázat MINTA adatokat mutat, a valós lszamla szín-konvenció szerint
+          (piros = lejárt, sárga = hamarosan lejár, zöld = ingyenes).
+        </p>
+        <table class="data-table" id="admin-licenc-table">
+          <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Program</th><th>Verzió</th><th>Állapot</th><th>Reg. dátum</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </main>
 </div>
