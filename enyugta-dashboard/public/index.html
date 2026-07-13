@@ -71,6 +71,33 @@
   <div class="admin-entry"><a href="#" id="telephely-logout-link">‹ Kijelentkezés</a></div>
 </section>
 
+<!-- ===================== TELEPHELY — MÉG NINCS ADAT ===================== -->
+<section id="telephely-waiting-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name" id="telephely-waiting-nev">—</div>
+        <div class="brand-sub">még nem érkezett hozzá adat</div>
+      </div>
+    </div>
+    <p class="login-lede">
+      Ez a telephely sikeresen létre lett hozva, de androidos szinkron
+      még nem érkezett hozzá — emiatt egyelőre nincs mit megjeleníteni.
+      Amint az androidos eszköz az első alkalommal szinkronizál erre a
+      telephelyre, ez az oldal automatikusan a normál nézetre vált.
+    </p>
+    <div class="login-footnote">
+      Az androidos szinkronhoz ugyanaz az adószám, plusz ennek a
+      telephelynek a kódja szükséges (<code id="telephely-waiting-kod">—</code>).
+    </div>
+    <button type="button" id="telephely-waiting-back-btn" class="btn-primary" style="width:100%;margin-top:16px;">
+      ‹ Vissza a telephely-választóhoz
+    </button>
+  </div>
+</section>
+
 <!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
 <section id="admin-login-screen" class="login-screen" hidden>
   <div class="login-card">

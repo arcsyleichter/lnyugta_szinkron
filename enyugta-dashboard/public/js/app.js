@@ -74,6 +74,7 @@ const state = {
    ============================================================ */
 const loginScreen = document.getElementById('login-screen');
 const telephelyScreen = document.getElementById('telephely-screen');
+const telephelyWaitingScreen = document.getElementById('telephely-waiting-screen');
 const appScreen = document.getElementById('app-screen');
 const adminLoginScreen = document.getElementById('admin-login-screen');
 const adminScreen = document.getElementById('admin-screen');
@@ -81,6 +82,7 @@ const adminScreen = document.getElementById('admin-screen');
 function hideAllScreens() {
   loginScreen.hidden = true;
   telephelyScreen.hidden = true;
+  telephelyWaitingScreen.hidden = true;
   appScreen.hidden = true;
   adminLoginScreen.hidden = true;
   adminScreen.hidden = true;
@@ -88,6 +90,7 @@ function hideAllScreens() {
 }
 function showLogin() { hideAllScreens(); loginScreen.hidden = false; }
 function showTelephelyScreen() { hideAllScreens(); telephelyScreen.hidden = false; }
+function showTelephelyWaitingScreen() { hideAllScreens(); telephelyWaitingScreen.hidden = false; }
 function showApp() { hideAllScreens(); appScreen.hidden = false; document.getElementById('back-to-admin-btn').hidden = !state.viaAdmin; }
 function showAdminLogin() { hideAllScreens(); adminLoginScreen.hidden = false; }
 function showAdmin() { hideAllScreens(); adminScreen.hidden = false; }
@@ -172,12 +175,27 @@ async function selectTelephely(kod) {
     const data = await api('/api/telephely/select', { method: 'POST', body: JSON.stringify({ telephelyKod: kod }) });
     document.getElementById('company-name').textContent = data.company.nev;
     updateTelephelyBadge(data.company.telephelyNev);
+    if (!data.vanAdat) {
+      // Még nem érkezett hozzá androidos szinkron — a normál nézet
+      // (Áttekintés stb.) minden adatlekérdezése elutasításra kerülne,
+      // ami hamis "munkamenet lejárt" kiléptetést okozna. Ehelyett egy
+      // magyarázó "vár még adatra" képernyőt mutatunk.
+      document.getElementById('telephely-waiting-nev').textContent = data.company.telephelyNev || '—';
+      document.getElementById('telephely-waiting-kod').textContent = kod;
+      showTelephelyWaitingScreen();
+      return;
+    }
     showApp();
     boot();
   } catch (e) {
     alert('Nem sikerült kiválasztani a telephelyet: ' + e.message);
   }
 }
+
+document.getElementById('telephely-waiting-back-btn').addEventListener('click', () => {
+  showTelephelyScreen();
+  loadTelephelyPicker();
+});
 
 function updateTelephelyBadge(telephelyNev) {
   const box = document.getElementById('telephely-current');
