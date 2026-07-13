@@ -342,6 +342,11 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 .btn-open-company:hover{ background:var(--jade); color:#fff; }
 .btn-open-company:disabled{ opacity:0.5; cursor:default; }
+.btn-license-check{
+  border:1px solid var(--line); background:#fff; color:var(--text-dim); padding:6px 12px; border-radius:7px;
+  font-size:12px; font-weight:600; white-space:nowrap; transition:background .15s, border-color .15s;
+}
+.btn-license-check:hover{ background:var(--paper-dim); border-color:var(--jade); color:var(--jade-deep); }
 .admin-code{ font-family:var(--font-mono); font-weight:600; letter-spacing:0.04em; }
 
 /* ============================================================

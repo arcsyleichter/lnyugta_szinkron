@@ -301,6 +301,7 @@ async function loadAdminOverview() {
       <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
       <td>${escapeHtml(c.source || '—')}</td>
       <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
+      <td><button class="btn-license-check" data-adoszam="${escapeHtml(c.adoszam)}" title="Adószám vágólapra másolása, majd az lszamla megnyitása">🔗 Licenc</button></td>
       <td><button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button></td>`;
     compTbody.appendChild(tr);
   });
@@ -360,6 +361,23 @@ async function loadAdminOverview() {
         btn.disabled = false; btn.textContent = 'Megnyitás';
         alert('Nem sikerült megnyitni: ' + e.message);
       }
+    });
+  });
+
+  // "Licenc" átjáró-gomb — vágólapra másolja az adószámot, majd megnyitja az
+  // lszamla rendszert új fülön. Nincs jelszó-tárolás vagy automatikus
+  // lekérdezés: az admin a saját, már bejelentkezett munkamenetében nézi meg,
+  // csak be kell illesztenie az adószámot a "Név töredék" (vagy hasonló)
+  // keresőmezőbe — az lszamla oldal a szűrést POST-kéréssel végzi, ezért
+  // közvetlen, előre kitöltött link sajnos nem lehetséges.
+  compTbody.querySelectorAll('.btn-license-check').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.adoszam);
+        btn.textContent = '✓ Másolva';
+        setTimeout(() => { btn.textContent = '🔗 Licenc'; }, 2000);
+      } catch (_) { /* ha a vágólap-hozzáférés nem engedélyezett, csendben folytatjuk */ }
+      window.open('https://leichter.hu/lszamla/index.php?p=reglistak', '_blank');
     });
   });
 
