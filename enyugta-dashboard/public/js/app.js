@@ -313,7 +313,12 @@ async function loadAdminOverview() {
       btn.disabled = true;
       try {
         const res = await api('/api/admin/regenerate-code', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
-        document.querySelector(`.admin-code[data-key="${res.companyKey}"]`).textContent = res.code;
+        // res.companyKey a puszta cégkulcs (a kód cég-szinten közös) — az
+        // ÖSSZES ehhez a céghez tartozó telephely-sor kódját frissítjük,
+        // mert mindegyik ugyanazt a kódot mutatja.
+        document.querySelectorAll('.admin-code').forEach((el) => {
+          if (el.dataset.key.split(':')[0] === res.companyKey) el.textContent = res.code;
+        });
       } catch (e) {
         alert('Nem sikerült új kódot generálni: ' + e.message);
       } finally {

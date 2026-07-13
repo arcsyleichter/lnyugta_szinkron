@@ -1513,8 +1513,10 @@ route('POST', '/api/sync/request', async (req, res) => {
 // ---------------------------------------------------------------------------
 route('GET', '/api/auth/companies-hint', async (req, res) => {
   const codes = ensureAccessCodes();
+  const seen = new Set();
   const list = [...companyIndex.entries()]
-    .map(([key, entry]) => ({ nev: entry.nev, adoszam: entry.adoszam, code: codes[key]?.code }))
+    .filter(([, entry]) => { if (seen.has(entry.cegKulcs)) return false; seen.add(entry.cegKulcs); return true; }) // cégenként egyszer, ne telephelyenként
+    .map(([, entry]) => ({ nev: entry.nev, adoszam: entry.adoszam, code: codes[entry.cegKulcs]?.code }))
     .sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
   sendJson(res, 200, { companies: list });
 });
