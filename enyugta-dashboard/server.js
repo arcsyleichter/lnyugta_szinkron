@@ -294,8 +294,20 @@ productChangesDb.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_product_changes_company ON product_changes(company_key, status);
 `);
+// Könnyű migráció: a "meta" oszlop (csak weben megjelenített, kiegészítő
+// adat — pl. tervezett termékcsoport neve — ami TILOS, hogy bekerüljön az
+// androidnak küldött "payload" mezőbe, mert az androidos alkalmazás
+// szigorúan, mezőnév=oszlopnév alapon generikusan illeszti a payload MINDEN
+// kulcsát a cikkt táblára, és bármilyen ismeretlen mezőnév esetén elutasítja
+// az egész szinkront) — ha egy régebbi telepítésben még nincs meg, pótoljuk.
+{
+  const cols = productChangesDb.prepare(`PRAGMA table_info(product_changes)`).all();
+  if (!cols.some((c) => c.name === 'meta')) {
+    productChangesDb.exec(`ALTER TABLE product_changes ADD COLUMN meta TEXT`);
+  }
+}
 
-function addProductChange(companyKey, changeType, payload, source) {
+function addProductChange(companyKey, changeType, payload, source, meta) {
   // Ha ugyanerre a cikkre/csoportra már van egy még FÜGGŐBEN lévő korábbi
   // módosítás, azt előbb töröljük — különben soha nem tudna teljesülni
   // (hiszen a cikk ára/adatai a most beérkező, újabb szándék szerint fognak
@@ -307,9 +319,9 @@ function addProductChange(companyKey, changeType, payload, source) {
      AND json_extract(payload, '$.megnevezes') = ?`
   ).run(companyKey, changeType, target);
   productChangesDb.prepare(
-    `INSERT INTO product_changes (company_key, change_type, payload, status, source, created_at)
-     VALUES (?, ?, ?, 'pending', ?, ?)`
-  ).run(companyKey, changeType, JSON.stringify(payload), source, new Date().toISOString());
+    `INSERT INTO product_changes (company_key, change_type, payload, status, source, created_at, meta)
+     VALUES (?, ?, ?, 'pending', ?, ?, ?)`
+  ).run(companyKey, changeType, JSON.stringify(payload), source, new Date().toISOString(), meta ? JSON.stringify(meta) : null);
 }
 
 // Minden valódi androidos szinkron feltöltés után lefut: megnézi, hogy a
@@ -968,16 +980,22 @@ route('GET', '/api/products/master', async (req, res) => {
   let pendingRows = [];
   try {
     pendingRows = productChangesDb.prepare(
-      `SELECT payload FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'cikk_upsert'`
+      `SELECT payload, meta FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'cikk_upsert'`
     ).all(session.companyKey);
   } catch (_) {}
   const pendingMap = new Map();
-  for (const p of pendingRows) { try { const pl = JSON.parse(p.payload); pendingMap.set(pl.megnevezes, pl); } catch (_) {} }
+  for (const p of pendingRows) {
+    try {
+      const pl = JSON.parse(p.payload);
+      const meta = p.meta ? JSON.parse(p.meta) : {};
+      pendingMap.set(pl.megnevezes, { ...pl, csoportNev: meta.csoportNev || null });
+    } catch (_) {}
+  }
   const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null }));
   // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
   const existingNames = new Set(rows.map((r) => r.nev));
   for (const [nev, pl] of pendingMap) {
-    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoport?.megnevezes || 'Nincs csoport', afakodElviteli: pl.afakodelv, pendingChange: pl, isNewPending: true });
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, pendingChange: pl, isNewPending: true });
   }
   items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
   sendJson(res, 200, { items });
@@ -1011,10 +1029,16 @@ route('GET', '/api/products/groups', async (req, res) => {
 // kell, hogy egyezzenek (kisbetűvel) — az androidos oldal ezek alapján ír
 // közvetlenül a saját adatbázisába, nem tud kitalálni egyedi elnevezéseket,
 // amiket a webes felület esetleg máshogy hívna.
-function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }) {
-  const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
-  if (csoportNev) payload.csoport = { megnevezes: csoportNev }; // cikkcsop.megnevezes-nek megfelelő elnevezés
-  return payload;
+// FONTOS: az androidos alkalmazás a payload MINDEN kulcsát egy az egyben,
+// generikusan (mezőnév = oszlopnév) próbálja ráilleszteni a cikkt táblára,
+// és HA BÁRMELYIK KULCS NEM LÉTEZŐ OSZLOP, elutasítja az egész szinkront
+// ("Érvénytelen mezőnév érkezett a JSON-ben" hiba). Emiatt a payload
+// KIZÁRÓLAG szó szerinti cikkt-oszlopneveket tartalmazhat — semmi mást,
+// még beágyazott objektumot sem (ezt élesben, androidos hibaüzenetből
+// derítettük ki). A tervezett csoport nevét ezért KÜLÖN, a "meta" mezőben
+// tároljuk — az csak a weben jelenik meg, sosem kerül elküldésre.
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv }) {
+  return { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
 }
 
 route('POST', '/api/products/change', async (req, res) => {
@@ -1033,7 +1057,7 @@ route('POST', '/api/products/change', async (req, res) => {
   const vonalkod = String(body.vonalkod || '').trim() || null;
   const afakodelv = String(body.afakodElviteli || '').trim() || null;
   if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
-  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv }), 'web_form', csoportNev ? { csoportNev } : null);
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
 });
@@ -1076,8 +1100,8 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
     let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
     newPrice = Math.max(0, Math.round(newPrice));
     addProductChange(session.companyKey, 'cikk_upsert',
-      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev }),
-      'web_bulk_price');
+      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv }),
+      'web_bulk_price', p.csoportNev ? { csoportNev: p.csoportNev } : null);
   }
   logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
   sendJson(res, 200, { ok: true, count: products.length });
@@ -1155,15 +1179,15 @@ route('POST', '/api/products/import', async (req, res) => {
     if (!VALID_AFA_CODES.includes(afa)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen ÁFA kód (${afa}) — megengedett: ${VALID_AFA_CODES.join(', ')}`); continue; }
     const afakodElvitelRaw = (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null;
     if (afakodElvitelRaw && !VALID_AFA_CODES.includes(afakodElvitelRaw)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen elviteli ÁFA kód (${afakodElvitelRaw})`); continue; }
+    const csoportNevImport = (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null;
     addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({
       megnevezes: nev,
       me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
       bruttoar: ar,
       afakod: afa,
-      csoportNev: (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null,
       vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
       afakodelv: afakodElvitelRaw,
-    }), 'excel_import');
+    }), 'excel_import', csoportNevImport ? { csoportNev: csoportNevImport } : null);
     count++;
   }
   logActivity({ type: 'product_import', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${count} cikk importálva${errors.length ? `, ${errors.length} hibás sor` : ''}` });

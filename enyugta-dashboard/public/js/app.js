@@ -1193,7 +1193,7 @@ function fillMasterdataForm(item) {
   document.getElementById('md-ar-input').value = item.pendingChange ? item.pendingChange.bruttoar : item.bruttoar;
   document.getElementById('md-afa-input').value = item.pendingChange ? item.pendingChange.afakod : item.afakod;
   document.getElementById('md-me-input').value = item.me || '';
-  document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoport?.megnevezes : item.csoportNev) || '';
+  document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
   document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
   document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodelv : item.afakodElviteli) || '';
   document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;

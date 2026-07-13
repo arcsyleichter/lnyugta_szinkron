@@ -89,22 +89,26 @@ def apply_csoport(conn: sqlite3.Connection, megnevezes: str):
 
 
 def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
+    # FONTOS: a payload KIZÁRÓLAG szó szerinti cikkt-oszlopneveket
+    # tartalmaz — nincs benne "csoport" mező. Ez szándékos: az androidos
+    # alkalmazás a payload minden kulcsát generikusan, mezőnév=oszlopnév
+    # alapon próbálja ráilleszteni a cikkt táblára, és bármilyen ismeretlen
+    # kulcs esetén elutasítja az egész szinkront. A tervezett termékcsoport
+    # neve csak a weben látszik (nem küldi el a szerver) — a csoporthoz
+    # rendelést egyelőre külön, az androidos alkalmazásban kell elvégezni.
     megnevezes = payload["megnevezes"]
     me = payload.get("me") or "Darab"
     bruttoar = payload["bruttoar"]
     afakod = payload["afakod"]
     vonalkod = payload.get("vonalkod") or ""
     afakodelv = payload.get("afakodelv")
-    csoport = payload.get("csoport")  # {"megnevezes": "..."} vagy None
-    csopazon = "1"
-    if csoport and csoport.get("megnevezes"):
-        csopazon, _ = apply_csoport(conn, csoport["megnevezes"])
+    csopazon = "1"  # nincs csoport-info a payloadban -> alapértelmezett csoport
 
     row = conn.execute("SELECT azon FROM cikkt WHERE megnevezes = ?", (megnevezes,)).fetchone()
     if row:
         conn.execute(
-            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, csopazon = ?, afakodelv = ? WHERE megnevezes = ?",
-            (bruttoar, afakod, me, vonalkod, csopazon, afakodelv, megnevezes),
+            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, afakodelv = ? WHERE megnevezes = ?",
+            (bruttoar, afakod, me, vonalkod, afakodelv, megnevezes),
         )
         return "frissítve"
     azon = next_azon(conn, "cikkt")
