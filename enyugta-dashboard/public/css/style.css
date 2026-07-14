@@ -123,6 +123,25 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 .telephely-new-box{ border-top:1px dashed var(--line); padding-top:16px; margin-top:6px; }
 .telephely-new-title{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-dim); margin-bottom:10px; }
+
+/* ============================================================
+   Profil nézet
+   ============================================================ */
+.profile-kv{ width:100%; border-collapse:collapse; }
+.profile-kv td{ padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px; }
+.profile-kv td:first-child{ color:var(--text-dim); width:140px; }
+.profile-kv tr:last-child td{ border-bottom:none; }
+.profile-inline-form{ display:flex; gap:10px; max-width:420px; }
+.profile-inline-form input{ flex:1; padding:9px 12px; border:1.5px solid var(--line); border-radius:8px; font-size:13.5px; }
+.profile-form-msg{ font-size:12.5px; margin-top:8px; }
+.profile-form-msg.ok{ color:var(--jade-deep); }
+.profile-form-msg.error{ color:var(--brick); }
+.profile-soon-card{ opacity:0.85; }
+.profile-soon-badge{
+  font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+  background:var(--paper-dim); color:var(--text-dim); padding:3px 9px; border-radius:20px; margin-left:8px; vertical-align:middle;
+}
+#profil-telephelyek-table .btn-tiny{ margin-right:4px; }
 #telephely-new-form{ display:flex; flex-direction:column; gap:10px; }
 #telephely-new-form input{
   width:100%; padding:10px 12px; border:1.5px solid var(--line); border-radius:8px; font-size:13.5px;

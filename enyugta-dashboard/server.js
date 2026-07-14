@@ -785,6 +785,69 @@ route('POST', '/api/telephely/create', async (req, res) => {
   sendJson(res, 200, { ok: true, kod, nev, cim });
 });
 
+// Meglévő telephely nevének/címének szerkesztése (a kód, amivel az
+// androidos eszköz azonosítja magát, NEM módosítható itt — az a
+// szinkron-azonosítás kulcsa, átnevezés helyett új telephelyt kell
+// felvenni, ha tényleg más kód kellene).
+route('POST', '/api/telephely/update', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.kod);
+  const nev = String(body.nev || '').trim();
+  const cim = String(body.cim || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+
+  const data = readTelephelyek();
+  const list = data[session.cegKulcs] || [];
+  const t = list.find((x) => x.kod === kod);
+  if (!t) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  t.nev = nev; t.cim = cim;
+  writeTelephelyek(data);
+  logActivity({ type: 'telephely_update', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Telephely frissítve: ${nev} (${kod})` });
+  sendJson(res, 200, { ok: true, kod, nev, cim });
+});
+
+// Cég-profil: cégadatok (szinkronizált, csak olvasható), kapcsolattartási
+// email és a telephelyek listája egy helyen — a jövőbeli felhasználó- és
+// előfizetés-kezelés is ide fog kerülni.
+route('GET', '/api/profile', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const site = companyIndex.get(session.companyKey);
+  const codes = readAccessCodes();
+  const meta = readSyncMeta();
+  const telephelyek = listTelephelyek(session.cegKulcs).map((t) => {
+    const siteKey = makeSiteKey(session.cegKulcs, t.kod);
+    const s = companyIndex.get(siteKey);
+    return {
+      kod: t.kod, nev: t.nev, cim: t.cim || (s ? s.cim : ''),
+      vanAdat: !!s, aktiv: t.kod === session.telephelyKod,
+      utolsoSzinkron: s ? (meta[siteKey]?.lastSync || null) : null,
+    };
+  });
+  sendJson(res, 200, {
+    cegNev: site ? site.nev : session.nev,
+    adoszam: site ? site.adoszam : session.adoszam,
+    varos: site?.varos || '', cim: site?.cim || '',
+    email: codes[session.cegKulcs]?.email || '',
+    telephelyek,
+  });
+});
+
+route('POST', '/api/profile/email', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { email } = await readJsonBody(req);
+  const clean = String(email || '').trim();
+  if (clean && !clean.includes('@')) return sendJson(res, 400, { error: 'Érvénytelen email cím.' });
+  const codes = readAccessCodes();
+  codes[session.cegKulcs] = { ...(codes[session.cegKulcs] || {}), email: clean };
+  writeAccessCodes(codes);
+  logActivity({ type: 'profile_email_update', ok: true, companyKey: session.companyKey, nev: session.nev, detail: clean || '(törölve)' });
+  sendJson(res, 200, { ok: true, email: clean });
+});
+
 route('GET', '/api/summary', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });

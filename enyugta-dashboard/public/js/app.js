@@ -454,6 +454,14 @@ const ACTIVITY_TYPE_LABELS = {
   stock_receipt_delete: 'Bevételezés törölve',
   stock_threshold_set: 'Riasztási küszöb beállítva',
   stock_threshold_delete: 'Riasztási küszöb törölve',
+  product_change_add: 'Cikk-módosítás rögzítve',
+  product_group_add: 'Termékcsoport létrehozva',
+  product_bulk_price: 'Tömeges árváltoztatás',
+  product_import: 'CSV import',
+  telephely_select: 'Telephely kiválasztva',
+  telephely_create: 'Új telephely létrehozva',
+  telephely_update: 'Telephely adatai módosítva',
+  profile_email_update: 'Profil: kapcsolattartási email módosítva',
 };
 const activityFilter = { company: '', type: '' };
 
@@ -631,6 +639,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'stock') loadStockView();
     if (view === 'stock-receipt') { loadStockProductList(); loadStockReceiptLog(); }
     if (view === 'sync') loadSyncView();
+    if (view === 'profil') loadProfilView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
   });
 });
@@ -1433,4 +1442,91 @@ document.getElementById('sync-request-btn').addEventListener('click', async () =
     out.textContent = res.message;
     loadSyncView();
   } catch (e) { out.textContent = 'Hiba: ' + e.message; }
+});
+
+/* ============================================================
+   Profil nézet — céges adatok, email, telephelyek
+   ============================================================ */
+async function loadProfilView() {
+  try {
+    const data = await api('/api/profile');
+    document.getElementById('profil-nev').textContent = data.cegNev || '—';
+    document.getElementById('profil-adoszam').textContent = data.adoszam || '—';
+    document.getElementById('profil-varos').textContent = data.varos || '—';
+    document.getElementById('profil-cim').textContent = data.cim || '—';
+    document.getElementById('profil-email-input').value = data.email || '';
+    renderProfilTelephelyek(data.telephelyek);
+  } catch (e) {
+    alert('Nem sikerült betölteni a profilt: ' + e.message);
+  }
+}
+
+function renderProfilTelephelyek(telephelyek) {
+  const tbody = document.querySelector('#profil-telephelyek-table tbody');
+  tbody.innerHTML = telephelyek.map((t) => `
+    <tr data-kod="${escapeHtml(t.kod)}">
+      <td class="ntak-uuid">${escapeHtml(t.kod)}${t.aktiv ? ' <span class="profile-soon-badge" style="background:var(--jade);color:#fff;">aktív</span>' : ''}</td>
+      <td class="profil-telephely-nev-cell">${escapeHtml(t.nev)}</td>
+      <td class="profil-telephely-cim-cell">${escapeHtml(t.cim || '—')}</td>
+      <td>${t.utolsoSzinkron ? fmtDateTime(t.utolsoSzinkron) : (t.vanAdat ? '—' : 'még nincs adat')}</td>
+      <td><button class="btn-tiny btn-profil-telephely-edit">Szerkesztés</button></td>
+    </tr>`).join('');
+
+  tbody.querySelectorAll('.btn-profil-telephely-edit').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tr = btn.closest('tr');
+      const kod = tr.dataset.kod;
+      const nevCell = tr.querySelector('.profil-telephely-nev-cell');
+      const cimCell = tr.querySelector('.profil-telephely-cim-cell');
+      const currentNev = nevCell.textContent;
+      const currentCim = cimCell.textContent === '—' ? '' : cimCell.textContent;
+      nevCell.innerHTML = `<input type="text" class="profil-telephely-edit-nev" value="${escapeHtml(currentNev)}" style="width:100%;">`;
+      cimCell.innerHTML = `<input type="text" class="profil-telephely-edit-cim" value="${escapeHtml(currentCim)}" style="width:100%;">`;
+      btn.textContent = 'Mentés';
+      btn.classList.add('btn-profil-telephely-save');
+      btn.classList.remove('btn-profil-telephely-edit');
+      btn.onclick = async () => {
+        const nev = tr.querySelector('.profil-telephely-edit-nev').value.trim();
+        const cim = tr.querySelector('.profil-telephely-edit-cim').value.trim();
+        if (!nev) { alert('A telephely neve nem lehet üres.'); return; }
+        btn.disabled = true;
+        try {
+          await api('/api/telephely/update', { method: 'POST', body: JSON.stringify({ kod, nev, cim }) });
+          loadProfilView();
+        } catch (e) {
+          alert('Nem sikerült menteni: ' + e.message);
+          btn.disabled = false;
+        }
+      };
+    });
+  });
+}
+
+document.getElementById('profil-email-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('profil-email-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    await api('/api/profile/email', { method: 'POST', body: JSON.stringify({ email: document.getElementById('profil-email-input').value.trim() }) });
+    msg.textContent = '✓ Mentve.'; msg.className = 'profile-form-msg ok';
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+document.getElementById('profil-telephely-new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('profil-telephely-new-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const kod = document.getElementById('profil-telephely-new-kod').value.trim();
+    const nev = document.getElementById('profil-telephely-new-nev').value.trim();
+    const cim = document.getElementById('profil-telephely-new-cim').value.trim();
+    await api('/api/telephely/create', { method: 'POST', body: JSON.stringify({ kod, nev, cim }) });
+    document.getElementById('profil-telephely-new-form').reset();
+    msg.textContent = '✓ Telephely létrehozva.'; msg.className = 'profile-form-msg ok';
+    loadProfilView();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
 });

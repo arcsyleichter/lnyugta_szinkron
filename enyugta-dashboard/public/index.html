@@ -152,6 +152,7 @@
       <button class="nav-item" data-view="stock">Készlet</button>
       <button class="nav-item nav-subitem" data-view="stock-receipt">↳ Bevételezés</button>
       <button class="nav-item" data-view="sync">Szinkronizáció</button>
+      <button class="nav-item" data-view="profil">Profil</button>
     </nav>
     <div class="sidebar-footer">
       <div class="sync-pill" id="sync-pill">
@@ -549,6 +550,74 @@
         <div class="sync-status-box" id="sync-status-box">Betöltés…</div>
         <button class="btn-secondary" id="sync-request-btn">Szinkron lekérdezése most</button>
         <div id="sync-request-result" class="muted" style="margin-top:10px;"></div>
+      </div>
+    </section>
+
+    <!-- --- PROFIL --- -->
+    <section class="view" data-view="profil" hidden>
+      <div class="card">
+        <div class="card-title">Céges adatok</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">az androidos szinkronból, csak olvasható</p>
+        <table class="profile-kv">
+          <tr><td>Cégnév</td><td id="profil-nev">—</td></tr>
+          <tr><td>Adószám</td><td id="profil-adoszam">—</td></tr>
+          <tr><td>Város</td><td id="profil-varos">—</td></tr>
+          <tr><td>Cím</td><td id="profil-cim">—</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Kapcsolattartási email</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">ide küldjük a hozzáférési kódot, és a jövőben az előfizetéssel kapcsolatos értesítéseket</p>
+        <form id="profil-email-form" class="profile-inline-form" autocomplete="off">
+          <input type="email" id="profil-email-input" placeholder="cég@email.hu">
+          <button type="submit" class="btn-secondary">Mentés</button>
+        </form>
+        <div class="profile-form-msg" id="profil-email-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Telephelyek</div>
+            <div class="card-subtitle">nevek és címek szerkesztése — a szinkronhoz használt kód itt nem módosítható</div>
+          </div>
+        </div>
+        <table class="data-table" id="profil-telephelyek-table">
+          <thead><tr><th>Kód</th><th>Név</th><th>Cím</th><th>Utolsó szinkron</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <div class="telephely-new-box" style="border-top:1px dashed var(--line); margin-top:16px; padding-top:16px;">
+          <div class="telephely-new-title">+ Új telephely felvétele</div>
+          <form id="profil-telephely-new-form" autocomplete="off">
+            <input id="profil-telephely-new-kod" placeholder="Rövid kód (pl. 02)" maxlength="12" required>
+            <input id="profil-telephely-new-nev" placeholder="Telephely neve (pl. Belvárosi bolt)" required>
+            <input id="profil-telephely-new-cim" placeholder="Cím (opcionális)">
+            <button type="submit" class="btn-secondary">Létrehozás</button>
+          </form>
+          <div class="profile-form-msg" id="profil-telephely-new-msg"></div>
+        </div>
+      </div>
+
+      <div class="card profile-soon-card">
+        <div class="card-title">Felhasználók <span class="profile-soon-badge">Hamarosan</span></div>
+        <p class="muted">
+          Jelenleg egy közös hozzáférési kód szolgál belépésre a teljes céghez.
+          A tervek szerint a jövőben saját, egyéni felhasználói fiókokat is
+          létre lehet majd hozni (pl. korlátozott jogosultsággal egy adott
+          telephelyhez), hogy ne kelljen mindenkinek ugyanazt a kódot használnia.
+        </p>
+      </div>
+
+      <div class="card profile-soon-card">
+        <div class="card-title">Előfizetés <span class="profile-soon-badge">Hamarosan</span></div>
+        <p class="muted">
+          A nézegető jelenleg díjmentesen elérhető. A tervek szerint a jövőben
+          előfizetéses modellre áll át, szorosan összekapcsolva az androidos
+          L-NYUGTA GO app licencével — itt fogod tudni majd kezelni az
+          előfizetésed állapotát, számláit és a fizetési adataidat.
+        </p>
       </div>
     </section>
 
