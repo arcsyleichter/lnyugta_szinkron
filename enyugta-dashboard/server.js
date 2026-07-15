@@ -2232,7 +2232,7 @@ const server = http.createServer(async (req, res) => {
       if (!found) return sendJson(res, 404, { error: 'Ismeretlen végpont' });
       return await found.handler(req, res, query);
     }
-    if (req.method === 'GET') return serveStatic(req, res, u.pathname);
+    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, u.pathname);
     res.writeHead(405); res.end('Method Not Allowed');
   } catch (err) {
     if (err && err.code === 'COMPANY_NOT_FOUND') return sendJson(res, 404, { error: 'A cég adatbázisa nem található.' });
