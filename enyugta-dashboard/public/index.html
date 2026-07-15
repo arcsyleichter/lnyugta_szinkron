@@ -850,6 +850,20 @@
 
     <div class="admin-view" data-admin-view="felhasznalok" hidden>
       <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Felhasználók</div>
+            <div class="card-subtitle"><span id="admin-users-count">0</span> fiók</div>
+          </div>
+          <div class="activity-type-chips" id="admin-users-group-chips">
+            <button class="activity-type-chip is-active" data-group="szerepkor">Szerepkör szerint</button>
+            <button class="activity-type-chip" data-group="meghivo">Meghívó szerint</button>
+          </div>
+        </div>
+        <div id="admin-users-groups"></div>
+      </div>
+
+      <div class="card">
         <div class="card-title">Felhasználó meghívása</div>
         <p class="card-subtitle" style="margin-bottom:14px;">viszonteladó, cégtulajdonos vagy üzletvezető szintre</p>
         <form id="admin-invite-form" autocomplete="off">
@@ -877,6 +891,28 @@
       </div>
     </div>
   </main>
+
+  <div class="modal-backdrop" id="user-edit-modal-backdrop" hidden>
+    <div class="modal">
+      <button class="modal-close" id="user-edit-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:16px;">Felhasználó szerkesztése</div>
+      <form id="user-edit-form">
+        <input type="hidden" id="user-edit-id">
+        <label for="user-edit-email" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Email (nem módosítható)</label>
+        <input id="user-edit-email" disabled style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;background:var(--paper-dim);">
+        <label for="user-edit-nev" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Név</label>
+        <input id="user-edit-nev" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label for="user-edit-status" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Állapot</label>
+        <select id="user-edit-status" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:16px;">
+          <option value="active">Aktív</option>
+          <option value="disabled">Letiltva</option>
+          <option value="pending">Meghívás függőben</option>
+        </select>
+        <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
+        <div class="profile-form-msg" id="user-edit-msg"></div>
+      </form>
+    </div>
+  </div>
 </div>
 
 <!-- ===================== VISZONTELADÓI IRÁNYÍTÓPULT ===================== -->

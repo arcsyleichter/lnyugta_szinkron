@@ -110,7 +110,10 @@ function showAdminView(view) {
   closeAdminMobileSidebar(); // mobil nézetben a menü válaszottás után csukódjon be
 }
 document.querySelectorAll('.admin-nav-item').forEach((btn) => {
-  btn.addEventListener('click', () => showAdminView(btn.dataset.adminView));
+  btn.addEventListener('click', () => {
+    showAdminView(btn.dataset.adminView);
+    if (btn.dataset.adminView === 'felhasznalok') loadAdminUsers();
+  });
 });
 
 /* ============================================================
@@ -139,6 +142,135 @@ function renderLicencMock() {
 /* ============================================================
    Admin — felhasználó meghívása (viszonteladó / cégtulajdonos / üzletvezető)
    ============================================================ */
+/* ============================================================
+   Admin — felhasználók listája, csoportosítás, szerkesztés, törlés
+   ============================================================ */
+let adminUsersCache = [];
+let adminUsersGroupMode = 'szerepkor';
+
+async function loadAdminUsers() {
+  try {
+    const data = await api('/api/admin/users');
+    adminUsersCache = data.users;
+    document.getElementById('admin-users-count').textContent = data.users.length;
+    renderAdminUsers();
+  } catch (e) {
+    document.getElementById('admin-users-groups').innerHTML = `<p class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+const ADMIN_STATUS_LABELS = { active: 'aktív', pending: 'meghívás függőben', disabled: 'letiltva' };
+const ADMIN_ROLE_LABELS = { reseller: 'Viszonteladók', owner: 'Cégtulajdonosok', manager: 'Üzletvezetők' };
+
+function adminUserScopeLabel(u) {
+  if (u.role === 'reseller') return 'saját ügyfelek';
+  if (u.role === 'manager') return `${u.cegNev || u.cegKulcs} — ${u.telephelyNev || u.telephelyKod}`;
+  return u.cegNev || u.cegKulcs || '—';
+}
+
+function renderAdminUserRow(u) {
+  return `
+    <tr data-id="${u.id}">
+      <td>${escapeHtml(u.nev)}</td>
+      <td>${escapeHtml(u.email)}</td>
+      <td>${escapeHtml(adminUserScopeLabel(u))}</td>
+      <td>${escapeHtml(u.invitedBy || '—')}</td>
+      <td><span class="licenc-badge licenc-badge--${u.status === 'active' ? 'ok' : u.status === 'pending' ? 'warn' : 'none'}">${ADMIN_STATUS_LABELS[u.status] || u.status}</span></td>
+      <td>${fmtDateTime(u.createdAt)}</td>
+      <td>
+        <button class="btn-tiny btn-admin-user-edit">Szerkesztés</button>
+        <button class="btn-tiny btn-admin-user-delete">Törlés</button>
+      </td>
+    </tr>`;
+}
+
+function renderAdminUsers() {
+  const container = document.getElementById('admin-users-groups');
+  if (!adminUsersCache.length) { container.innerHTML = '<p class="muted">Még nincs egyetlen felhasználó sem.</p>'; return; }
+
+  let groups;
+  if (adminUsersGroupMode === 'szerepkor') {
+    groups = ['reseller', 'owner', 'manager'].map((role) => ({
+      cim: ADMIN_ROLE_LABELS[role],
+      users: adminUsersCache.filter((u) => u.role === role),
+    })).filter((g) => g.users.length);
+  } else {
+    const byInviter = new Map();
+    for (const u of adminUsersCache) {
+      const key = u.invitedBy || '(ismeretlen)';
+      if (!byInviter.has(key)) byInviter.set(key, []);
+      byInviter.get(key).push(u);
+    }
+    groups = [...byInviter.entries()].map(([cim, users]) => ({ cim: `Meghívta: ${cim}`, users }));
+  }
+
+  container.innerHTML = groups.map((g) => `
+    <div class="admin-users-group">
+      <div class="admin-users-group-title">${escapeHtml(g.cim)} <span class="profile-soon-badge">${g.users.length}</span></div>
+      <table class="data-table">
+        <thead><tr><th>Név</th><th>Email</th><th>Hatókör</th><th>Meghívta</th><th>Állapot</th><th>Létrehozva</th><th></th></tr></thead>
+        <tbody>${g.users.map(renderAdminUserRow).join('')}</tbody>
+      </table>
+    </div>`).join('');
+
+  container.querySelectorAll('.btn-admin-user-edit').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.closest('tr').dataset.id);
+      const u = adminUsersCache.find((x) => x.id === id);
+      document.getElementById('user-edit-id').value = u.id;
+      document.getElementById('user-edit-email').value = u.email;
+      document.getElementById('user-edit-nev').value = u.nev;
+      document.getElementById('user-edit-status').value = u.status;
+      document.getElementById('user-edit-msg').textContent = '';
+      document.getElementById('user-edit-modal-backdrop').hidden = false;
+    });
+  });
+  container.querySelectorAll('.btn-admin-user-delete').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.closest('tr').dataset.id);
+      const u = adminUsersCache.find((x) => x.id === id);
+      if (!confirm(`Biztosan törlöd ezt a felhasználót: ${u.nev} (${u.email})? Ez nem visszavonható.`)) return;
+      try {
+        await api('/api/admin/users/delete', { method: 'POST', body: JSON.stringify({ id }) });
+        loadAdminUsers();
+      } catch (e) {
+        alert('Nem sikerült törölni: ' + e.message);
+      }
+    });
+  });
+}
+
+document.getElementById('admin-users-group-chips').querySelectorAll('.activity-type-chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#admin-users-group-chips .activity-type-chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    adminUsersGroupMode = chip.dataset.group;
+    renderAdminUsers();
+  });
+});
+
+document.getElementById('user-edit-modal-close').addEventListener('click', () => {
+  document.getElementById('user-edit-modal-backdrop').hidden = true;
+});
+document.getElementById('user-edit-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'user-edit-modal-backdrop') e.target.hidden = true;
+});
+document.getElementById('user-edit-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('user-edit-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const id = Number(document.getElementById('user-edit-id').value);
+    const nev = document.getElementById('user-edit-nev').value.trim();
+    const status = document.getElementById('user-edit-status').value;
+    await api('/api/admin/users/update', { method: 'POST', body: JSON.stringify({ id, nev, status }) });
+    document.getElementById('user-edit-modal-backdrop').hidden = true;
+    loadAdminUsers();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
 function updateAdminInviteFields() {
   const role = document.getElementById('admin-invite-role').value;
   document.getElementById('admin-invite-ceg-fields').hidden = (role === 'reseller');
@@ -167,6 +299,7 @@ document.getElementById('admin-invite-form').addEventListener('submit', async (e
       ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`
       : '✓ Meghívó elküldve.';
     msg.className = res.emailWarning ? 'profile-form-msg error' : 'profile-form-msg ok';
+    loadAdminUsers();
   } catch (e2) {
     msg.textContent = e2.message; msg.className = 'profile-form-msg error';
   }
@@ -637,6 +770,10 @@ const ACTIVITY_TYPE_LABELS = {
   telephely_create: 'Új telephely létrehozva',
   telephely_update: 'Telephely adatai módosítva',
   profile_email_update: 'Profil: kapcsolattartási email módosítva',
+  user_invite_sent: 'Meghívó kiküldve',
+  user_invite_accepted: 'Meghívó elfogadva',
+  user_update: 'Felhasználó módosítva',
+  user_delete: 'Felhasználó törölve',
 };
 const activityFilter = { company: '', type: '' };
 

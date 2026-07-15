@@ -1155,6 +1155,69 @@ route('POST', '/api/admin/invite-user', async (req, res) => {
   sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
 });
 
+// Felhasználók listája — hierarchia szerint kiegészítve (viszonteladó neve,
+// cégnév, telephely neve), hogy az admin panel csoportosítva tudja mutatni.
+route('GET', '/api/admin/users', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = usersDb.prepare(
+    `SELECT id, email, role, ceg_kulcs, telephely_kod, reseller_id, nev, invited_by, status, created_at FROM users ORDER BY created_at DESC`
+  ).all();
+  const resellerNevByld = new Map(rows.filter((r) => r.role === 'reseller').map((r) => [r.id, r.nev]));
+  const users = rows.map((u) => {
+    let cegNev = null, telephelyNev = null;
+    if (u.ceg_kulcs) {
+      const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === u.ceg_kulcs);
+      cegNev = anySite ? anySite.nev : u.ceg_kulcs;
+      if (u.telephely_kod) {
+        const t = listTelephelyek(u.ceg_kulcs).find((x) => x.kod === u.telephely_kod);
+        telephelyNev = t ? t.nev : u.telephely_kod;
+      }
+    }
+    return {
+      id: u.id, email: u.email, nev: u.nev, role: u.role, status: u.status,
+      cegKulcs: u.ceg_kulcs, cegNev, telephelyKod: u.telephely_kod, telephelyNev,
+      resellerId: u.reseller_id, resellerNev: u.reseller_id ? (resellerNevByld.get(u.reseller_id) || null) : null,
+      invitedBy: u.invited_by, createdAt: u.created_at,
+    };
+  });
+  sendJson(res, 200, { users });
+});
+
+// Felhasználó szerkesztése — csak a nevet és az állapotot (aktív/letiltva)
+// lehet módosítani. A szerepkör/cég/telephely szándékosan NEM módosítható
+// itt (ha ez kellene, töröld és hívd meg újra a megfelelő szinttel).
+route('POST', '/api/admin/users/update', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, status } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  const cleanNev = String(nev || '').trim();
+  if (!cleanNev) return sendJson(res, 400, { error: 'A név megadása kötelező.' });
+  if (!['active', 'disabled', 'pending'].includes(status)) return sendJson(res, 400, { error: 'Érvénytelen állapot.' });
+  usersDb.prepare('UPDATE users SET nev = ?, status = ? WHERE id = ?').run(cleanNev, status, id);
+  logActivity({ type: 'user_update', ok: true, companyKey: null, nev: 'admin', detail: `${u.email}: név/állapot módosítva (${status})` });
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/users/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, role, nev FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  if (u.role === 'reseller') {
+    const dependentCount = usersDb.prepare(`SELECT COUNT(*) AS c FROM users WHERE reseller_id = ?`).get(id).c;
+    if (dependentCount > 0) {
+      return sendJson(res, 400, { error: `Ez a viszonteladó ${dependentCount} céghez van rendelve — előbb azokat rendeld át vagy töröld.` });
+    }
+  }
+  usersDb.prepare('DELETE FROM users WHERE id = ?').run(id);
+  logActivity({ type: 'user_delete', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `${u.email} (${u.role}) törölve` });
+  sendJson(res, 200, { ok: true });
+});
+
 route('GET', '/api/summary', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });

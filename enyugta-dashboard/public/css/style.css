@@ -310,6 +310,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .licenc-badge--warn{ background:#FAEEDA; color:#854F0B; }
 .licenc-badge--expired{ background:#FCEBEB; color:#791F1F; }
 .licenc-badge--none{ background:#F1EFE8; color:#5F5E5A; }
+.admin-users-group{ margin-bottom:22px; }
+.admin-users-group-title{ font-family:var(--font-display); font-weight:600; font-size:14px; margin-bottom:10px; }
 .licenc-status{
   display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:20px; font-weight:600; font-size:12.5px;
 }
