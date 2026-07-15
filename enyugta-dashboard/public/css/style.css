@@ -132,6 +132,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .profile-kv td:first-child{ color:var(--text-dim); width:140px; }
 .profile-kv tr:last-child td{ border-bottom:none; }
 .profile-inline-form{ display:flex; gap:10px; max-width:420px; }
+.telephely-new-form-grid{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.telephely-new-form-grid input{ padding:9px 12px; border:1.5px solid var(--line); border-radius:8px; font-size:13.5px; flex:1 1 200px; }
 .profile-inline-form input{ flex:1; padding:9px 12px; border:1.5px solid var(--line); border-radius:8px; font-size:13.5px; }
 .profile-form-msg{ font-size:12.5px; margin-top:8px; }
 .profile-form-msg.ok{ color:var(--jade-deep); }
@@ -362,6 +364,9 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
    Admin belépés + panel
    ============================================================ */
 .admin-entry{ text-align:center; margin-top:14px; }
+.login-toggle-row{ text-align:center; margin-top:14px; font-size:12.5px; }
+.login-toggle-row a{ color:var(--jade-deep); text-decoration:none; font-weight:600; }
+.login-toggle-row a:hover{ text-decoration:underline; }
 .admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
 .admin-entry a:hover{ color:rgba(250,249,245,0.8); }
 

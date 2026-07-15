@@ -307,6 +307,35 @@ productChangesDb.exec(`
   }
 }
 
+// ---------------------------------------------------------------------------
+// Felhasználói fiókok — viszonteladó, cégtulajdonos, üzletvezető.
+// Az admin NEM itt van (az a meglévő ADMIN_PASSWORD env-változós, önálló
+// mechanizmus marad, változatlanul).
+// ---------------------------------------------------------------------------
+const USERS_DB_PATH = path.join(DATA_DIR, 'users.db');
+const usersDb = new DatabaseSync(USERS_DB_PATH, { readOnly: false });
+usersDb.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    role TEXT NOT NULL CHECK(role IN ('reseller','owner','manager')),
+    reseller_id INTEGER,
+    ceg_kulcs TEXT,
+    telephely_kod TEXT,
+    nev TEXT NOT NULL,
+    invited_by TEXT,
+    invite_token TEXT,
+    invite_expires TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','disabled')),
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+  CREATE INDEX IF NOT EXISTS idx_users_invite_token ON users(invite_token);
+  CREATE INDEX IF NOT EXISTS idx_users_ceg ON users(ceg_kulcs);
+  CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
+`);
+
 function addProductChange(companyKey, changeType, payload, source, meta) {
   // Ha ugyanerre a cikkre/csoportra már van egy még FÜGGŐBEN lévő korábbi
   // módosítás, azt előbb töröljük — különben soha nem tudna teljesülni
@@ -471,6 +500,28 @@ function generateAccessCode() {
   // 6 jegyű, könnyen diktálható/begépelhető kód (nem base64 zagyvaság)
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
+
+// ---------------------------------------------------------------------------
+// Jelszó-kezelés (felhasználói szintek: viszonteladó, cégtulajdonos,
+// üzletvezető) — scrypt-alapú, sózott hash, csak beépített node:crypto-val,
+// nincs hozzá külön npm-függőség.
+// ---------------------------------------------------------------------------
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const hashBuffer = Buffer.from(hash, 'hex');
+  const testHash = crypto.scryptSync(password, salt, 64);
+  return hashBuffer.length === testHash.length && crypto.timingSafeEqual(hashBuffer, testHash);
+}
+function generateInviteToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+const INVITE_VALID_MS = 48 * 60 * 60 * 1000; // 48 óra
 // Biztosítja, hogy MINDEN, az indexben szereplő cégnek legyen kódja —
 // hiányzóknak generál egyet, és elmenti. Induláskor és minden új
 // cég-regisztrációkor hívjuk.
@@ -527,6 +578,56 @@ async function sendBrevoEmail({ toEmail, toName, subject, html }) {
     throw new Error(`Brevo hiba (${resp.status}): ${detail}`);
   }
   return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Felhasználói meghívók — viszonteladó, cégtulajdonos, üzletvezető.
+// A meghívott egy kattintható linket kap emailben, amire saját maga állítja
+// be a jelszavát — SENKI MÁS (még a meghívó sem) nem ismeri/kezeli a
+// jelszót, ez szándékos biztonsági döntés.
+// ---------------------------------------------------------------------------
+const ROLE_LABELS = { reseller: 'viszonteladói', owner: 'cégtulajdonosi', manager: 'üzletvezetői' };
+
+function createInvite({ email, nev, role, cegKulcs, telephelyKod, resellerId, invitedBy }) {
+  email = String(email || '').trim().toLowerCase();
+  nev = String(nev || '').trim();
+  if (!email || !email.includes('@')) throw new Error('Érvénytelen email cím.');
+  if (!nev) throw new Error('A név megadása kötelező.');
+  const existing = usersDb.prepare('SELECT id, status FROM users WHERE email = ?').get(email);
+  if (existing && existing.status === 'active') throw new Error('Ezzel az email címmel már van aktív fiók.');
+  const token = generateInviteToken();
+  const expires = new Date(Date.now() + INVITE_VALID_MS).toISOString();
+  if (existing) {
+    usersDb.prepare(
+      `UPDATE users SET role=?, ceg_kulcs=?, telephely_kod=?, reseller_id=?, nev=?, invited_by=?, invite_token=?, invite_expires=?, status='pending' WHERE id=?`
+    ).run(role, cegKulcs || null, telephelyKod || null, resellerId || null, nev, invitedBy, token, expires, existing.id);
+  } else {
+    usersDb.prepare(
+      `INSERT INTO users (email, role, ceg_kulcs, telephely_kod, reseller_id, nev, invited_by, invite_token, invite_expires, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    ).run(email, role, cegKulcs || null, telephelyKod || null, resellerId || null, nev, invitedBy, token, expires, new Date().toISOString());
+  }
+  return token;
+}
+
+function buildInviteLink(req, token) {
+  const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+  return `${baseUrl}/?meghivo=${token}`;
+}
+
+async function sendInviteEmail(link, { email, nev, role }) {
+  const roleLabel = ROLE_LABELS[role] || '';
+  const nevSafe = escapeHtmlServer(nev);
+  const html = `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
+      <p>Kedves ${nevSafe}!</p>
+      <p>Meghívást kaptál az L-NYUGTA rendszerbe, ${roleLabel} jogosultsággal.</p>
+      <p>A fiókod aktiválásához és a jelszavad beállításához kattints az alábbi linkre
+         (48 óráig érvényes):</p>
+      <p style="margin:20px 0;"><a href="${link}" style="background:#5A93C9;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Meghívó elfogadása</a></p>
+      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt a meghívót, kérjük hagyd figyelmen kívül.</p>
+    </div>`;
+  await sendBrevoEmail({ toEmail: email, toName: nev, subject: 'L-NYUGTA — meghívó', html });
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +721,14 @@ function requireAdmin(req) {
   return session;
 }
 
+// Viszonteladói munkamenet — szintén KÜLÖN cookie-ban (enyreseller).
+function requireReseller(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enyreseller);
+  if (!session || !session.isReseller || !session.resellerId) return null;
+  return session;
+}
+
 // Dátum-tartomány normalizálása: alapértelmezés az utolsó 30 nap
 function todayIsoServer() { return new Date().toISOString().slice(0, 10); }
 
@@ -685,12 +794,10 @@ route('POST', '/api/auth/login', async (req, res) => {
     const token = signSession(payload);
     const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
     return sendJson(res, 200, {
-      ok: true, telephelyValasztva: true,
+      ok: true, telephelyValasztva: true, vanAdat: !!site,
       company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
     }, { 'Set-Cookie': cookie });
   }
-
-  // Több telephely — cég-szintű (telephely nélküli) munkamenet; a webes
   // felületnek a telephely-választó képernyőt kell megjelenítenie.
   const payload = { companyKey: cegKulcs, cegKulcs, telephelyKod: null, nev: displayNev, adoszam: wanted, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
@@ -717,6 +824,7 @@ route('GET', '/api/me', async (req, res) => {
 route('GET', '/api/telephelyek', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem érhetők el más telephelyek.' });
   const meta = readSyncMeta();
   const telephelyek = listTelephelyek(session.cegKulcs).map((t) => {
     const siteKey = makeSiteKey(session.cegKulcs, t.kod);
@@ -739,6 +847,7 @@ route('GET', '/api/telephelyek', async (req, res) => {
 route('POST', '/api/telephely/select', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem válthatsz másik telephelyre.' });
   const { telephelyKod } = await readJsonBody(req);
   const kod = normalizeTelephelyKod(telephelyKod);
   const telephelyek = listTelephelyek(session.cegKulcs);
@@ -768,6 +877,7 @@ route('POST', '/api/telephely/select', async (req, res) => {
 route('POST', '/api/telephely/create', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hozhatsz létre új telephelyet.' });
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.kod);
   const nev = String(body.nev || '').trim();
@@ -794,6 +904,9 @@ route('POST', '/api/telephely/update', async (req, res) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.kod);
+  if (session.role === 'manager' && kod !== session.telephelyKod) {
+    return sendJson(res, 403, { error: 'Üzletvezetőként csak a saját telephelyed adatait szerkesztheted.' });
+  }
   const nev = String(body.nev || '').trim();
   const cim = String(body.cim || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
@@ -831,6 +944,7 @@ route('GET', '/api/profile', async (req, res) => {
     adoszam: site ? site.adoszam : session.adoszam,
     varos: site?.varos || '', cim: site?.cim || '',
     email: codes[session.cegKulcs]?.email || '',
+    role: session.role || 'owner',
     telephelyek,
   });
 });
@@ -846,6 +960,244 @@ route('POST', '/api/profile/email', async (req, res) => {
   writeAccessCodes(codes);
   logActivity({ type: 'profile_email_update', ok: true, companyKey: session.companyKey, nev: session.nev, detail: clean || '(törölve)' });
   sendJson(res, 200, { ok: true, email: clean });
+});
+
+// ---------------------------------------------------------------------------
+// Meghívó elfogadása — NYILVÁNOS végpontok (token-alapú, nem igényel
+// bejelentkezést, hiszen a fiók pontosan itt jön létre).
+// ---------------------------------------------------------------------------
+route('GET', '/api/invite/info', async (req, res, query) => {
+  const token = String(query.token || '');
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
+  const u = usersDb.prepare(`SELECT email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
+  if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
+  sendJson(res, 200, { email: u.email, nev: u.nev, role: u.role, roleLabel: ROLE_LABELS[u.role] || u.role });
+});
+
+route('POST', '/api/invite/accept', async (req, res) => {
+  const { token, password } = await readJsonBody(req);
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
+  if (!password || String(password).length < 8) return sendJson(res, 400, { error: 'A jelszónak legalább 8 karakter hosszúnak kell lennie.' });
+  const u = usersDb.prepare(`SELECT id, email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
+  if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
+  usersDb.prepare(`UPDATE users SET password_hash = ?, status = 'active', invite_token = NULL, invite_expires = NULL WHERE id = ?`)
+    .run(hashPassword(String(password)), u.id);
+  logActivity({ type: 'user_invite_accepted', ok: true, companyKey: null, nev: u.nev, detail: `${u.email} (${u.role}) aktiválta a fiókját.` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Egyéni fiókos bejelentkezés — cégtulajdonos és üzletvezető.
+// A munkamenet UGYANOLYAN alakú, mint az adószám+kód bejelentkezésnél —
+// ez szándékos: minden meglévő végpont (requireAuth/requireCegAuth) így
+// változtatás nélkül működik tovább, akár adószám+kóddal, akár egyéni
+// fiókkal jelentkezett be valaki.
+// ---------------------------------------------------------------------------
+route('POST', '/api/auth/user-login', async (req, res) => {
+  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const { email, password } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role IN ('owner','manager')`).get(clean);
+  if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    logActivity({ type: 'company_login', ok: false, companyKey: u ? u.ceg_kulcs : null, nev: null, detail: `Hibás egyéni belépés: ${clean}`, ip });
+    return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
+  }
+
+  if (u.role === 'manager') {
+    // Üzletvezető — mindig egy KONKRÉT, rögzített telephelyre szól a hozzáférése.
+    const siteKey = makeSiteKey(u.ceg_kulcs, u.telephely_kod);
+    const site = companyIndex.get(siteKey);
+    const telephelyInfo = listTelephelyek(u.ceg_kulcs).find((t) => t.kod === u.telephely_kod);
+    const payload = {
+      companyKey: siteKey, cegKulcs: u.ceg_kulcs, telephelyKod: u.telephely_kod, role: 'manager',
+      nev: site ? site.nev : u.nev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
+    };
+    const token = signSession(payload);
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+    logActivity({ type: 'company_login', ok: true, companyKey: siteKey, nev: u.nev, detail: `Üzletvezetői belépés: ${clean}`, ip });
+    return sendJson(res, 200, {
+      ok: true, telephelyValasztva: true, vanAdat: !!site,
+      company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: telephelyInfo?.nev || u.telephely_kod },
+    }, { 'Set-Cookie': cookie });
+  }
+
+  // owner — a cég egészéhez fér hozzá, pontosan úgy, mint az adószám+kód bejelentkezésnél.
+  const telephelyek = listTelephelyek(u.ceg_kulcs);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === u.ceg_kulcs);
+  const displayNev = anySite ? anySite.nev : u.nev;
+  logActivity({ type: 'company_login', ok: true, companyKey: u.ceg_kulcs, nev: displayNev, detail: `Egyéni (cégtulajdonosi) belépés: ${clean}`, ip });
+
+  if (telephelyek.length === 1) {
+    const t = telephelyek[0];
+    const siteKey = makeSiteKey(u.ceg_kulcs, t.kod);
+    const site = companyIndex.get(siteKey);
+    const payload = {
+      companyKey: siteKey, cegKulcs: u.ceg_kulcs, telephelyKod: t.kod,
+      nev: site ? site.nev : displayNev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
+    };
+    const token = signSession(payload);
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+    return sendJson(res, 200, {
+      ok: true, telephelyValasztva: true, vanAdat: !!site,
+      company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
+    }, { 'Set-Cookie': cookie });
+  }
+
+  const payload = { companyKey: u.ceg_kulcs, cegKulcs: u.ceg_kulcs, telephelyKod: null, nev: displayNev, adoszam: u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  sendJson(res, 200, { ok: true, telephelyValasztva: false, company: { nev: displayNev, adoszam: u.ceg_kulcs } }, { 'Set-Cookie': cookie });
+});
+
+// ---------------------------------------------------------------------------
+// Viszonteladói bejelentkezés — külön munkamenet-cookie (enyreseller),
+// nem keveredik a cégek/admin munkamenetével.
+// ---------------------------------------------------------------------------
+route('POST', '/api/auth/reseller-login', async (req, res) => {
+  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const { email, password } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role = 'reseller'`).get(clean);
+  if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    logActivity({ type: 'reseller_login', ok: false, companyKey: null, nev: null, detail: `Hibás viszonteladói belépés: ${clean}`, ip });
+    return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
+  }
+  const payload = { isReseller: true, resellerId: u.id, nev: u.nev, email: u.email, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enyreseller=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  logActivity({ type: 'reseller_login', ok: true, companyKey: null, nev: u.nev, detail: clean, ip });
+  sendJson(res, 200, { ok: true, nev: u.nev, email: u.email }, { 'Set-Cookie': cookie });
+});
+
+route('POST', '/api/auth/reseller-logout', async (req, res) => {
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enyreseller=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+});
+
+// A viszonteladó KIZÁRÓLAG a saját ügyfeleit látja — más viszonteladók
+// cégeihez semmilyen rálátása nincs, ahogy kérted ("nincs átjárás").
+route('GET', '/api/reseller/overview', async (req, res) => {
+  const reseller = requireReseller(req);
+  if (!reseller) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const codes = readAccessCodes();
+  const myCegKulcsok = new Set(
+    Object.entries(codes).filter(([, v]) => v.resellerId === reseller.resellerId).map(([k]) => k)
+  );
+  const meta = readSyncMeta();
+  const companies = [...companyIndex.entries()]
+    .filter(([, entry]) => myCegKulcsok.has(entry.cegKulcs))
+    .map(([key, entry]) => {
+      const telephelyInfo = listTelephelyek(entry.cegKulcs).find((t) => t.kod === entry.telephelyKod);
+      return {
+        key, cegKulcs: entry.cegKulcs, telephelyKod: entry.telephelyKod, telephelyNev: telephelyInfo?.nev || entry.telephelyKod,
+        nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+        ...(meta[key] || { lastSync: null, source: null, bytes: null }),
+      };
+    })
+    .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
+  sendJson(res, 200, { reseller: { nev: reseller.nev, email: reseller.email }, companies });
+});
+
+// Viszonteladó új ügyfelet ("cégtulajdonos" szintű felhasználót) hív meg —
+// ez egyúttal elő is regisztrálja az új céget (adószám alapján), ha még
+// nem létezne, hogy legyen hova az első androidos szinkronnak megérkeznie.
+route('POST', '/api/reseller/invite-owner', async (req, res) => {
+  const reseller = requireReseller(req);
+  if (!reseller) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cegKulcs = companyKeyFromAdoszam(body.adoszam);
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+
+  const codes = readAccessCodes();
+  if (!codes[cegKulcs]) codes[cegKulcs] = { code: generateAccessCode(), email: '' };
+  codes[cegKulcs].resellerId = reseller.resellerId;
+  writeAccessCodes(codes);
+  ensureTelephely(cegKulcs, '01', 'Fő telephely');
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role: 'owner', cegKulcs, resellerId: reseller.resellerId, invitedBy: reseller.email });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role: 'owner' }); }
+  catch (e) { emailWarning = e.message; } // a fiók/meghívó ettől még létrejött, csak az email nem ment ki
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: reseller.nev, detail: `Cégtulajdonos meghívva: ${email} (${nev}), adószám: ${cegKulcs}` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
+});
+
+// Cégtulajdonos (a Profil oldalról) üzletvezetőt hív meg egy konkrét
+// telephelyére.
+route('POST', '/api/profile/invite-manager', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hívhatsz meg új felhasználót.' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.telephelyKod);
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+  if (!listTelephelyek(session.cegKulcs).some((t) => t.kod === kod)) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role: 'manager', cegKulcs: session.cegKulcs, telephelyKod: kod, invitedBy: session.nev });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role: 'manager' }); }
+  catch (e) { emailWarning = e.message; }
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Üzletvezető meghívva: ${email} (${nev})` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
+});
+
+// Admin: viszonteladó, cégtulajdonos vagy üzletvezető meghívása —
+// bármelyik szintre, bármelyik céghez/telephelyhez.
+route('POST', '/api/admin/invite-user', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const role = String(body.role || '');
+  if (!['reseller', 'owner', 'manager'].includes(role)) return sendJson(res, 400, { error: 'Érvénytelen szerepkör.' });
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+
+  let cegKulcs = null, telephelyKod = null;
+  if (role === 'owner' || role === 'manager') {
+    cegKulcs = companyKeyFromAdoszam(body.adoszam);
+    if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const codes = readAccessCodes();
+    if (!codes[cegKulcs]) { codes[cegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(cegKulcs, '01', 'Fő telephely');
+    if (role === 'manager') {
+      telephelyKod = normalizeTelephelyKod(body.telephelyKod);
+      if (!listTelephelyek(cegKulcs).some((t) => t.kod === telephelyKod)) return sendJson(res, 404, { error: 'Ismeretlen telephely ennél a cégnél.' });
+    }
+  }
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role, cegKulcs, telephelyKod, invitedBy: 'admin' });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role }); }
+  catch (e) { emailWarning = e.message; }
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `${ROLE_LABELS[role]} meghívva: ${email} (${nev})` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
 });
 
 route('GET', '/api/summary', async (req, res, query) => {

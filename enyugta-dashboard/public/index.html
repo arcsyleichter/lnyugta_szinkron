@@ -31,6 +31,21 @@
       <button type="submit" id="login-btn">Belépés</button>
       <div class="login-error" id="login-error" hidden></div>
     </form>
+    <div class="login-toggle-row">
+      <a href="#" id="show-user-login">Egyéni fiókkal jelentkezem be →</a>
+    </div>
+
+    <form id="user-login-form" autocomplete="off" hidden>
+      <label for="user-email-input">Email cím</label>
+      <input id="user-email-input" name="email" type="email" required>
+      <label for="user-password-input">Jelszó</label>
+      <input id="user-password-input" name="password" type="password" required>
+      <button type="submit" id="user-login-btn">Belépés</button>
+      <div class="login-error" id="user-login-error" hidden></div>
+    </form>
+    <div class="login-toggle-row" id="show-code-login-row" hidden>
+      <a href="#" id="show-code-login">‹ Vissza az adószám+kód belépéshez</a>
+    </div>
     <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
          JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
          mert bárkinek megmutatja az összes regisztrált cég adószámát. -->
@@ -40,7 +55,7 @@
     </div>
   </div>
   <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul, és egy külön hozzáférési kóddal védett.</div>
-  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
+  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a> · <a href="#" id="show-reseller-login">Viszonteladó belépés</a></div>
 </section>
 
 <!-- ===================== TELEPHELY-VÁLASZTÓ ===================== -->
@@ -96,6 +111,54 @@
       ‹ Vissza a telephely-választóhoz
     </button>
   </div>
+</section>
+
+<!-- ===================== MEGHÍVÓ ELFOGADÁSA ===================== -->
+<section id="invite-accept-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">Meghívó elfogadása</div>
+        <div class="brand-sub" id="invite-accept-sub">betöltés…</div>
+      </div>
+    </div>
+    <form id="invite-accept-form" autocomplete="off">
+      <label for="invite-password-input">Új jelszó</label>
+      <input type="password" id="invite-password-input" placeholder="legalább 8 karakter" required minlength="8">
+      <label for="invite-password-input2" style="margin-top:10px;">Jelszó mégegyszer</label>
+      <input type="password" id="invite-password-input2" placeholder="ismételd meg" required minlength="8">
+      <button type="submit" class="btn-primary" id="invite-accept-btn" style="width:100%;margin-top:16px;">Fiók aktiválása</button>
+      <div class="login-error" id="invite-accept-error" hidden></div>
+    </form>
+    <div class="login-footnote" id="invite-accept-success" hidden>
+      ✓ A fiókod sikeresen aktiválva. <a href="/">Jelentkezz be itt.</a>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== VISZONTELADÓ BEJELENTKEZÉS ===================== -->
+<section id="reseller-login-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="ticket-notch"></div>
+    <div class="brand">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div>
+        <div class="brand-name">L-NYUGTA</div>
+        <div class="brand-sub">viszonteladói belépés</div>
+      </div>
+    </div>
+    <form id="reseller-login-form" autocomplete="off">
+      <label for="reseller-email-input">Email cím</label>
+      <input type="email" id="reseller-email-input" required>
+      <label for="reseller-password-input" style="margin-top:10px;">Jelszó</label>
+      <input type="password" id="reseller-password-input" required>
+      <button type="submit" class="btn-primary" id="reseller-login-btn" style="width:100%;margin-top:16px;">Belépés</button>
+      <div class="login-error" id="reseller-login-error" hidden></div>
+    </form>
+  </div>
+  <div class="admin-entry"><a href="#" id="reseller-back-link">‹ Vissza a normál bejelentkezéshez</a></div>
 </section>
 
 <!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
@@ -600,13 +663,22 @@
         </div>
       </div>
 
-      <div class="card profile-soon-card">
-        <div class="card-title">Felhasználók <span class="profile-soon-badge">Hamarosan</span></div>
-        <p class="muted">
-          Jelenleg egy közös hozzáférési kód szolgál belépésre a teljes céghez.
-          A tervek szerint a jövőben saját, egyéni felhasználói fiókokat is
-          létre lehet majd hozni (pl. korlátozott jogosultsággal egy adott
-          telephelyhez), hogy ne kelljen mindenkinek ugyanazt a kódot használnia.
+      <div class="card">
+        <div class="card-title">Üzletvezetők meghívása</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">
+          egy adott telephelyhez — a meghívott ott teljes jogkörrel fog rendelkezni,
+          de más telephelyhez nem fér hozzá
+        </p>
+        <form id="profil-invite-manager-form" class="telephely-new-form-grid" autocomplete="off">
+          <select id="profil-invite-manager-telephely" required style="padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;"></select>
+          <input id="profil-invite-manager-nev" placeholder="Üzletvezető neve" required>
+          <input id="profil-invite-manager-email" type="email" placeholder="Email címe" required>
+          <button type="submit" class="btn-secondary">Meghívó küldése</button>
+        </form>
+        <div class="profile-form-msg" id="profil-invite-manager-msg"></div>
+        <p class="muted" style="margin-top:14px;font-size:12.5px;">
+          Egyéb felhasználói szintek (viszonteladó, admin) az adott jogosultsággal
+          rendelkező személy tudja létrehozni.
         </p>
       </div>
 
@@ -657,6 +729,7 @@
       <button class="nav-item admin-nav-item" data-admin-view="ntak">NTAK állapot</button>
       <button class="nav-item admin-nav-item" data-admin-view="activity">Tevékenység-napló</button>
       <button class="nav-item admin-nav-item" data-admin-view="licenc">Licenc-kezelés</button>
+      <button class="nav-item admin-nav-item" data-admin-view="felhasznalok">Felhasználók</button>
     </nav>
     <div class="sidebar-footer">
       <button class="btn-ghost" id="admin-logout-btn">Kilépés</button>
@@ -765,6 +838,87 @@
           <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Program</th><th>Verzió</th><th>Állapot</th><th>Reg. dátum</th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="admin-view" data-admin-view="felhasznalok" hidden>
+      <div class="card">
+        <div class="card-title">Felhasználó meghívása</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">viszonteladó, cégtulajdonos vagy üzletvezető szintre</p>
+        <form id="admin-invite-form" autocomplete="off">
+          <label for="admin-invite-role">Szerepkör</label>
+          <select id="admin-invite-role" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
+            <option value="reseller">Viszonteladó</option>
+            <option value="owner">Cégtulajdonos</option>
+            <option value="manager">Üzletvezető</option>
+          </select>
+          <div id="admin-invite-ceg-fields" hidden>
+            <label for="admin-invite-adoszam">Adószám</label>
+            <input id="admin-invite-adoszam" placeholder="pl. 12345678-1-42" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
+            <div id="admin-invite-telephely-field" hidden>
+              <label for="admin-invite-telephely">Telephely-kód</label>
+              <input id="admin-invite-telephely" placeholder="pl. 01" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
+            </div>
+          </div>
+          <label for="admin-invite-nev">Név</label>
+          <input id="admin-invite-nev" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
+          <label for="admin-invite-email">Email cím</label>
+          <input id="admin-invite-email" type="email" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+          <button type="submit" class="btn-secondary">Meghívó küldése</button>
+        </form>
+        <div class="profile-form-msg" id="admin-invite-msg"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== VISZONTELADÓI IRÁNYÍTÓPULT ===================== -->
+<div id="reseller-screen" class="admin-shell" hidden>
+  <aside class="sidebar">
+    <div class="sidebar-topline">
+      <div class="brand brand--sidebar">
+        <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
+        <div>
+          <div class="brand-name">L-NYUGTA</div>
+          <div class="brand-sub" id="reseller-name">Viszonteladó</div>
+        </div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item is-active">Saját ügyfelek</button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn-ghost" id="reseller-logout-btn">Kilépés</button>
+    </div>
+  </aside>
+
+  <main class="main admin-main">
+    <div class="admin-view" data-admin-view="overview">
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Saját ügyfelek</div>
+            <div class="card-subtitle"><span id="reseller-company-count">0</span> cég — csak a saját ügyfeleid, más viszonteladók cégeit nem látod</div>
+          </div>
+        </div>
+        <div class="table-scroll">
+        <table class="data-table" id="reseller-companies-table">
+          <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Utolsó szinkron</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">+ Új ügyfél meghívása</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">Előregisztrálja a céget (adószám alapján), és e-mailben meghívót küld a leendő cégtulajdonosnak.</p>
+        <form id="reseller-invite-form" class="telephely-new-form-grid" autocomplete="off">
+          <input id="reseller-invite-adoszam" placeholder="Adószám (pl. 12345678-1-42)" required>
+          <input id="reseller-invite-nev" placeholder="Tulajdonos neve" required>
+          <input id="reseller-invite-email" type="email" placeholder="Tulajdonos email címe" required>
+          <button type="submit" class="btn-secondary">Meghívó küldése</button>
+        </form>
+        <div class="profile-form-msg" id="reseller-invite-msg"></div>
       </div>
     </div>
   </main>

@@ -75,6 +75,7 @@ const state = {
 const loginScreen = document.getElementById('login-screen');
 const telephelyScreen = document.getElementById('telephely-screen');
 const telephelyWaitingScreen = document.getElementById('telephely-waiting-screen');
+const resellerScreen = document.getElementById('reseller-screen');
 const appScreen = document.getElementById('app-screen');
 const adminLoginScreen = document.getElementById('admin-login-screen');
 const adminScreen = document.getElementById('admin-screen');
@@ -83,9 +84,12 @@ function hideAllScreens() {
   loginScreen.hidden = true;
   telephelyScreen.hidden = true;
   telephelyWaitingScreen.hidden = true;
+  resellerScreen.hidden = true;
   appScreen.hidden = true;
   adminLoginScreen.hidden = true;
   adminScreen.hidden = true;
+  document.getElementById('reseller-login-screen').hidden = true;
+  document.getElementById('invite-accept-screen').hidden = true;
   if (state.pollTimer) clearInterval(state.pollTimer);
 }
 function showLogin() { hideAllScreens(); loginScreen.hidden = false; }
@@ -130,6 +134,66 @@ function renderLicencMock() {
     </tr>`).join('');
 }
 
+/* ============================================================
+   Admin — felhasználó meghívása (viszonteladó / cégtulajdonos / üzletvezető)
+   ============================================================ */
+function updateAdminInviteFields() {
+  const role = document.getElementById('admin-invite-role').value;
+  document.getElementById('admin-invite-ceg-fields').hidden = (role === 'reseller');
+  document.getElementById('admin-invite-telephely-field').hidden = (role !== 'manager');
+}
+document.getElementById('admin-invite-role').addEventListener('change', updateAdminInviteFields);
+updateAdminInviteFields();
+
+document.getElementById('admin-invite-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('admin-invite-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const role = document.getElementById('admin-invite-role').value;
+    const body = {
+      role,
+      nev: document.getElementById('admin-invite-nev').value.trim(),
+      email: document.getElementById('admin-invite-email').value.trim(),
+    };
+    if (role !== 'reseller') body.adoszam = document.getElementById('admin-invite-adoszam').value.trim();
+    if (role === 'manager') body.telephelyKod = document.getElementById('admin-invite-telephely').value.trim();
+    const res = await api('/api/admin/invite-user', { method: 'POST', body: JSON.stringify(body) });
+    document.getElementById('admin-invite-form').reset();
+    updateAdminInviteFields();
+    msg.textContent = res.emailWarning
+      ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`
+      : '✓ Meghívó elküldve.';
+    msg.className = res.emailWarning ? 'profile-form-msg error' : 'profile-form-msg ok';
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+function handleLoginSuccess(data) {
+  loggedIn = true;
+  state.viaAdmin = false;
+  stockProductsLoaded = false;
+  if (!data.telephelyValasztva) {
+    showTelephelyScreen();
+    loadTelephelyPicker(data.company.nev);
+    return;
+  }
+  document.getElementById('company-name').textContent = data.company.nev;
+  updateTelephelyBadge(data.company.telephelyNev);
+  if (data.vanAdat === false) {
+    // Frissen (pl. viszonteladó által) létrehozott cég/telephely, amire
+    // még nem érkezett androidos szinkron — a normál nézet minden
+    // adatlekérdezése elutasításra kerülne, ami hamis kiléptetést okozna.
+    document.getElementById('telephely-waiting-nev').textContent = data.company.telephelyNev || '—';
+    document.getElementById('telephely-waiting-kod').textContent = '01';
+    showTelephelyWaitingScreen();
+    return;
+  }
+  showApp();
+  boot();
+}
+
 document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('login-btn');
@@ -140,18 +204,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     const adoszam = document.getElementById('adoszam-input').value;
     const code = document.getElementById('code-input').value;
     const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam, code }) });
-    loggedIn = true;
-    state.viaAdmin = false;
-    stockProductsLoaded = false;
-    if (!data.telephelyValasztva) {
-      showTelephelyScreen();
-      loadTelephelyPicker(data.company.nev);
-    } else {
-      document.getElementById('company-name').textContent = data.company.nev;
-      updateTelephelyBadge(data.company.telephelyNev);
-      showApp();
-      boot();
-    }
+    handleLoginSuccess(data);
   } catch (e2) {
     err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Munkamenet lejárt.' : e2.message;
     err.hidden = false;
@@ -176,6 +229,155 @@ document.getElementById('back-to-admin-btn').addEventListener('click', () => {
    Admin belépés + panel
    ============================================================ */
 document.getElementById('show-admin-login').addEventListener('click', (e) => { e.preventDefault(); showAdminLogin(); });
+
+/* ============================================================
+   Bejelentkezés-váltó: adószám+kód  ↔  egyéni fiók (email+jelszó)
+   ============================================================ */
+document.getElementById('show-user-login').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('login-form').hidden = true;
+  document.querySelector('#login-screen .login-toggle-row').hidden = true;
+  document.getElementById('user-login-form').hidden = false;
+  document.getElementById('show-code-login-row').hidden = false;
+});
+document.getElementById('show-code-login').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('user-login-form').hidden = true;
+  document.getElementById('show-code-login-row').hidden = true;
+  document.getElementById('login-form').hidden = false;
+  document.querySelector('#login-screen .login-toggle-row').hidden = false;
+});
+document.getElementById('user-login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('user-login-btn');
+  const err = document.getElementById('user-login-error');
+  err.hidden = true;
+  btn.disabled = true; btn.textContent = 'Belépés…';
+  try {
+    const email = document.getElementById('user-email-input').value;
+    const password = document.getElementById('user-password-input').value;
+    const data = await api('/api/auth/user-login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    handleLoginSuccess(data);
+  } catch (e2) {
+    err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Hibás email cím vagy jelszó.' : e2.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Belépés';
+  }
+});
+
+/* ============================================================
+   Viszonteladói bejelentkezés
+   ============================================================ */
+function showResellerLogin() { hideAllScreens(); document.getElementById('reseller-login-screen').hidden = false; }
+document.getElementById('show-reseller-login').addEventListener('click', (e) => { e.preventDefault(); showResellerLogin(); });
+document.getElementById('reseller-back-link').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+
+function showResellerDashboard() { hideAllScreens(); resellerScreen.hidden = false; }
+
+async function loadResellerOverview() {
+  try {
+    const data = await api('/api/reseller/overview');
+    document.getElementById('reseller-name').textContent = data.reseller.nev;
+    document.getElementById('reseller-company-count').textContent = data.companies.length;
+    const tbody = document.querySelector('#reseller-companies-table tbody');
+    tbody.innerHTML = data.companies.map((c) => `
+      <tr>
+        <td>${escapeHtml(c.nev)}</td>
+        <td>${escapeHtml(c.telephelyNev || c.telephelyKod)}</td>
+        <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+        <td>${escapeHtml(c.varos || '—')}</td>
+        <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="muted">Még nincs egyetlen ügyfeled sem.</td></tr>';
+  } catch (e) {
+    alert('Nem sikerült betölteni: ' + e.message);
+  }
+}
+
+document.getElementById('reseller-logout-btn').addEventListener('click', async () => {
+  await api('/api/auth/reseller-logout', { method: 'POST' }).catch(() => {});
+  showResellerLogin();
+});
+
+document.getElementById('reseller-invite-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('reseller-invite-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const adoszam = document.getElementById('reseller-invite-adoszam').value.trim();
+    const nev = document.getElementById('reseller-invite-nev').value.trim();
+    const email = document.getElementById('reseller-invite-email').value.trim();
+    const res = await api('/api/reseller/invite-owner', { method: 'POST', body: JSON.stringify({ adoszam, nev, email }) });
+    document.getElementById('reseller-invite-form').reset();
+    msg.textContent = res.emailWarning
+      ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`
+      : '✓ Meghívó elküldve.';
+    msg.className = res.emailWarning ? 'profile-form-msg error' : 'profile-form-msg ok';
+    loadResellerOverview();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+document.getElementById('reseller-login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('reseller-login-btn');
+  const err = document.getElementById('reseller-login-error');
+  err.hidden = true;
+  btn.disabled = true; btn.textContent = 'Belépés…';
+  try {
+    const email = document.getElementById('reseller-email-input').value;
+    const password = document.getElementById('reseller-password-input').value;
+    await api('/api/auth/reseller-login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    showResellerDashboard();
+    loadResellerOverview();
+  } catch (e2) {
+    err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Hibás email cím vagy jelszó.' : e2.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Belépés';
+  }
+});
+
+/* ============================================================
+   Meghívó elfogadása (?meghivo=TOKEN a URL-ben)
+   ============================================================ */
+async function checkInviteLink() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('meghivo');
+  if (!token) return false;
+  hideAllScreens();
+  document.getElementById('invite-accept-screen').hidden = false;
+  const sub = document.getElementById('invite-accept-sub');
+  try {
+    const info = await api(`/api/invite/info?token=${encodeURIComponent(token)}`);
+    sub.textContent = `Szia, ${info.nev}! (${info.roleLabel} jogosultság) — ${info.email}`;
+  } catch (e) {
+    sub.textContent = e.message;
+    document.getElementById('invite-accept-form').hidden = true;
+    return true;
+  }
+  document.getElementById('invite-accept-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('invite-accept-error');
+    err.hidden = true;
+    const p1 = document.getElementById('invite-password-input').value;
+    const p2 = document.getElementById('invite-password-input2').value;
+    if (p1 !== p2) { err.textContent = 'A két jelszó nem egyezik.'; err.hidden = false; return; }
+    const btn = document.getElementById('invite-accept-btn');
+    btn.disabled = true; btn.textContent = 'Mentés…';
+    try {
+      await api('/api/invite/accept', { method: 'POST', body: JSON.stringify({ token, password: p1 }) });
+      document.getElementById('invite-accept-form').hidden = true;
+      document.getElementById('invite-accept-success').hidden = false;
+    } catch (e2) {
+      err.textContent = e2.message; err.hidden = false;
+      btn.disabled = false; btn.textContent = 'Fiók aktiválása';
+    }
+  }, { once: true });
+  return true;
+}
+
 document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
 
 /* ============================================================
@@ -581,7 +783,7 @@ renderLoginHint();
    megnyitásakor tehát sosem ugrunk automatikusan a dashboardra — csak a
    ténylegesen beküldött belépési űrlap után. */
 let loggedIn = false;
-showLogin();
+checkInviteLink().then((wasInvite) => { if (!wasInvite) showLogin(); });
 
 /* ============================================================
    Mobil hamburger-menü
@@ -1455,13 +1657,44 @@ async function loadProfilView() {
     document.getElementById('profil-varos').textContent = data.varos || '—';
     document.getElementById('profil-cim').textContent = data.cim || '—';
     document.getElementById('profil-email-input').value = data.email || '';
-    renderProfilTelephelyek(data.telephelyek);
+    renderProfilTelephelyek(data.telephelyek, data.role === 'manager');
+
+    // Az üzletvezető csak a saját telephelyén dolgozhat — nem hozhat létre
+    // új telephelyt, és nem hívhat meg senkit (ezt a szerver is kikényszeríti,
+    // ez itt csak a felhasználói felület tisztasága kedvéért van elrejtve).
+    const isManager = data.role === 'manager';
+    document.querySelector('.telephely-new-box').hidden = isManager;
+    const inviteManagerCard = document.getElementById('profil-invite-manager-form').closest('.card');
+    inviteManagerCard.hidden = isManager;
+    if (!isManager) {
+      const select = document.getElementById('profil-invite-manager-telephely');
+      select.innerHTML = data.telephelyek.map((t) => `<option value="${escapeHtml(t.kod)}">${escapeHtml(t.nev)} (${escapeHtml(t.kod)})</option>`).join('');
+    }
   } catch (e) {
     alert('Nem sikerült betölteni a profilt: ' + e.message);
   }
 }
 
-function renderProfilTelephelyek(telephelyek) {
+document.getElementById('profil-invite-manager-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('profil-invite-manager-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const telephelyKod = document.getElementById('profil-invite-manager-telephely').value;
+    const nev = document.getElementById('profil-invite-manager-nev').value.trim();
+    const email = document.getElementById('profil-invite-manager-email').value.trim();
+    const res = await api('/api/profile/invite-manager', { method: 'POST', body: JSON.stringify({ telephelyKod, nev, email }) });
+    document.getElementById('profil-invite-manager-form').reset();
+    msg.textContent = res.emailWarning
+      ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`
+      : '✓ Meghívó elküldve.';
+    msg.className = res.emailWarning ? 'profile-form-msg error' : 'profile-form-msg ok';
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+function renderProfilTelephelyek(telephelyek, isManager) {
   const tbody = document.querySelector('#profil-telephelyek-table tbody');
   tbody.innerHTML = telephelyek.map((t) => `
     <tr data-kod="${escapeHtml(t.kod)}">
@@ -1469,7 +1702,7 @@ function renderProfilTelephelyek(telephelyek) {
       <td class="profil-telephely-nev-cell">${escapeHtml(t.nev)}</td>
       <td class="profil-telephely-cim-cell">${escapeHtml(t.cim || '—')}</td>
       <td>${t.utolsoSzinkron ? fmtDateTime(t.utolsoSzinkron) : (t.vanAdat ? '—' : 'még nincs adat')}</td>
-      <td><button class="btn-tiny btn-profil-telephely-edit">Szerkesztés</button></td>
+      <td>${(!isManager || t.aktiv) ? '<button class="btn-tiny btn-profil-telephely-edit">Szerkesztés</button>' : ''}</td>
     </tr>`).join('');
 
   tbody.querySelectorAll('.btn-profil-telephely-edit').forEach((btn) => {
