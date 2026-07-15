@@ -367,6 +367,21 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .login-toggle-row{ text-align:center; margin-top:14px; font-size:12.5px; }
 .login-toggle-row a{ color:var(--jade-deep); text-decoration:none; font-weight:600; }
 .login-toggle-row a:hover{ text-decoration:underline; }
+
+/* ============================================================
+   Kezdőoldal — 2 csempe (ügyfél / viszonteladó)
+   ============================================================ */
+.landing-card{ max-width:520px; }
+.landing-tiles{ display:flex; flex-direction:column; gap:14px; margin-top:24px; }
+.landing-tile{
+  display:flex; flex-direction:column; align-items:flex-start; gap:4px;
+  width:100%; padding:20px 22px; border:1.5px solid var(--line); border-radius:12px;
+  background:#fff; cursor:pointer; text-align:left;
+  transition:border-color .15s, background .15s, transform .1s;
+}
+.landing-tile:hover{ border-color:var(--jade); background:var(--paper-dim); transform:translateY(-1px); }
+.landing-tile-title{ font-family:var(--font-display); font-weight:700; font-size:16px; color:var(--text); }
+.landing-tile-sub{ font-size:12.5px; color:var(--text-dim); }
 .admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
 .admin-entry a:hover{ color:rgba(250,249,245,0.8); }
 

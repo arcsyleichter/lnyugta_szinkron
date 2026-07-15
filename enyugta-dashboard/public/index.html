@@ -11,31 +11,41 @@
 </head>
 <body>
 
-<!-- ===================== BEJELENTKEZÉS ===================== -->
-<section id="login-screen" class="login-screen">
+<!-- ===================== KEZDŐOLDAL — 2 CSEMPE ===================== -->
+<section id="landing-screen" class="login-screen">
+  <div class="login-card landing-card">
+    <div class="ticket-notch"></div>
+    <div class="brand" style="justify-content:center; text-align:center; flex-direction:column;">
+      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó" style="margin:0 auto 10px;">
+      <div class="brand-name">L-NYUGTA</div>
+      <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
+    </div>
+    <div class="landing-tiles">
+      <button type="button" class="landing-tile" id="landing-tile-ugyfel">
+        <span class="landing-tile-title">Ügyfél bejelentkezés</span>
+        <span class="landing-tile-sub">cégtulajdonosoknak és üzletvezetőknek</span>
+      </button>
+      <button type="button" class="landing-tile" id="landing-tile-viszontelado">
+        <span class="landing-tile-title">Viszonteladó bejelentkezés</span>
+        <span class="landing-tile-sub">saját ügyfeleid kezeléséhez</span>
+      </button>
+    </div>
+  </div>
+  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
+</section>
+
+<!-- ===================== ÜGYFÉL (CÉG) BEJELENTKEZÉS ===================== -->
+<section id="login-screen" class="login-screen" hidden>
   <div class="login-card">
     <div class="ticket-notch"></div>
     <div class="brand">
       <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
       <div>
         <div class="brand-name">L-NYUGTA nézegető</div>
-        <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
+        <div class="brand-sub">ügyfél bejelentkezés</div>
       </div>
     </div>
-    <p class="login-lede">Add meg a céged adószámát és a hozzáférési kódodat a belépéshez. A kódot a cég adminisztrátorától kapod.</p>
-    <form id="login-form" autocomplete="off">
-      <label for="adoszam-input">Adószám</label>
-      <input id="adoszam-input" name="adoszam" type="text" placeholder="pl. 27129430" inputmode="text" required>
-      <label for="code-input">Hozzáférési kód</label>
-      <input id="code-input" name="code" type="password" placeholder="6 jegyű kód" inputmode="numeric" maxlength="6" required>
-      <button type="submit" id="login-btn">Belépés</button>
-      <div class="login-error" id="login-error" hidden></div>
-    </form>
-    <div class="login-toggle-row">
-      <a href="#" id="show-user-login">Egyéni fiókkal jelentkezem be →</a>
-    </div>
-
-    <form id="user-login-form" autocomplete="off" hidden>
+    <form id="user-login-form" autocomplete="off">
       <label for="user-email-input">Email cím</label>
       <input id="user-email-input" name="email" type="email" required>
       <label for="user-password-input">Jelszó</label>
@@ -43,19 +53,16 @@
       <button type="submit" id="user-login-btn">Belépés</button>
       <div class="login-error" id="user-login-error" hidden></div>
     </form>
-    <div class="login-toggle-row" id="show-code-login-row" hidden>
-      <a href="#" id="show-code-login">‹ Vissza az adószám+kód belépéshez</a>
-    </div>
     <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
          JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
-         mert bárkinek megmutatja az összes regisztrált cég adószámát. -->
+         mert bárkinek megmutatja a teszt-fiókok jelszavát. -->
     <div class="login-hint" id="login-hint" hidden>
-      <div class="login-hint-title">Ideiglenes — teszteléshez érvényes adószámok</div>
+      <div class="login-hint-title">Ideiglenes — teszt bejelentkezések</div>
       <ul class="login-hint-list" id="login-hint-list"></ul>
     </div>
   </div>
-  <div class="login-footnote">A hozzáférés az androidos L-NYUGTA GO app adatbázisán alapul, és egy külön hozzáférési kóddal védett.</div>
-  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a> · <a href="#" id="show-reseller-login">Viszonteladó belépés</a></div>
+  <div class="login-footnote">A hozzáférés egyéni, email+jelszó alapú fiókhoz kötött.</div>
+  <div class="admin-entry"><a href="#" id="back-to-landing-1">‹ Vissza</a></div>
 </section>
 
 <!-- ===================== TELEPHELY-VÁLASZTÓ ===================== -->
@@ -158,7 +165,7 @@
       <div class="login-error" id="reseller-login-error" hidden></div>
     </form>
   </div>
-  <div class="admin-entry"><a href="#" id="reseller-back-link">‹ Vissza a normál bejelentkezéshez</a></div>
+  <div class="admin-entry"><a href="#" id="reseller-back-link">‹ Vissza</a></div>
 </section>
 
 <!-- ===================== ADMIN BEJELENTKEZÉS ===================== -->
@@ -180,7 +187,7 @@
       <div class="login-error" id="admin-login-error" hidden></div>
     </form>
   </div>
-  <div class="admin-entry"><a href="#" id="show-company-login">‹ Vissza a céges bejelentkezéshez</a></div>
+  <div class="admin-entry"><a href="#" id="show-company-login">‹ Vissza</a></div>
 </section>
 
 <!-- ===================== DASHBOARD ===================== -->

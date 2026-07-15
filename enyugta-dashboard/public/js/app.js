@@ -42,7 +42,7 @@ function resolvePreset(key) {
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (res.status === 401) { showLogin(); throw new Error('NOT_AUTHENTICATED'); }
+  if (res.status === 401) { showLandingScreen(); throw new Error('NOT_AUTHENTICATED'); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Ismeretlen hiba');
   return data;
@@ -72,6 +72,7 @@ const state = {
 /* ============================================================
    Bejelentkezés
    ============================================================ */
+const landingScreen = document.getElementById('landing-screen');
 const loginScreen = document.getElementById('login-screen');
 const telephelyScreen = document.getElementById('telephely-screen');
 const telephelyWaitingScreen = document.getElementById('telephely-waiting-screen');
@@ -81,6 +82,7 @@ const adminLoginScreen = document.getElementById('admin-login-screen');
 const adminScreen = document.getElementById('admin-screen');
 
 function hideAllScreens() {
+  landingScreen.hidden = true;
   loginScreen.hidden = true;
   telephelyScreen.hidden = true;
   telephelyWaitingScreen.hidden = true;
@@ -194,30 +196,11 @@ function handleLoginSuccess(data) {
   boot();
 }
 
-document.getElementById('login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('login-btn');
-  const err = document.getElementById('login-error');
-  err.hidden = true;
-  btn.disabled = true; btn.textContent = 'Belépés…';
-  try {
-    const adoszam = document.getElementById('adoszam-input').value;
-    const code = document.getElementById('code-input').value;
-    const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ adoszam, code }) });
-    handleLoginSuccess(data);
-  } catch (e2) {
-    err.textContent = e2.message === 'NOT_AUTHENTICATED' ? 'Munkamenet lejárt.' : e2.message;
-    err.hidden = false;
-  } finally {
-    btn.disabled = false; btn.textContent = 'Belépés';
-  }
-});
-
 document.getElementById('logout-btn').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
   loggedIn = false;
   state.viaAdmin = false;
-  showLogin();
+  showLandingScreen();
 });
 document.getElementById('back-to-admin-btn').addEventListener('click', () => {
   showAdmin();
@@ -231,22 +214,13 @@ document.getElementById('back-to-admin-btn').addEventListener('click', () => {
 document.getElementById('show-admin-login').addEventListener('click', (e) => { e.preventDefault(); showAdminLogin(); });
 
 /* ============================================================
-   Bejelentkezés-váltó: adószám+kód  ↔  egyéni fiók (email+jelszó)
+   Kezdőoldal — 2 csempe
    ============================================================ */
-document.getElementById('show-user-login').addEventListener('click', (e) => {
-  e.preventDefault();
-  document.getElementById('login-form').hidden = true;
-  document.querySelector('#login-screen .login-toggle-row').hidden = true;
-  document.getElementById('user-login-form').hidden = false;
-  document.getElementById('show-code-login-row').hidden = false;
-});
-document.getElementById('show-code-login').addEventListener('click', (e) => {
-  e.preventDefault();
-  document.getElementById('user-login-form').hidden = true;
-  document.getElementById('show-code-login-row').hidden = true;
-  document.getElementById('login-form').hidden = false;
-  document.querySelector('#login-screen .login-toggle-row').hidden = false;
-});
+function showLandingScreen() { hideAllScreens(); landingScreen.hidden = false; }
+document.getElementById('landing-tile-ugyfel').addEventListener('click', () => showLogin());
+document.getElementById('landing-tile-viszontelado').addEventListener('click', () => showResellerLogin());
+document.getElementById('back-to-landing-1').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
+
 document.getElementById('user-login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('user-login-btn');
@@ -271,7 +245,7 @@ document.getElementById('user-login-form').addEventListener('submit', async (e) 
    ============================================================ */
 function showResellerLogin() { hideAllScreens(); document.getElementById('reseller-login-screen').hidden = false; }
 document.getElementById('show-reseller-login').addEventListener('click', (e) => { e.preventDefault(); showResellerLogin(); });
-document.getElementById('reseller-back-link').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+document.getElementById('reseller-back-link').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
 
 function showResellerDashboard() { hideAllScreens(); resellerScreen.hidden = false; }
 
@@ -378,7 +352,7 @@ async function checkInviteLink() {
   return true;
 }
 
-document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
 
 /* ============================================================
    Telephely-választó és -karbantartó
@@ -476,7 +450,7 @@ document.getElementById('telephely-logout-link').addEventListener('click', async
   e.preventDefault();
   try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) {}
   loggedIn = false;
-  showLogin();
+  showLandingScreen();
 });
 
 document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
@@ -501,7 +475,7 @@ document.getElementById('admin-login-form').addEventListener('submit', async (e)
 
 document.getElementById('admin-logout-btn').addEventListener('click', async () => {
   await api('/api/admin/logout', { method: 'POST' }).catch(() => {});
-  showLogin();
+  showLandingScreen();
 });
 
 const NTAK_ADMIN_STATUS_LABELS = { TELJESEN_HIBAS: 'Teljesen hibás', RESZBEN_SIKERES: 'Részben sikeres' };
@@ -748,27 +722,34 @@ document.getElementById('activity-company-select').addEventListener('change', (e
   loadAdminActivity();
 });
 
-/* IDEIGLENES, TESZT CÉLÚ — a bejelentkező oldalon megmutatja, milyen
-   adószámokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,
+/* IDEIGLENES, TESZT CÉLÚ — a bejelentkező oldalon megmutatja, milyen teszt-
+   fiókokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,
    mielőtt nyilvánosan élesítesz (lásd megjegyzés az index.html-ben és a
-   server.js /api/auth/companies-hint végpontjánál is). */
+   server.js /api/auth/test-users-hint végpontjánál is). */
 async function renderLoginHint() {
   const box = document.getElementById('login-hint');
   const list = document.getElementById('login-hint-list');
   try {
-    const data = await apiSilent('/api/auth/companies-hint');
-    if (!data.companies || !data.companies.length) return;
+    const data = await apiSilent('/api/auth/test-users-hint');
+    if (!data.users || !data.users.length) return;
     list.innerHTML = '';
-    data.companies.forEach((c) => {
+    data.users.forEach((u) => {
       const li = document.createElement('li');
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'login-hint-item';
-      btn.innerHTML = `<span class="login-hint-nev">${c.nev}</span><span class="login-hint-ado">${c.adoszam} · kód: ${c.code}</span>`;
+      const roleLabel = { reseller: 'viszonteladó', owner: 'cégtulajdonos', manager: 'üzletvezető' }[u.role] || u.role;
+      btn.innerHTML = `<span class="login-hint-nev">${u.email}</span><span class="login-hint-ado">${roleLabel} · jelszó: ${u.password}</span>`;
       btn.addEventListener('click', () => {
-        document.getElementById('adoszam-input').value = c.adoszam;
-        document.getElementById('code-input').value = c.code;
-        document.getElementById('code-input').focus();
+        if (u.role === 'reseller') {
+          showResellerLogin();
+          document.getElementById('reseller-email-input').value = u.email;
+          document.getElementById('reseller-password-input').value = u.password;
+        } else {
+          showLogin();
+          document.getElementById('user-email-input').value = u.email;
+          document.getElementById('user-password-input').value = u.password;
+        }
       });
       li.appendChild(btn);
       list.appendChild(li);
@@ -783,7 +764,7 @@ renderLoginHint();
    megnyitásakor tehát sosem ugrunk automatikusan a dashboardra — csak a
    ténylegesen beküldött belépési űrlap után. */
 let loggedIn = false;
-checkInviteLink().then((wasInvite) => { if (!wasInvite) showLogin(); });
+checkInviteLink().then((wasInvite) => { if (!wasInvite) showLandingScreen(); });
 
 /* ============================================================
    Mobil hamburger-menü
