@@ -244,7 +244,6 @@ document.getElementById('user-login-form').addEventListener('submit', async (e) 
    Viszonteladói bejelentkezés
    ============================================================ */
 function showResellerLogin() { hideAllScreens(); document.getElementById('reseller-login-screen').hidden = false; }
-document.getElementById('show-reseller-login').addEventListener('click', (e) => { e.preventDefault(); showResellerLogin(); });
 document.getElementById('reseller-back-link').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
 
 function showResellerDashboard() { hideAllScreens(); resellerScreen.hidden = false; }

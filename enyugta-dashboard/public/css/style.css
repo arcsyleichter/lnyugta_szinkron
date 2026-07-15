@@ -67,18 +67,18 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .brand-name{ font-family:var(--font-display); font-weight:700; font-size:18px; letter-spacing:0.2px; }
 .brand-sub{ font-size:12px; color:var(--text-dim); margin-top:1px; }
 .login-lede{ color:var(--text-dim); font-size:13.5px; margin:0 0 22px; }
-#login-form label, #admin-login-form label{ display:block; font-size:12.5px; font-weight:600; color:var(--text-dim); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
-#login-form input, #admin-login-form input{
+#user-login-form label, #admin-login-form label, #reseller-login-form label, #invite-accept-form label{ display:block; font-size:12.5px; font-weight:600; color:var(--text-dim); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
+#user-login-form input, #admin-login-form input, #reseller-login-form input, #invite-accept-form input{
   width:100%; padding:12px 14px; border:1.5px solid var(--line); border-radius:8px;
   background:#fff; margin-bottom:14px; font-family:var(--font-mono); font-size:15px;
 }
-#login-form input:focus, #admin-login-form input:focus{ outline:none; border-color:var(--jade); box-shadow:0 0 0 3px rgba(47,110,92,0.15); }
-#login-btn, #admin-login-btn{
+#user-login-form input:focus, #admin-login-form input:focus, #reseller-login-form input:focus, #invite-accept-form input:focus{ outline:none; border-color:var(--jade); box-shadow:0 0 0 3px rgba(47,110,92,0.15); }
+#user-login-btn, #admin-login-btn, #reseller-login-btn, #invite-accept-btn{
   width:100%; padding:13px; border:none; border-radius:8px; background:var(--jade); color:#fff;
   font-weight:600; font-size:14.5px; transition:background .15s;
 }
-#login-btn:hover, #admin-login-btn:hover{ background:var(--jade-deep); }
-#login-btn:disabled, #admin-login-btn:disabled{ opacity:.6; cursor:default; }
+#user-login-btn:hover, #admin-login-btn:hover, #reseller-login-btn:hover, #invite-accept-btn:hover{ background:var(--jade-deep); }
+#user-login-btn:disabled, #admin-login-btn:disabled, #reseller-login-btn:disabled, #invite-accept-btn:disabled{ opacity:.6; cursor:default; }
 .login-error{
   margin-top:12px; background:rgba(184,69,43,0.1); color:var(--brick); border:1px solid rgba(184,69,43,0.25);
   padding:9px 12px; border-radius:7px; font-size:13px;
