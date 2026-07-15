@@ -118,22 +118,26 @@ def apply_csoport(conn: sqlite3.Connection, megnevezes: str):
 
 
 def apply_cikk(conn: sqlite3.Connection, payload: dict) -> str:
-    # A payload kizárólag szó szerinti cikkt-oszlopneveket tartalmaz —
-    # nincs benne "csoport" mező (lásd simulate_android_pull.py megjegyzését).
+    # A payload a szó szerinti cikkt-oszlopneveken felül egy beágyazott
+    # "csoport": {"megnevezes": "..."} mezőt is tartalmazhat — az androidos
+    # oldal ezt külön, nem-generikus logikával dolgozza fel.
     megnevezes = payload["megnevezes"]
     me = payload.get("me") or "Darab"
     bruttoar = payload["bruttoar"]
     afakod = payload["afakod"]
     vonalkod = payload.get("vonalkod") or ""
     afakodelv = payload.get("afakodelv")
+    csoport = payload.get("csoport")
     csopazon = "1"
+    if csoport and csoport.get("megnevezes"):
+        csopazon, _ = apply_csoport(conn, csoport["megnevezes"])
 
     row = conn.execute("SELECT azon FROM cikkt WHERE megnevezes = ?", (megnevezes,)).fetchone()
     if row:
         conn.execute(
-            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, afakodelv = ? "
+            "UPDATE cikkt SET bruttoar = ?, afakod = ?, me = ?, vonalkod = ?, csopazon = ?, afakodelv = ? "
             "WHERE megnevezes = ?",
-            (bruttoar, afakod, me, vonalkod, afakodelv, megnevezes),
+            (bruttoar, afakod, me, vonalkod, csopazon, afakodelv, megnevezes),
         )
         return "frissítve"
     azon = next_unique_azon(conn, "cikkt")

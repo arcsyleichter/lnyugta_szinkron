@@ -1358,7 +1358,7 @@ route('GET', '/api/products/master', async (req, res) => {
     try {
       const pl = JSON.parse(p.payload);
       const meta = p.meta ? JSON.parse(p.meta) : {};
-      pendingMap.set(pl.megnevezes, { ...pl, csoportNev: meta.csoportNev || null });
+      pendingMap.set(pl.megnevezes, { ...pl, csoportNev: pl.csoport?.megnevezes || meta.csoportNev || null });
     } catch (_) {}
   }
   const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null }));
@@ -1407,8 +1407,14 @@ route('GET', '/api/products/groups', async (req, res) => {
 // még beágyazott objektumot sem (ezt élesben, androidos hibaüzenetből
 // derítettük ki). A tervezett csoport nevét ezért KÜLÖN, a "meta" mezőben
 // tároljuk — az csak a weben jelenik meg, sosem kerül elküldésre.
-function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv }) {
-  return { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
+// A fejlesztő megerősítette (2026.07.15), hogy a "csoport": { "megnevezes":
+// ... } mezőt mostantól KÜLÖN, nem-generikus logikával dolgozzák fel az
+// androidos oldalon (nem a cikkt tábla generikus, mezőnév=oszlopnév alapú
+// illesztőjén keresztül) — ezért ismét belekerülhet a payloadba.
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }) {
+  const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
+  if (csoportNev) payload.csoport = { megnevezes: csoportNev };
+  return payload;
 }
 
 route('POST', '/api/products/change', async (req, res) => {
@@ -1427,7 +1433,7 @@ route('POST', '/api/products/change', async (req, res) => {
   const vonalkod = String(body.vonalkod || '').trim() || null;
   const afakodelv = String(body.afakodElviteli || '').trim() || null;
   if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
-  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv }), 'web_form', csoportNev ? { csoportNev } : null);
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
 });
@@ -1470,8 +1476,8 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
     let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
     newPrice = Math.max(0, Math.round(newPrice));
     addProductChange(session.companyKey, 'cikk_upsert',
-      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv }),
-      'web_bulk_price', p.csoportNev ? { csoportNev: p.csoportNev } : null);
+      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev }),
+      'web_bulk_price');
   }
   logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
   sendJson(res, 200, { ok: true, count: products.length });
@@ -1557,7 +1563,8 @@ route('POST', '/api/products/import', async (req, res) => {
       afakod: afa,
       vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
       afakodelv: afakodElvitelRaw,
-    }), 'excel_import', csoportNevImport ? { csoportNev: csoportNevImport } : null);
+      csoportNev: csoportNevImport,
+    }), 'excel_import');
     count++;
   }
   logActivity({ type: 'product_import', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${count} cikk importálva${errors.length ? `, ${errors.length} hibás sor` : ''}` });
