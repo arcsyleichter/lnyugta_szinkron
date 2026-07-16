@@ -252,6 +252,10 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .sidebar-overlay:not([hidden]){ display:block; }
 
 @media (max-width:880px){
+  /* iOS Safari automatikusan ráközelít minden 16px-nél kisebb betűméretű
+     mezőre fókuszáláskor — ez zavaró, "ugráló" élményt ad. Minden
+     beviteli mezőt legalább 16px-re állítunk mobil nézetben. */
+  input, select, textarea{ font-size:16px !important; }
   .grid-2{ grid-template-columns:1fr; }
   .app-shell{ grid-template-columns:1fr; }
   .hamburger-btn{ display:flex; }
@@ -278,12 +282,22 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .filters-row select, .filters-row input, .filters-row .btn-tiny{ width:100%; }
   .filters-row input[type=number]{ width:100%; }
   .data-table{ min-width:480px; }
+  .nav-item{ padding:13px 14px; font-size:14.5px; } /* nagyobb érintési felület mobilon */
 }
 @media (max-width:520px){
   .main{ padding:66px 12px 44px; }
   .card{ padding:16px 14px; }
   .range-select, .group-toggle .chip{ padding:6px 10px; font-size:12px; }
   .receipt-strip-inner{ flex-direction:column; gap:14px; }
+  .login-card, .landing-card{ padding:26px 20px 22px; }
+  .profile-inline-form{ flex-direction:column; align-items:stretch; max-width:none; }
+  .profile-inline-form button{ width:100%; }
+  .telephely-new-form-grid{ flex-direction:column; align-items:stretch; }
+  .telephely-new-form-grid input, .telephely-new-form-grid select, .telephely-new-form-grid button{ flex:1 1 auto; width:100%; }
+  .modal{ padding:20px 18px; }
+  .admin-users-group-title{ font-size:13px; }
+  .card-title-row .activity-type-chips{ width:100%; }
+  .activity-type-chips .activity-type-chip{ flex:1 1 auto; text-align:center; }
 }
 
 .card{ background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; box-shadow:var(--shadow); }
