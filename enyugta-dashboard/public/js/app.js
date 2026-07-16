@@ -107,6 +107,9 @@ function showAdmin() { hideAllScreens(); adminScreen.hidden = false; showAdminVi
 function showAdminView(view) {
   document.querySelectorAll('.admin-view').forEach((el) => { el.hidden = el.dataset.adminView !== view; });
   document.querySelectorAll('.admin-nav-item').forEach((btn) => { btn.classList.toggle('is-active', btn.dataset.adminView === view); });
+  document.querySelectorAll('#admin-mobile-tabbar .mobile-tab-btn').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.dataset.forwardAdminView === view);
+  });
   closeAdminMobileSidebar(); // mobil nézetben a menü válaszottás után csukódjon be
 }
 document.querySelectorAll('.admin-nav-item').forEach((btn) => {
@@ -114,6 +117,20 @@ document.querySelectorAll('.admin-nav-item').forEach((btn) => {
     showAdminView(btn.dataset.adminView);
     if (btn.dataset.adminView === 'felhasznalok') loadAdminUsers();
   });
+});
+
+/* ============================================================
+   Admin — mobil alsó navigáció, ugyanaz a "továbbító" minta, mint a
+   céges felületen.
+   ============================================================ */
+document.querySelectorAll('.mobile-tab-btn[data-forward-admin-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelector(`.admin-nav-item[data-admin-view="${btn.dataset.forwardAdminView}"]`).click();
+  });
+});
+document.getElementById('admin-mobile-tab-more').addEventListener('click', () => {
+  const sidebar = document.getElementById('admin-sidebar');
+  if (sidebar.classList.contains('is-open')) closeAdminMobileSidebar(); else openAdminMobileSidebar();
 });
 
 /* ============================================================
