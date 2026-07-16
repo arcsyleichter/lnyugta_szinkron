@@ -2070,6 +2070,8 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const meta = readSyncMeta();
   const codes = ensureAccessCodes();
+  const resellerRows = usersDb.prepare(`SELECT id, nev, email FROM users WHERE role = 'reseller' ORDER BY nev`).all();
+  const resellerNevByld = new Map(resellerRows.map((r) => [r.id, r.nev]));
   const companies = [...companyIndex.entries()]
     .map(([key, entry]) => {
       const cegKulcs = entry.cegKulcs;
@@ -2078,16 +2080,42 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
         try { fallbackEmail = get(key, 'SELECT email FROM szallitot LIMIT 1')?.email || ''; } catch (_) {}
       }
       const telephelyInfo = listTelephelyek(cegKulcs).find((t) => t.kod === entry.telephelyKod);
+      const resellerId = codes[cegKulcs]?.resellerId || null;
       return {
         key, cegKulcs, telephelyKod: entry.telephelyKod, telephelyNev: telephelyInfo?.nev || entry.telephelyKod,
         nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
         code: codes[cegKulcs]?.code, email: codes[cegKulcs]?.email || fallbackEmail,
+        resellerId, resellerNev: resellerId ? (resellerNevByld.get(resellerId) || null) : null,
         ...(meta[key] || { lastSync: null, source: null, bytes: null }),
       };
     })
     .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
   const ntak = computeNtakOverview();
-  sendJson(res, 200, { companies, ntak, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+  sendJson(res, 200, { companies, ntak, resellers: resellerRows, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+});
+
+// Cég hozzárendelése (vagy leválasztása) egy viszonteladóhoz — admin
+// bármikor módosíthatja, nemcsak a viszonteladó saját meghívásán keresztül
+// jöhet létre a kapcsolat.
+route('POST', '/api/admin/companies/assign-reseller', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, resellerId } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const codes = readAccessCodes();
+  if (!codes[cegKulcs]) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  if (resellerId) {
+    const reseller = usersDb.prepare(`SELECT id, nev FROM users WHERE id = ? AND role = 'reseller'`).get(resellerId);
+    if (!reseller) return sendJson(res, 404, { error: 'Ismeretlen viszonteladó.' });
+    codes[cegKulcs].resellerId = reseller.id;
+    writeAccessCodes(codes);
+    logActivity({ type: 'company_reseller_assign', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `Hozzárendelve: ${reseller.nev}` });
+  } else {
+    delete codes[cegKulcs].resellerId;
+    writeAccessCodes(codes);
+    logActivity({ type: 'company_reseller_assign', ok: true, companyKey: cegKulcs, nev: 'admin', detail: 'Viszonteladó-hozzárendelés törölve' });
+  }
+  sendJson(res, 200, { ok: true });
 });
 
 // Tevékenység-napló — minden esemény cégenként és típusonként megkülönböztetve.

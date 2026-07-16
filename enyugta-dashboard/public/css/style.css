@@ -329,18 +329,18 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .range-select{ width:100%; }
   .range-single-input, .range-custom-inputs{ width:100%; flex-wrap:wrap; }
   .range-single-input input, .range-custom-inputs input{ flex:1; min-width:0; }
-  .receipt-strip{ border-radius:26px; -webkit-mask-image:none; background:linear-gradient(150deg, var(--text), var(--jade-deep) 65%, var(--jade)); }
-  .receipt-strip-inner{
+  .receipt-strip:not(.admin-kpi-strip){ border-radius:26px; -webkit-mask-image:none; background:linear-gradient(150deg, var(--text), var(--jade-deep) 65%, var(--jade)); }
+  .receipt-strip:not(.admin-kpi-strip) .receipt-strip-inner{
     background:none; padding:22px 20px 20px; display:grid; grid-template-columns:1fr 1fr; gap:16px 22px;
   }
-  .receipt-strip-inner .kpi:first-child{
+  .receipt-strip:not(.admin-kpi-strip) .receipt-strip-inner .kpi:first-child{
     grid-column:1 / -1; padding-bottom:16px; margin-bottom:2px; border-bottom:1px solid rgba(250,249,245,0.18);
   }
-  .receipt-strip-inner .kpi:first-child .kpi-value{ font-size:36px; font-family:var(--font-display); font-weight:700; }
-  .receipt-strip-inner .kpi:first-child .kpi-trend{
+  .receipt-strip:not(.admin-kpi-strip) .receipt-strip-inner .kpi:first-child .kpi-value{ font-size:36px; font-family:var(--font-display); font-weight:700; }
+  .receipt-strip:not(.admin-kpi-strip) .receipt-strip-inner .kpi:first-child .kpi-trend{
     display:inline-block; background:rgba(250,249,245,0.14); padding:3px 10px; border-radius:20px; margin-top:8px;
   }
-  .receipt-strip-inner .kpi:not(:first-child) .kpi-value{ font-size:18px; }
+  .receipt-strip:not(.admin-kpi-strip) .receipt-strip-inner .kpi:not(:first-child) .kpi-value{ font-size:18px; }
   .kpi-value{ font-size:23px; }
   table.data-table{ font-size:12.5px; }
   .card{ overflow-x:auto; }
@@ -502,6 +502,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 .btn-license-check:hover{ background:var(--paper-dim); border-color:var(--jade); color:var(--jade-deep); }
 .admin-code{ font-family:var(--font-mono); font-weight:600; letter-spacing:0.04em; }
+.admin-reseller-select{ border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:12px; max-width:150px; }
 
 /* ============================================================
    Tevékenység-napló (admin)

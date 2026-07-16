@@ -823,7 +823,7 @@
         </div>
         <div class="table-scroll">
         <table class="data-table" id="admin-companies-table">
-          <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th>Licenc</th><th></th></tr></thead>
+          <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Kód</th><th>Email</th><th>Viszonteladó</th><th>Utolsó szinkron</th><th>Forrás</th><th>Méret</th><th>Licenc</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         </div>
@@ -838,10 +838,12 @@
             <div class="card-subtitle">minden cég, akinél van adatküldés</div>
           </div>
         </div>
-        <table class="data-table" id="admin-ntak-table">
+        <div class="table-scroll">
+          <table class="data-table" id="admin-ntak-table">
           <thead><tr><th>Cégnév</th><th class="td-right">Sikeres</th><th class="td-right">Részben sikeres</th><th class="td-right">Hibás</th><th class="td-right">Befogadva</th><th>Legutóbbi probléma</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -854,20 +856,24 @@
           </div>
         </div>
 
-        <table class="data-table activity-summary-table" id="activity-summary-table">
+        <div class="table-scroll">
+          <table class="data-table activity-summary-table" id="activity-summary-table">
           <thead><tr><th>Cég</th><th class="td-right">Összesen</th><th>Legutóbbi esemény</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
 
         <div class="activity-filters">
           <select id="activity-company-select"><option value="">Összes cég</option></select>
           <div class="activity-type-chips" id="activity-type-chips"></div>
         </div>
 
-        <table class="data-table" id="activity-log-table">
+        <div class="table-scroll">
+          <table class="data-table" id="activity-log-table">
           <thead><tr><th>Időpont</th><th>Cég</th><th>Típus</th><th>Állapot</th><th>Részlet</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -887,10 +893,12 @@
           Az alábbi táblázat MINTA adatokat mutat, a valós lszamla szín-konvenció szerint
           (piros = lejárt, sárga = hamarosan lejár, zöld = ingyenes).
         </p>
-        <table class="data-table" id="admin-licenc-table">
+        <div class="table-scroll">
+          <table class="data-table" id="admin-licenc-table">
           <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Program</th><th>Verzió</th><th>Állapot</th><th>Reg. dátum</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </div>
 

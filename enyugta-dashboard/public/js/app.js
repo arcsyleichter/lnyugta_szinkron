@@ -658,6 +658,12 @@ async function loadAdminOverview() {
         </div>
         <div class="admin-email-status" id="admin-email-status-${escapeHtml(c.key)}"></div>
       </td>
+      <td>
+        <select class="admin-reseller-select" data-ceg-kulcs="${escapeHtml(c.cegKulcs)}">
+          <option value="">— nincs —</option>
+          ${data.resellers.map((r) => `<option value="${r.id}" ${r.id === c.resellerId ? 'selected' : ''}>${escapeHtml(r.nev)}</option>`).join('')}
+        </select>
+      </td>
       <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
       <td>${escapeHtml(c.source || '—')}</td>
       <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
@@ -741,6 +747,23 @@ async function loadAdminOverview() {
     });
   });
 
+  compTbody.querySelectorAll('.admin-reseller-select').forEach((select) => {
+    select.addEventListener('change', async () => {
+      select.disabled = true;
+      try {
+        await api('/api/admin/companies/assign-reseller', {
+          method: 'POST',
+          body: JSON.stringify({ cegKulcs: select.dataset.cegKulcs, resellerId: select.value ? Number(select.value) : null }),
+        });
+      } catch (e) {
+        alert('Nem sikerült menteni: ' + e.message);
+        loadAdminOverview(); // állítsuk vissza az eredeti értékre
+      } finally {
+        select.disabled = false;
+      }
+    });
+  });
+
   const ntakTbody = document.querySelector('#admin-ntak-table tbody');
   ntakTbody.innerHTML = '';
   if (!data.ntak.length) {
@@ -791,6 +814,7 @@ const ACTIVITY_TYPE_LABELS = {
   user_invite_accepted: 'Meghívó elfogadva',
   user_update: 'Felhasználó módosítva',
   user_delete: 'Felhasználó törölve',
+  company_reseller_assign: 'Cég viszonteladóhoz rendelve',
 };
 const activityFilter = { company: '', type: '' };
 

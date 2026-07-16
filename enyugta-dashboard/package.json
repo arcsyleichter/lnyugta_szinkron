@@ -1,6 +1,6 @@
 {
   "name": "enyugta-dashboard",
-  "version": "3.6.0",
+  "version": "3.7.1",
   "description": "Élő értékesítési nézegető az L-NYUGTA GO android app SQLite adatbázisához",
   "type": "commonjs",
   "engines": {
