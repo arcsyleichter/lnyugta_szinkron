@@ -346,17 +346,21 @@
       <div class="grid-2">
         <div class="card">
           <div class="card-title">Fizetési módok bontásban</div>
-          <table class="data-table" id="fizmod-table">
+          <div class="table-scroll">
+            <table class="data-table" id="fizmod-table">
             <thead><tr><th>Fizetési mód</th><th class="td-right">Nyugták</th><th class="td-right">Forgalom</th><th class="td-right">Részarány</th></tr></thead>
             <tbody></tbody>
-          </table>
+            </table>
+          </div>
         </div>
         <div class="card">
           <div class="card-title">Árbevétel ÁFA kulcsok szerint</div>
-          <table class="data-table" id="vat-table">
+          <div class="table-scroll">
+            <table class="data-table" id="vat-table">
             <thead><tr><th>ÁFA kulcs</th><th class="td-right">Nettó</th><th class="td-right">ÁFA</th><th class="td-right">Bruttó</th></tr></thead>
             <tbody></tbody>
-          </table>
+            </table>
+          </div>
         </div>
       </div>
     </section>
@@ -368,10 +372,12 @@
           <div class="card-title">Cikk eladások</div>
           <input type="search" class="search-input" id="products-search" placeholder="Termék keresése…">
         </div>
-        <table class="data-table" id="products-table">
+        <div class="table-scroll">
+          <table class="data-table" id="products-table">
           <thead><tr><th>Termék</th><th class="td-right">Mennyiség</th><th class="td-right">Nyugtákon</th><th class="td-right">Árbevétel</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
         <div class="table-footer">
           <span id="products-count"></span>
           <div class="pager">
@@ -399,10 +405,12 @@
           <span class="stock-form-msg" id="new-group-msg"></span>
         </div>
 
-        <table class="data-table" id="masterdata-table">
+        <div class="table-scroll">
+          <table class="data-table" id="masterdata-table">
           <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
 
       <div class="card">
@@ -490,10 +498,12 @@
 
       <div class="card">
         <div class="card-title">Módosítások állapota</div>
-        <table class="data-table" id="masterdata-changes-table">
+        <div class="table-scroll">
+          <table class="data-table" id="masterdata-changes-table">
           <thead><tr><th>Időpont</th><th>Cikk</th><th class="td-right">Új ár</th><th>Forrás</th><th>Állapot</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -515,10 +525,12 @@
           <input type="number" id="receipts-max" placeholder="Max. összeg">
           <button class="btn-tiny" id="receipts-filter-btn">Szűrés</button>
         </div>
-        <table class="data-table" id="receipts-table">
+        <div class="table-scroll">
+          <table class="data-table" id="receipts-table">
           <thead><tr><th>Nyugtaszám</th><th>Dátum</th><th>Fizetési mód</th><th class="td-right">Összeg</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
         <div class="table-footer">
           <span id="receipts-count"></span>
           <div class="pager">
@@ -538,17 +550,21 @@
       </div>
       <div class="card">
         <div class="card-title">Legutóbbi adatküldések</div>
-        <table class="data-table" id="ntak-submissions-table">
+        <div class="table-scroll">
+          <table class="data-table" id="ntak-submissions-table">
           <thead><tr><th>Típus</th><th>Küldve</th><th>Válasz</th><th>Állapot</th><th>UUID</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
       <div class="card">
         <div class="card-title">Napi nyitás–zárás</div>
-        <table class="data-table" id="ntak-napzaras-table">
+        <div class="table-scroll">
+          <table class="data-table" id="ntak-napzaras-table">
           <thead><tr><th>Nap</th><th>Nyitás</th><th>Zárás</th><th>Nap típusa</th><th class="td-right">Borravaló</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -567,10 +583,12 @@
 
         <div class="stock-group-tiles" id="stock-group-tiles"></div>
 
-        <table class="data-table" id="stock-table">
+        <div class="table-scroll">
+          <table class="data-table" id="stock-table">
           <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th><th>Riasztási küszöb</th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -615,10 +633,12 @@
 
       <div class="card">
         <div class="card-title">Bevételezési napló</div>
-        <table class="data-table" id="stock-log-table">
+        <div class="table-scroll">
+          <table class="data-table" id="stock-log-table">
           <thead><tr><th>Dátum</th><th>Cikk</th><th class="td-right">Mennyiség</th><th>Szállító</th><th>Megjegyzés</th><th></th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -669,10 +689,12 @@
             <div class="card-subtitle">nevek és címek szerkesztése — a szinkronhoz használt kód itt nem módosítható</div>
           </div>
         </div>
-        <table class="data-table" id="profil-telephelyek-table">
+        <div class="table-scroll">
+          <table class="data-table" id="profil-telephelyek-table">
           <thead><tr><th>Kód</th><th>Név</th><th>Cím</th><th>Utolsó szinkron</th><th></th></tr></thead>
           <tbody></tbody>
-        </table>
+          </table>
+        </div>
 
         <div class="telephely-new-box" style="border-top:1px dashed var(--line); margin-top:16px; padding-top:16px;">
           <div class="telephely-new-title">+ Új telephely felvétele</div>

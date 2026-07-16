@@ -284,7 +284,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   /* Hamburger + bal oldali kicsúszó sáv helyett lebegő alsó navigáció —
      a "sidebar" innentől ALULRÓL nyíló lapként ("bottom sheet") viselkedik,
      a "Több" gomb nyitja/zárja, nem a hamburger (ami mobilon elrejtve marad). */
-  .hamburger-btn{ display:none !important; }
+  #hamburger-btn{ display:none !important; }
   .mobile-tabbar{
     position:fixed; left:14px; right:14px; bottom:18px; z-index:110;
     background:rgba(30,50,71,0.94); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
@@ -298,18 +298,18 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .mobile-tab-btn.is-active{ background:var(--amber); color:var(--ink); }
   .mobile-tab-icon{ font-size:17px; line-height:1; }
 
-  .sidebar{
+  #sidebar{
     left:0; right:0; top:auto; bottom:0; height:auto; max-height:78vh; width:auto;
     border-radius:24px 24px 0 0; transform:translateY(100%); padding-bottom:110px;
     overflow-y:auto;
   }
-  .sidebar.is-open{ transform:translateY(0); }
-  .sidebar-close-btn{ position:sticky; top:0; float:right; }
-  .sidebar-topline::before{
+  #sidebar.is-open{ transform:translateY(0); }
+  #sidebar .sidebar-close-btn{ position:sticky; top:0; float:right; }
+  #sidebar .sidebar-topline::before{
     content:''; display:block; position:absolute; top:10px; left:50%; transform:translateX(-50%);
     width:36px; height:4px; background:rgba(250,249,245,0.25); border-radius:3px;
   }
-  .sidebar-topline{ position:relative; padding-top:14px; }
+  #sidebar .sidebar-topline{ position:relative; padding-top:14px; }
   .range-select{ width:100%; }
   .range-single-input, .range-custom-inputs{ width:100%; flex-wrap:wrap; }
   .range-single-input input, .range-custom-inputs input{ flex:1; min-width:0; }
@@ -354,9 +354,10 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 .card{ background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; box-shadow:var(--shadow); }
 .table-scroll{ overflow-x:auto; margin:0 -4px; padding:0 4px; }
-.table-scroll .data-table{ min-width:1080px; }
+.table-scroll .data-table{ min-width:100%; }
 .table-scroll .data-table td, .table-scroll .data-table th{ white-space:nowrap; }
 .table-scroll .data-table td:nth-child(6){ white-space:normal; } /* Email cella maradjon tördelhető */
+#admin-companies-table.data-table{ min-width:1080px; } /* ennek a táblának valóban ennyi oszlopa van */
 .card-title{ font-family:var(--font-display); font-weight:600; font-size:15px; margin-bottom:14px; }
 .card-title-row{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px; }
 .card-title-row .card-title{ margin-bottom:0; }
