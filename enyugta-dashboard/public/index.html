@@ -198,6 +198,14 @@
   </button>
   <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
 
+  <nav class="mobile-tabbar" id="mobile-tabbar">
+    <button class="mobile-tab-btn is-active" data-forward-view="overview"><span class="mobile-tab-icon">◆</span>Áttekintés</button>
+    <button class="mobile-tab-btn" data-forward-view="revenue"><span class="mobile-tab-icon">📈</span>Forgalom</button>
+    <button class="mobile-tab-btn" data-forward-view="receipts"><span class="mobile-tab-icon">🧾</span>Nyugták</button>
+    <button class="mobile-tab-btn" data-forward-view="stock"><span class="mobile-tab-icon">📦</span>Készlet</button>
+    <button class="mobile-tab-btn" id="mobile-tab-more"><span class="mobile-tab-icon">•••</span>Több</button>
+  </nav>
+
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-topline">
       <div class="brand brand--sidebar">
@@ -267,6 +275,14 @@
           <input type="date" id="from-input"> – <input type="date" id="to-input">
           <button class="btn-tiny" id="apply-range-btn">Alkalmaz</button>
         </span>
+      </div>
+      <div class="range-scroll" id="range-scroll">
+        <button class="range-pill" data-range-value="today">Ma</button>
+        <button class="range-pill is-active" data-range-value="7">7 nap</button>
+        <button class="range-pill" data-range-value="30">30 nap</button>
+        <button class="range-pill" data-range-value="90">90 nap</button>
+        <button class="range-pill" data-range-value="week-td">E héten</button>
+        <button class="range-pill" data-range-value="month-td">E hónapban</button>
       </div>
       <span class="range-label" id="range-label"></span>
       <button class="btn-refresh" id="refresh-btn" title="Adatok frissítése">

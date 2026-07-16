@@ -960,11 +960,45 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'sync') loadSyncView();
     if (view === 'profil') loadProfilView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
+    document.querySelectorAll('.mobile-tab-btn').forEach((b) => {
+      b.classList.toggle('is-active', b.dataset.forwardView === view);
+    });
   });
 });
 document.getElementById('stock-goto-receipt-btn').addEventListener('click', () => {
   document.querySelector('.nav-item[data-view="stock-receipt"]').click();
 });
+
+/* ============================================================
+   Mobil alsó navigáció — a kattintást a meglévő nav-item gombokra
+   továbbítja, hogy minden meglévő logika (nézetváltás, adatbetöltés)
+   változtatás nélkül újrahasznosítható legyen.
+   ============================================================ */
+document.querySelectorAll('.mobile-tab-btn[data-forward-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelector(`.nav-item[data-view="${btn.dataset.forwardView}"]`).click();
+  });
+});
+document.getElementById('mobile-tab-more').addEventListener('click', () => {
+  const sidebar = document.getElementById('sidebar');
+  if (sidebar.classList.contains('is-open')) closeMobileSidebar(); else openMobileSidebar();
+});
+
+/* ============================================================
+   Mobil, görgethető dátum-pirulák — a meglévő range-select értékét
+   állítják be és 'change' eseményt indítanak, a teljes meglévő
+   dátumtartomány-logika újrahasznosításával.
+   ============================================================ */
+document.querySelectorAll('.range-pill[data-range-value]').forEach((pill) => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('.range-pill').forEach((p) => p.classList.remove('is-active'));
+    pill.classList.add('is-active');
+    const select = document.getElementById('range-select');
+    select.value = pill.dataset.rangeValue;
+    select.dispatchEvent(new Event('change'));
+  });
+});
+
 
 /* ============================================================
    Dátumtartomány vezérlő
