@@ -269,7 +269,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
     transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 0 rgba(0,0,0,0);
   }
   .sidebar.is-open{ transform:translateX(0); box-shadow:12px 0 32px -8px rgba(30,50,71,0.35); }
-  .main{ padding:70px 16px 50px; }
+  .main{ padding:70px 16px 110px; }
   .topbar{ gap:10px; }
   .date-range, .group-toggle{ width:100%; }
   .range-select{ display:none; }
@@ -353,7 +353,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .nav-item{ padding:13px 14px; font-size:14.5px; } /* nagyobb érintési felület mobilon */
 }
 @media (max-width:520px){
-  .main{ padding:66px 12px 44px; }
+  .main{ padding:66px 12px 110px; }
   .card{ padding:16px 14px; }
   .range-select, .group-toggle .chip{ padding:6px 10px; font-size:12px; }
   .receipt-strip-inner{ flex-direction:column; gap:14px; }
@@ -621,7 +621,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 @media (max-width:880px){
   .admin-topbar{ padding:14px 16px; }
-  .admin-main{ padding:18px 14px 40px; }
+  .admin-main{ padding:18px 14px 110px; }
 }
 .pager{ display:flex; gap:6px; }
 .btn-tiny{ background:var(--paper-dim); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; }

@@ -577,6 +577,7 @@
             <div class="card-subtitle">bevételezett mennyiség − összes eddigi eladás, cikkenként</div>
           </div>
           <button class="btn-primary" id="stock-goto-receipt-btn">+ Új bevételezés</button>
+          <button class="btn-ghost-light" id="stock-reset-btn">Készlet nullázása</button>
         </div>
 
         <input type="search" class="search-input stock-search" id="stock-search-input" placeholder="Keresés a cikkek között…">
@@ -962,6 +963,14 @@
           <option value="disabled">Letiltva</option>
           <option value="pending">Meghívás függőben</option>
         </select>
+        <div id="user-edit-ceg-fields" hidden>
+          <label for="user-edit-adoszam" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Cég adószáma</label>
+          <input id="user-edit-adoszam" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+          <div id="user-edit-telephely-field" hidden>
+            <label for="user-edit-telephely" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Telephely-kód</label>
+            <input id="user-edit-telephely" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+          </div>
+        </div>
         <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
         <div class="profile-form-msg" id="user-edit-msg"></div>
       </form>

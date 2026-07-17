@@ -239,6 +239,12 @@ function renderAdminUsers() {
       document.getElementById('user-edit-nev').value = u.nev;
       document.getElementById('user-edit-status').value = u.status;
       document.getElementById('user-edit-msg').textContent = '';
+      const cegFields = document.getElementById('user-edit-ceg-fields');
+      const telephelyField = document.getElementById('user-edit-telephely-field');
+      cegFields.hidden = (u.role === 'reseller');
+      telephelyField.hidden = (u.role !== 'manager');
+      document.getElementById('user-edit-adoszam').value = u.cegKulcs || '';
+      document.getElementById('user-edit-telephely').value = u.telephelyKod || '';
       document.getElementById('user-edit-modal-backdrop').hidden = false;
     });
   });
@@ -280,7 +286,9 @@ document.getElementById('user-edit-form').addEventListener('submit', async (e) =
     const id = Number(document.getElementById('user-edit-id').value);
     const nev = document.getElementById('user-edit-nev').value.trim();
     const status = document.getElementById('user-edit-status').value;
-    await api('/api/admin/users/update', { method: 'POST', body: JSON.stringify({ id, nev, status }) });
+    const cegKulcs = document.getElementById('user-edit-adoszam').value.trim();
+    const telephelyKod = document.getElementById('user-edit-telephely').value.trim();
+    await api('/api/admin/users/update', { method: 'POST', body: JSON.stringify({ id, nev, status, cegKulcs, telephelyKod }) });
     document.getElementById('user-edit-modal-backdrop').hidden = true;
     loadAdminUsers();
   } catch (e2) {
@@ -802,6 +810,7 @@ const ACTIVITY_TYPE_LABELS = {
   stock_receipt_delete: 'Bevételezés törölve',
   stock_threshold_set: 'Riasztási küszöb beállítva',
   stock_threshold_delete: 'Riasztási küszöb törölve',
+  stock_reset: 'Készlet nullázva',
   product_change_add: 'Cikk-módosítás rögzítve',
   product_group_add: 'Termékcsoport létrehozva',
   product_bulk_price: 'Tömeges árváltoztatás',
@@ -1008,6 +1017,20 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 });
 document.getElementById('stock-goto-receipt-btn').addEventListener('click', () => {
   document.querySelector('.nav-item[data-view="stock-receipt"]').click();
+});
+document.getElementById('stock-reset-btn').addEventListener('click', async () => {
+  if (!confirm('Biztosan nullázod MINDEN cikk készletét? Ez minden termékhez egy korrekciós bevételezési tételt ad hozzá, ami nullára hozza az egyenleget — a korábbi bevételezési/eladási előzmény nem törlődik, de ez a művelet a Bevételezési naplóban is látszani fog. Nem vonható vissza automatikusan.')) return;
+  const btn = document.getElementById('stock-reset-btn');
+  btn.disabled = true; btn.textContent = 'Nullázás…';
+  try {
+    const res = await api('/api/stock/reset', { method: 'POST' });
+    alert(`Kész — ${res.count} cikk készlete nullázva.`);
+    loadStockView();
+  } catch (e) {
+    alert('Nem sikerült: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Készlet nullázása';
+  }
 });
 
 /* ============================================================

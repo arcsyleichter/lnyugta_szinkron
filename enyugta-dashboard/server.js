@@ -1190,14 +1190,40 @@ route('GET', '/api/admin/users', async (req, res) => {
 route('POST', '/api/admin/users/update', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const { id, nev, status } = await readJsonBody(req);
-  const u = usersDb.prepare('SELECT id, email, nev FROM users WHERE id = ?').get(id);
+  const { id, nev, status, cegKulcs, telephelyKod } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev, role FROM users WHERE id = ?').get(id);
   if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
   const cleanNev = String(nev || '').trim();
   if (!cleanNev) return sendJson(res, 400, { error: 'A név megadása kötelező.' });
   if (!['active', 'disabled', 'pending'].includes(status)) return sendJson(res, 400, { error: 'Érvénytelen állapot.' });
-  usersDb.prepare('UPDATE users SET nev = ?, status = ? WHERE id = ?').run(cleanNev, status, id);
-  logActivity({ type: 'user_update', ok: true, companyKey: null, nev: 'admin', detail: `${u.email}: név/állapot módosítva (${status})` });
+
+  let detail = `${u.email}: név/állapot módosítva (${status})`;
+  if (u.role === 'owner') {
+    // Cégtulajdonos áthelyezhető egy másik (akár még nem szinkronizált) céghez.
+    const newCegKulcs = companyKeyFromAdoszam(cegKulcs || '');
+    if (newCegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const codes = readAccessCodes();
+    if (!codes[newCegKulcs]) { codes[newCegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(newCegKulcs, '01', 'Fő telephely');
+    usersDb.prepare('UPDATE users SET nev = ?, status = ?, ceg_kulcs = ?, telephely_kod = NULL WHERE id = ?').run(cleanNev, status, newCegKulcs, id);
+    detail += `, cég: ${newCegKulcs}`;
+  } else if (u.role === 'manager') {
+    // Üzletvezető áthelyezhető egy másik cég/telephely párosra.
+    const newCegKulcs = companyKeyFromAdoszam(cegKulcs || '');
+    if (newCegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const newTelephelyKod = normalizeTelephelyKod(telephelyKod || '01');
+    const codes = readAccessCodes();
+    if (!codes[newCegKulcs]) { codes[newCegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(newCegKulcs, '01', 'Fő telephely');
+    if (!listTelephelyek(newCegKulcs).some((t) => t.kod === newTelephelyKod)) {
+      return sendJson(res, 404, { error: 'Ismeretlen telephely ennél a cégnél.' });
+    }
+    usersDb.prepare('UPDATE users SET nev = ?, status = ?, ceg_kulcs = ?, telephely_kod = ? WHERE id = ?').run(cleanNev, status, newCegKulcs, newTelephelyKod, id);
+    detail += `, cég/telephely: ${newCegKulcs}/${newTelephelyKod}`;
+  } else {
+    usersDb.prepare('UPDATE users SET nev = ?, status = ? WHERE id = ?').run(cleanNev, status, id);
+  }
+  logActivity({ type: 'user_update', ok: true, companyKey: null, nev: 'admin', detail });
   sendJson(res, 200, { ok: true });
 });
 
@@ -1757,7 +1783,52 @@ route('DELETE', '/api/stock/receipt', async (req, res, query) => {
   sendJson(res, 200, { ok: true });
 });
 
-// Riasztási küszöb beállítása/törlése cikkre vagy egész csoportra.
+// Teljes készlet nullázása — minden cikkhez egy korrekciós bevételezési
+// tételt szúr be, ami pontosan nullára hozza az egyenleget. A meglévő
+// bevételezési/eladási előzmény TELJES EGÉSZÉBEN megmarad, ez csak egy
+// újabb, jól látható, "Készlet nullázása" jelölésű tételt ad hozzá —
+// nem törli a korábbi adatokat.
+route('POST', '/api/stock/reset', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+
+  const products = all(k, `SELECT megnevezes AS nev, me FROM cikkt WHERE status = 'A'`);
+  const received = stockDb.prepare(
+    `SELECT cikk_nev AS nev, SUM(mennyiseg) AS mennyiseg FROM bevetelezesek WHERE company_key = ? GROUP BY cikk_nev`
+  ).all(k);
+  const receivedMap = new Map(received.map((r) => [r.nev, r.mennyiseg]));
+  const sold = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE ${notStorno('nf')}
+     GROUP BY nt.megnevezes`
+  );
+  const soldMap = new Map(sold.map((r) => [r.nev, r.mennyiseg]));
+
+  const byName = new Map(products.map((p) => [p.nev, p]));
+  for (const r of received) if (!byName.has(r.nev)) byName.set(r.nev, { nev: r.nev, me: null });
+  for (const s of sold) if (!byName.has(s.nev)) byName.set(s.nev, { nev: s.nev, me: null });
+
+  const datum = todayIsoServer();
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const p of byName.values()) {
+    const bevetelezve = receivedMap.get(p.nev) || 0;
+    const eladva = soldMap.get(p.nev) || 0;
+    const keszlet = bevetelezve - eladva;
+    if (keszlet === 0) continue; // már nulla, nincs teendő
+    stockDb.prepare(
+      `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`
+    ).run(k, datum, p.nev, p.me, -keszlet, 'Készlet nullázása (automatikus korrekció)', now);
+    count++;
+  }
+  logActivity({ type: 'stock_reset', ok: true, companyKey: k, nev: session.nev, detail: `${count} cikk készlete nullázva` });
+  sendJson(res, 200, { ok: true, count });
+});
+
+
 route('POST', '/api/stock/threshold', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
