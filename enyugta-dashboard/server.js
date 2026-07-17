@@ -1887,52 +1887,63 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
     diag.ntaknapzaras = get(k, `SELECT COUNT(*) AS total, MIN(targynap) AS minDate, MAX(targynap) AS maxDate FROM ntaknapzaras`);
   } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntaknapzaras: ${e.message}`; }
 
-  const napzarasokRaw = all(k,
-    `SELECT n.id, n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid
-     FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
-    [from, to]
-  );
-  // A napzárás tényleges NTAK-küldési állapotát az nyfej táblából, a hozzá
-  // tartozó nyugták (nyfej.ntakzarasid = ntaknapzaras.id) állapotainak
-  // összesítéséből számoljuk — ez a megbízható, elsődleges forrás.
-  const napzarasok = napzarasokRaw.map((n) => {
-    const stats = all(k,
-      `SELECT IFNULL(ellenorzott,'NULL') AS ellenorzott, COUNT(*) AS cnt
-       FROM nyfej WHERE ntakzarasid = ? GROUP BY ellenorzott`,
-      [n.id]
+  let napzarasok = [];
+  try {
+    const napzarasokRaw = all(k,
+      `SELECT n.id, n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid
+       FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
+      [from, to]
     );
-    let zarasStatusz = null;
-    let zarasNyugtaSzam = 0;
-    if (stats.length) {
-      const byStatus = new Map(stats.map((s) => [s.ellenorzott, s.cnt]));
-      zarasNyugtaSzam = stats.reduce((sum, s) => sum + s.cnt, 0);
-      const sikeres = byStatus.get('TELJESEN_SIKERES') || 0;
-      const hibas = byStatus.get('TELJESEN_HIBAS') || 0;
-      const reszben = byStatus.get('RESZBEN_SIKERES') || byStatus.get('RÉSZBEN_SIKERES') || 0;
-      const ismeretlenVagyNull = byStatus.get('NULL') || 0;
-      if (hibas > 0 || reszben > 0) zarasStatusz = 'RESZBEN_SIKERES';
-      else if (sikeres > 0 && sikeres === zarasNyugtaSzam) zarasStatusz = 'TELJESEN_SIKERES';
-      else if (ismeretlenVagyNull === zarasNyugtaSzam) zarasStatusz = null; // még nincs elküldve
-      else zarasStatusz = 'ISMERETLEN';
-    }
-    const { id, ...rest } = n;
-    return { ...rest, zarasStatusz, zarasNyugtaSzam };
-  });
-  const submissionsByStatus = all(k,
-    `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
-     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY ellenorzott ORDER BY cnt DESC`,
-    [from, to]
-  );
-  const submissionsByType = all(k,
-    `SELECT url, COUNT(*) AS cnt
-     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY url ORDER BY cnt DESC`,
-    [from, to]
-  );
-  const recent = all(k,
-    `SELECT url, sikeres, uuid, kulddate, elldate, ellenorzott
-     FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
-    [from, to]
-  );
+    // A napzárás tényleges NTAK-küldési állapotát az nyfej táblából, a hozzá
+    // tartozó nyugták (nyfej.ntakzarasid = ntaknapzaras.id) állapotainak
+    // összesítéséből számoljuk — ez a megbízható, elsődleges forrás.
+    napzarasok = napzarasokRaw.map((n) => {
+      let stats = [];
+      try {
+        stats = all(k,
+          `SELECT IFNULL(ellenorzott,'NULL') AS ellenorzott, COUNT(*) AS cnt
+           FROM nyfej WHERE ntakzarasid = ? GROUP BY ellenorzott`,
+          [n.id]
+        );
+      } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `napzárás-státusz (${n.targynap}): ${e.message}`; }
+      let zarasStatusz = null;
+      let zarasNyugtaSzam = 0;
+      if (stats.length) {
+        const byStatus = new Map(stats.map((s) => [s.ellenorzott, s.cnt]));
+        zarasNyugtaSzam = stats.reduce((sum, s) => sum + s.cnt, 0);
+        const sikeres = byStatus.get('TELJESEN_SIKERES') || 0;
+        const hibas = byStatus.get('TELJESEN_HIBAS') || 0;
+        const reszben = byStatus.get('RESZBEN_SIKERES') || byStatus.get('RÉSZBEN_SIKERES') || 0;
+        const ismeretlenVagyNull = byStatus.get('NULL') || 0;
+        if (hibas > 0 || reszben > 0) zarasStatusz = 'RESZBEN_SIKERES';
+        else if (sikeres > 0 && sikeres === zarasNyugtaSzam) zarasStatusz = 'TELJESEN_SIKERES';
+        else if (ismeretlenVagyNull === zarasNyugtaSzam) zarasStatusz = null; // még nincs elküldve
+        else zarasStatusz = 'ISMERETLEN';
+      }
+      const { id, ...rest } = n;
+      return { ...rest, zarasStatusz, zarasNyugtaSzam };
+    });
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `napzárás lekérdezés: ${e.message}`; }
+
+  let submissionsByStatus = [], submissionsByType = [], recent = [];
+  try {
+    submissionsByStatus = all(k,
+      `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY ellenorzott ORDER BY cnt DESC`,
+      [from, to]
+    );
+    submissionsByType = all(k,
+      `SELECT url, COUNT(*) AS cnt
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY url ORDER BY cnt DESC`,
+      [from, to]
+    );
+    recent = all(k,
+      `SELECT url, sikeres, uuid, kulddate, elldate, ellenorzott
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
+      [from, to]
+    );
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms lekérdezés: ${e.message}`; }
+
   sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent, diag });
 });
 

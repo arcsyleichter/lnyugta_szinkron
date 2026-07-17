@@ -1530,7 +1530,7 @@ async function loadNtakView() {
   const diagCard = document.getElementById('ntak-diag-card');
   const diagContent = document.getElementById('ntak-diag-content');
   const noDataAtAll = !data.submissionsByStatus.length && !data.napzarasok.length && !data.recent.length;
-  if (noDataAtAll && data.diag) {
+  if ((noDataAtAll || (data.diag && data.diag.error)) && data.diag) {
     const d = data.diag;
     const rows = [];
     rows.push(`<b>nyfej</b> (nyugták) tábla: ${d.nyfej ? `${d.nyfej.total} sor, dátumtartomány ${d.nyfej.minDate || '—'} – ${d.nyfej.maxDate || '—'}, ebből ${d.nyfej.vanZarasid} sorban van kitöltve az "ntakzarasid", ${d.nyfej.vanEllenorzott} sorban az "ellenorzott" mező` : '(nem sikerült lekérdezni)'}`);
