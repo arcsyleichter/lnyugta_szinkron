@@ -1867,6 +1867,26 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
   const k = session.companyKey;
   const { from, to } = resolveRange(query);
 
+  // Diagnosztika — MINDIG kiszámoljuk, függetlenül a kiválasztott
+  // időszaktól, hogy üres eredmény esetén a felület meg tudja mutatni,
+  // MIÉRT nincs adat (nincs egyáltalán szinkronizált NTAK-adat, vagy
+  // csak épp ezen az időszakon kívül van) — minden lekérdezés külön
+  // try/catch-ben, hogy egy hiányzó/eltérő szerkezetű tábla se
+  // akassza meg a többit.
+  const diag = { nyfej: null, ntakrms: null, ntaknapzaras: null, error: null };
+  try {
+    diag.nyfej = get(k, `SELECT COUNT(*) AS total, MIN(keltdat) AS minDate, MAX(keltdat) AS maxDate,
+      SUM(CASE WHEN ntakzarasid IS NOT NULL THEN 1 ELSE 0 END) AS vanZarasid,
+      SUM(CASE WHEN ellenorzott IS NOT NULL THEN 1 ELSE 0 END) AS vanEllenorzott
+      FROM nyfej`);
+  } catch (e) { diag.error = `nyfej: ${e.message}`; }
+  try {
+    diag.ntakrms = get(k, `SELECT COUNT(*) AS total, MIN(date(kulddate)) AS minDate, MAX(date(kulddate)) AS maxDate FROM ntakrms`);
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms: ${e.message}`; }
+  try {
+    diag.ntaknapzaras = get(k, `SELECT COUNT(*) AS total, MIN(targynap) AS minDate, MAX(targynap) AS maxDate FROM ntaknapzaras`);
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntaknapzaras: ${e.message}`; }
+
   const napzarasokRaw = all(k,
     `SELECT n.id, n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid
      FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
@@ -1913,7 +1933,7 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
      FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
     [from, to]
   );
-  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent });
+  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent, diag });
 });
 
 route('GET', '/api/receipt', async (req, res, query) => {

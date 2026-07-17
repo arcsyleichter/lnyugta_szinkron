@@ -1527,6 +1527,27 @@ async function loadNtakView() {
   const { from, to } = state.range;
   const data = await api(`/api/ntak/summary?from=${from}&to=${to}`);
 
+  const diagCard = document.getElementById('ntak-diag-card');
+  const diagContent = document.getElementById('ntak-diag-content');
+  const noDataAtAll = !data.submissionsByStatus.length && !data.napzarasok.length && !data.recent.length;
+  if (noDataAtAll && data.diag) {
+    const d = data.diag;
+    const rows = [];
+    rows.push(`<b>nyfej</b> (nyugták) tábla: ${d.nyfej ? `${d.nyfej.total} sor, dátumtartomány ${d.nyfej.minDate || '—'} – ${d.nyfej.maxDate || '—'}, ebből ${d.nyfej.vanZarasid} sorban van kitöltve az "ntakzarasid", ${d.nyfej.vanEllenorzott} sorban az "ellenorzott" mező` : '(nem sikerült lekérdezni)'}`);
+    rows.push(`<b>ntakrms</b> (küldési napló) tábla: ${d.ntakrms ? `${d.ntakrms.total} sor, dátumtartomány ${d.ntakrms.minDate || '—'} – ${d.ntakrms.maxDate || '—'}` : '(nem sikerült lekérdezni)'}`);
+    rows.push(`<b>ntaknapzaras</b> (napi nyitás-zárás) tábla: ${d.ntaknapzaras ? `${d.ntaknapzaras.total} sor, dátumtartomány ${d.ntaknapzaras.minDate || '—'} – ${d.ntaknapzaras.maxDate || '—'}` : '(nem sikerült lekérdezni)'}`);
+    if (d.error) rows.push(`<span style="color:var(--brick);">Hiba lekérdezés közben: ${escapeHtml(d.error)}</span>`);
+    if (d.ntakrms && d.ntakrms.total > 0 && (d.ntakrms.maxDate < from || d.ntakrms.minDate > to)) {
+      rows.push(`<b>→ Van adat, de a kiválasztott időszakon (${from} – ${to}) kívül esik — próbálj más dátumtartományt (pl. "Előző év" helyett "Idén" vagy "Egyedi tartomány").</b>`);
+    } else if ((!d.ntakrms || d.ntakrms.total === 0) && (!d.nyfej || d.nyfej.vanEllenorzott === 0)) {
+      rows.push(`<b>→ Ennek a telephelynek egyáltalán nem érkezett még NTAK-adatküldési adat az androidos szinkronon keresztül — ezt androidos oldalon érdemes ellenőrizni.</b>`);
+    }
+    diagContent.innerHTML = rows.join('<br><br>');
+    diagCard.hidden = false;
+  } else {
+    diagCard.hidden = true;
+  }
+
   const statusBox = document.getElementById('ntak-status-summary');
   if (!data.submissionsByStatus.length) {
     statusBox.innerHTML = '<div class="empty-state">Nincs NTAK adatküldés a kiválasztott időszakban.</div>';
