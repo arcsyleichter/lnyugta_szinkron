@@ -273,6 +273,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   .topbar{ gap:10px; }
   .date-range, .group-toggle{ width:100%; }
   .range-select{ display:none; }
+  .range-select.is-mobile-visible{ display:block !important; width:100%; margin:8px 0 4px; }
   .range-scroll{ display:flex; gap:8px; overflow-x:auto; padding-bottom:2px; margin:2px 0 4px; }
   .range-scroll::-webkit-scrollbar{ display:none; }
   .range-pill{

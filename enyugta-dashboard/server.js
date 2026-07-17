@@ -1868,8 +1868,16 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
   const { from, to } = resolveRange(query);
 
   const napzarasok = all(k,
-    `SELECT targynap, nyitas, zaras, borravalo, naptipus, uuid
-     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? ORDER BY targynap DESC`,
+    `SELECT n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid,
+            COALESCE(
+              (SELECT r.ellenorzott FROM ntakrms r WHERE r.url = 'napi-zaras' AND r.uuid = n.uuid ORDER BY r.kulddate DESC LIMIT 1),
+              (SELECT r.ellenorzott FROM ntakrms r WHERE r.url = 'napi-zaras' AND date(r.kulddate) = n.targynap ORDER BY r.kulddate DESC LIMIT 1)
+            ) AS zarasStatusz,
+            COALESCE(
+              (SELECT r.kulddate FROM ntakrms r WHERE r.url = 'napi-zaras' AND r.uuid = n.uuid ORDER BY r.kulddate DESC LIMIT 1),
+              (SELECT r.kulddate FROM ntakrms r WHERE r.url = 'napi-zaras' AND date(r.kulddate) = n.targynap ORDER BY r.kulddate DESC LIMIT 1)
+            ) AS zarasKuldve
+     FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
     [from, to]
   );
   const submissionsByStatus = all(k,

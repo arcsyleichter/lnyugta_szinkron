@@ -1057,10 +1057,15 @@ document.querySelectorAll('.range-pill[data-range-value]').forEach((pill) => {
   pill.addEventListener('click', () => {
     document.querySelectorAll('.range-pill').forEach((p) => p.classList.remove('is-active'));
     pill.classList.add('is-active');
+    document.getElementById('range-select').classList.remove('is-mobile-visible');
     const select = document.getElementById('range-select');
     select.value = pill.dataset.rangeValue;
     select.dispatchEvent(new Event('change'));
   });
+});
+document.getElementById('range-pill-more').addEventListener('click', () => {
+  document.querySelectorAll('.range-pill').forEach((p) => p.classList.remove('is-active'));
+  document.getElementById('range-select').classList.toggle('is-mobile-visible');
 });
 
 
@@ -1474,18 +1479,22 @@ async function loadNtakView() {
   const napTbody = document.querySelector('#ntak-napzaras-table tbody');
   napTbody.innerHTML = '';
   if (!data.napzarasok.length) {
-    napTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs napi nyitás-zárás adat a kiválasztott időszakban.</td></tr>';
+    napTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nincs napi nyitás-zárás adat a kiválasztott időszakban.</td></tr>';
   } else {
     data.napzarasok.forEach((r) => {
       const tr = document.createElement('tr');
       const nyitasIdo = r.nyitas ? r.nyitas.slice(11, 16) : '—';
       const zarasIdo = r.zaras ? r.zaras.slice(11, 16) : '—';
+      const zarasStatusz = r.zarasStatusz
+        ? `${ntakStatusBadge(r.zarasStatusz)}${r.zarasKuldve ? `<div class="muted" style="font-size:11px;margin-top:3px;">${fmtDateTime(r.zarasKuldve)}</div>` : ''}`
+        : '<span class="ntak-badge pending">Nincs adatküldés</span>';
       tr.innerHTML = `
         <td>${fmtDate(r.targynap)}</td>
         <td>${nyitasIdo}</td>
         <td>${zarasIdo}</td>
         <td>${escapeHtml(r.naptipus || '—')}</td>
-        <td class="num">${fmtHuf(r.borravalo)}</td>`;
+        <td class="num">${fmtHuf(r.borravalo)}</td>
+        <td>${zarasStatusz}</td>`;
       napTbody.appendChild(tr);
     });
   }

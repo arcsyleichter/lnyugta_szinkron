@@ -2,7 +2,7 @@
 <html lang="hu">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>L-NYUGTA — élő értékesítési nézegető</title>
 <link rel="icon" type="image/svg+xml" href="/img/logo.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -283,6 +283,7 @@
         <button class="range-pill" data-range-value="90">90 nap</button>
         <button class="range-pill" data-range-value="week-td">E héten</button>
         <button class="range-pill" data-range-value="month-td">E hónapban</button>
+        <button class="range-pill" id="range-pill-more">Egyéb… ⌄</button>
       </div>
       <span class="range-label" id="range-label"></span>
       <button class="btn-refresh" id="refresh-btn" title="Adatok frissítése">
@@ -561,7 +562,7 @@
         <div class="card-title">Napi nyitás–zárás</div>
         <div class="table-scroll">
           <table class="data-table" id="ntak-napzaras-table">
-          <thead><tr><th>Nap</th><th>Nyitás</th><th>Zárás</th><th>Nap típusa</th><th class="td-right">Borravaló</th></tr></thead>
+          <thead><tr><th>Nap</th><th>Nyitás</th><th>Zárás</th><th>Nap típusa</th><th class="td-right">Borravaló</th><th>NTAK napzárás állapota</th></tr></thead>
           <tbody></tbody>
           </table>
         </div>
