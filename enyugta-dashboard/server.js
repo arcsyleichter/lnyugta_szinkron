@@ -1867,19 +1867,37 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
   const k = session.companyKey;
   const { from, to } = resolveRange(query);
 
-  const napzarasok = all(k,
-    `SELECT n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid,
-            COALESCE(
-              (SELECT r.ellenorzott FROM ntakrms r WHERE r.url = 'napi-zaras' AND r.uuid = n.uuid ORDER BY r.kulddate DESC LIMIT 1),
-              (SELECT r.ellenorzott FROM ntakrms r WHERE r.url = 'napi-zaras' AND date(r.kulddate) = n.targynap ORDER BY r.kulddate DESC LIMIT 1)
-            ) AS zarasStatusz,
-            COALESCE(
-              (SELECT r.kulddate FROM ntakrms r WHERE r.url = 'napi-zaras' AND r.uuid = n.uuid ORDER BY r.kulddate DESC LIMIT 1),
-              (SELECT r.kulddate FROM ntakrms r WHERE r.url = 'napi-zaras' AND date(r.kulddate) = n.targynap ORDER BY r.kulddate DESC LIMIT 1)
-            ) AS zarasKuldve
+  const napzarasokRaw = all(k,
+    `SELECT n.id, n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid
      FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
     [from, to]
   );
+  // A napzárás tényleges NTAK-küldési állapotát az nyfej táblából, a hozzá
+  // tartozó nyugták (nyfej.ntakzarasid = ntaknapzaras.id) állapotainak
+  // összesítéséből számoljuk — ez a megbízható, elsődleges forrás.
+  const napzarasok = napzarasokRaw.map((n) => {
+    const stats = all(k,
+      `SELECT IFNULL(ellenorzott,'NULL') AS ellenorzott, COUNT(*) AS cnt
+       FROM nyfej WHERE ntakzarasid = ? GROUP BY ellenorzott`,
+      [n.id]
+    );
+    let zarasStatusz = null;
+    let zarasNyugtaSzam = 0;
+    if (stats.length) {
+      const byStatus = new Map(stats.map((s) => [s.ellenorzott, s.cnt]));
+      zarasNyugtaSzam = stats.reduce((sum, s) => sum + s.cnt, 0);
+      const sikeres = byStatus.get('TELJESEN_SIKERES') || 0;
+      const hibas = byStatus.get('TELJESEN_HIBAS') || 0;
+      const reszben = byStatus.get('RESZBEN_SIKERES') || byStatus.get('RÉSZBEN_SIKERES') || 0;
+      const ismeretlenVagyNull = byStatus.get('NULL') || 0;
+      if (hibas > 0 || reszben > 0) zarasStatusz = 'RESZBEN_SIKERES';
+      else if (sikeres > 0 && sikeres === zarasNyugtaSzam) zarasStatusz = 'TELJESEN_SIKERES';
+      else if (ismeretlenVagyNull === zarasNyugtaSzam) zarasStatusz = null; // még nincs elküldve
+      else zarasStatusz = 'ISMERETLEN';
+    }
+    const { id, ...rest } = n;
+    return { ...rest, zarasStatusz, zarasNyugtaSzam };
+  });
   const submissionsByStatus = all(k,
     `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
      FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY ellenorzott ORDER BY cnt DESC`,
@@ -1905,7 +1923,7 @@ route('GET', '/api/receipt', async (req, res, query) => {
   const bsz = query.bsz;
   if (!bsz) return sendJson(res, 400, { error: 'bsz paraméter kötelező' });
   const header = get(k,
-    `SELECT bsz, keltdat, fizmod, bruttokp, bruttoafr, bruttokartya, sznev, szadoszam, storno, stornozott
+    `SELECT bsz, keltdat, umdate, fizmod, bruttokp, bruttoafr, bruttokartya, sznev, szadoszam, storno, stornozott
      FROM nyfej WHERE bsz = ?`, [bsz]
   );
   if (!header) return sendJson(res, 404, { error: 'Nyugta nem található' });

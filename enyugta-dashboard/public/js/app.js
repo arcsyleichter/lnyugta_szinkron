@@ -1222,6 +1222,51 @@ function escapeHtml(s) {
 }
 
 /* ============================================================
+   Táblázat-rendezés — általános, bármelyik táblázatra ráépíthető.
+   Az oszlop fejlécére kattintva növekvő/csökkenő sorrendbe rendezi a
+   sorokat, a cella szöveges tartalma alapján (számfelismeréssel).
+   Ha egy fejléc ne legyen rendezhető (pl. csak gombokat tartalmaz),
+   adj neki data-no-sort attribútumot.
+   ============================================================ */
+function makeSortableTable(tableId) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const thead = table.querySelector('thead');
+  if (!thead) return;
+  thead.querySelectorAll('th').forEach((th, colIndex) => {
+    if (th.dataset.noSort !== undefined || !th.textContent.trim()) return;
+    th.classList.add('sortable-th');
+    if (th.dataset.sortBound) return;
+    th.dataset.sortBound = '1';
+    th.addEventListener('click', () => sortTableByColumn(table, colIndex, th));
+  });
+}
+function sortTableByColumn(table, colIndex, th) {
+  const tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  if (rows.length < 2) return;
+  const dir = th.dataset.sortDir === 'asc' ? 'desc' : 'asc';
+  table.querySelectorAll('th').forEach((h) => { delete h.dataset.sortDir; h.classList.remove('sorted-asc', 'sorted-desc'); });
+  th.dataset.sortDir = dir;
+  th.classList.add(dir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+
+  const getRaw = (row) => {
+    const cell = row.children[colIndex];
+    return cell ? cell.textContent.trim() : '';
+  };
+  rows.sort((a, b) => {
+    const va = getRaw(a), vb = getRaw(b);
+    const na = parseFloat(va.replace(/[^\d,.-]/g, '').replace(',', '.'));
+    const nb = parseFloat(vb.replace(/[^\d,.-]/g, '').replace(',', '.'));
+    const bothNumeric = /\d/.test(va) && /\d/.test(vb) && !isNaN(na) && !isNaN(nb);
+    const cmp = bothNumeric ? na - nb : va.localeCompare(vb, 'hu');
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  rows.forEach((r) => tbody.appendChild(r));
+}
+
+/* ============================================================
    SVG vonaldiagram — külső könyvtár nélkül
    ============================================================ */
 function renderLineChart(container, points) {
@@ -1252,9 +1297,17 @@ function renderLineChart(container, points) {
       labelsSvg += `<text x="${x(i)}" y="${H - 8}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="Inter">${shortDate(p.d)}</text>`;
     }
   });
-  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.revenue)}" r="2.6" fill="#3D71A8"><title>${shortDate(p.d)}: ${fmtHuf(p.revenue)}</title></circle>`).join('');
+  // Minden ponthoz egy nagyobb, láthatatlan érintési célterület is tartozik
+  // (r=12) a kis, látható pont (r=2.6) körül — mobilon ujjal sokkal
+  // könnyebb eltalálni, mint a puszta 2.6px sugarú kört.
+  const dots = points.map((p, i) => `
+    <g class="chart-dot-group" data-idx="${i}" style="cursor:pointer;">
+      <circle cx="${x(i)}" cy="${y(p.revenue)}" r="12" fill="transparent"/>
+      <circle cx="${x(i)}" cy="${y(p.revenue)}" r="2.6" fill="#3D71A8" class="chart-dot-visible"/>
+    </g>`).join('');
 
   container.innerHTML = `
+    <div class="chart-tooltip" id="chart-tooltip-${container.id || 'x'}" hidden></div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
       ${gridSvg}
       <path d="${area}" fill="rgba(90,147,201,0.18)" stroke="none"/>
@@ -1262,6 +1315,30 @@ function renderLineChart(container, points) {
       ${dots}
       ${labelsSvg}
     </svg>`;
+
+  const tooltip = container.querySelector('.chart-tooltip');
+  container.querySelectorAll('.chart-dot-group').forEach((g) => {
+    g.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const p = points[Number(g.dataset.idx)];
+      const wasActive = g.classList.contains('is-active-point');
+      container.querySelectorAll('.chart-dot-group').forEach((gg) => gg.classList.remove('is-active-point'));
+      if (wasActive) { tooltip.hidden = true; return; }
+      g.classList.add('is-active-point');
+      tooltip.innerHTML = `<strong>${escapeHtml(shortDate(p.d))}</strong><br>${fmtHuf(p.revenue)}`;
+      const cx = Number(g.querySelector('.chart-dot-visible').getAttribute('cx'));
+      const cy = Number(g.querySelector('.chart-dot-visible').getAttribute('cy'));
+      const leftPct = (cx / W) * 100;
+      const topPx = Math.max(0, (cy / H) * H - 8);
+      tooltip.style.left = `${leftPct}%`;
+      tooltip.style.top = `${topPx}px`;
+      tooltip.hidden = false;
+    });
+  });
+  container.addEventListener('click', () => {
+    tooltip.hidden = true;
+    container.querySelectorAll('.chart-dot-group').forEach((gg) => gg.classList.remove('is-active-point'));
+  });
 }
 function shortDate(d) {
   if (/^\d{2}$/.test(d)) return `${d}:00`; // óránkénti bontás — "14" -> "14:00"
@@ -1333,6 +1410,8 @@ async function loadRevenueView() {
     tr.innerHTML = `<td>${escapeHtml(r.afakod)}</td><td class="num">${fmtHuf(r.netto)}</td><td class="num">${fmtHuf(r.afa)}</td><td class="num">${fmtHuf(r.brutto)}</td>`;
     vatBody.appendChild(tr);
   });
+  makeSortableTable('fizmod-table');
+  makeSortableTable('vat-table');
 }
 
 /* ============================================================
@@ -1363,6 +1442,7 @@ async function loadProductsView() {
   document.getElementById('products-count').textContent = `${data.total} termék · ${offset + 1}–${Math.min(offset + limit, data.total)}`;
   document.getElementById('products-prev').disabled = offset === 0;
   document.getElementById('products-next').disabled = offset + limit >= data.total;
+  makeSortableTable('products-table');
 }
 
 /* ============================================================
@@ -1404,6 +1484,7 @@ async function loadReceiptsView() {
   document.getElementById('receipts-count').textContent = `${data.total} nyugta · ${offset + 1}–${Math.min(offset + limit, data.total)}`;
   document.getElementById('receipts-prev').disabled = offset === 0;
   document.getElementById('receipts-next').disabled = offset + limit >= data.total;
+  makeSortableTable('receipts-table');
 }
 
 async function openReceiptModal(bsz) {
@@ -1413,7 +1494,7 @@ async function openReceiptModal(bsz) {
   const total = data.header.bruttokp + data.header.bruttoafr + data.header.bruttokartya;
   content.innerHTML = `
     <h3>${escapeHtml(data.header.bsz)}</h3>
-    <div class="receipt-meta">${fmtDate(data.header.keltdat)} · ${names[data.header.fizmod] || data.header.fizmod}</div>
+    <div class="receipt-meta">${fmtDate(data.header.keltdat)}${data.header.umdate ? ' · ' + data.header.umdate.slice(11, 16) : ''} · ${names[data.header.fizmod] || data.header.fizmod}</div>
     ${data.items.map((it) => `
       <div class="receipt-line">
         <span>${it.menny} × ${escapeHtml(it.megnevezes)}</span>
@@ -1486,7 +1567,7 @@ async function loadNtakView() {
       const nyitasIdo = r.nyitas ? r.nyitas.slice(11, 16) : '—';
       const zarasIdo = r.zaras ? r.zaras.slice(11, 16) : '—';
       const zarasStatusz = r.zarasStatusz
-        ? `${ntakStatusBadge(r.zarasStatusz)}${r.zarasKuldve ? `<div class="muted" style="font-size:11px;margin-top:3px;">${fmtDateTime(r.zarasKuldve)}</div>` : ''}`
+        ? `${ntakStatusBadge(r.zarasStatusz)}${r.zarasNyugtaSzam ? `<div class="muted" style="font-size:11px;margin-top:3px;">${r.zarasNyugtaSzam} nyugta alapján</div>` : ''}`
         : '<span class="ntak-badge pending">Nincs adatküldés</span>';
       tr.innerHTML = `
         <td>${fmtDate(r.targynap)}</td>
@@ -1498,6 +1579,8 @@ async function loadNtakView() {
       napTbody.appendChild(tr);
     });
   }
+  makeSortableTable('ntak-submissions-table');
+  makeSortableTable('ntak-napzaras-table');
 }
 
 /* ============================================================
@@ -1582,6 +1665,7 @@ async function loadStockView() {
       inp.addEventListener('change', () => saveThreshold('cikk', inp.dataset.nev, inp.value, inp));
     });
   }
+  makeSortableTable('stock-table');
 }
 
 let stockSearchTimer = null;
@@ -1621,6 +1705,7 @@ async function loadStockReceiptLog() {
       } catch (e) { alert('Nem sikerült törölni: ' + e.message); }
     });
   });
+  makeSortableTable('stock-log-table');
 }
 
 document.getElementById('stock-receipt-form').addEventListener('submit', async (e) => {
@@ -1766,6 +1851,8 @@ async function loadMasterdataView() {
       chTbody.appendChild(tr);
     });
   }
+  makeSortableTable('masterdata-table');
+  makeSortableTable('masterdata-changes-table');
 }
 
 let masterdataSearchTimer = null;
