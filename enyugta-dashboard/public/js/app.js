@@ -1001,6 +1001,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     document.querySelectorAll('.view').forEach((v) => { v.hidden = v.dataset.view !== view; });
     document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt' || view === 'masterdata');
     if (view === 'revenue') loadRevenueView();
+    if (view === 'compare') loadCompareView();
     if (view === 'products') loadProductsView(true);
     if (view === 'masterdata') loadMasterdataView();
     if (view === 'receipts') loadReceiptsView(true);
@@ -1133,6 +1134,7 @@ async function refreshAll(spin) {
     await loadOverview();
     const activeView = document.querySelector('.nav-item.is-active').dataset.view;
     if (activeView === 'revenue') await loadRevenueView();
+    if (activeView === 'compare') await loadCompareView();
     if (activeView === 'products') await loadProductsView(false);
     if (activeView === 'receipts') await loadReceiptsView(false);
     if (activeView === 'ntak') await loadNtakView();
@@ -1373,6 +1375,147 @@ document.querySelectorAll('#group-toggle .chip').forEach((chip) => {
     loadRevenueView();
   });
 });
+
+let compareState = { focus: 'prev-week' };
+
+document.getElementById('compare-type-row').querySelectorAll('.chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#compare-type-row .chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    compareState.focus = chip.dataset.compare;
+    loadCompareView();
+  });
+});
+
+async function loadCompareView() {
+  const { from, to } = state.range;
+  const data = await api(`/api/compare?from=${from}&to=${to}&compare=${compareState.focus}`);
+
+  // --- Áttekintő kártyák, mind a négy viszonyítási alaphoz ---
+  const grid = document.getElementById('compare-overview-grid');
+  grid.innerHTML = Object.entries(data.overview).map(([key, o]) => {
+    const isFocus = key === data.focus;
+    const trendClass = o.revenueDeltaPct >= 0 ? 'up' : 'down';
+    const arrow = o.revenueDeltaPct >= 0 ? '▲' : '▼';
+    return `
+      <div class="compare-overview-card${isFocus ? ' is-focus' : ''}">
+        <div class="compare-overview-label">${escapeHtml(o.label)}</div>
+        <div class="compare-overview-value">${fmtHuf(o.revenue)}</div>
+        <div class="compare-overview-delta ${trendClass}">${arrow} ${Math.abs(o.revenueDeltaPct)}% a jelenlegi ${fmtHuf(data.current.revenue)}-hoz képest</div>
+      </div>`;
+  }).join('');
+
+  // --- Napi-index illesztett trend (két vonal, felirat az adott viszonyítási alappal) ---
+  document.getElementById('compare-trend-title').textContent = `Napi trend — jelenlegi időszak vs. ${data.overview[data.focus].label.toLowerCase()}`;
+  document.getElementById('compare-trend-sub').textContent =
+    `${fmtDate(data.from)} – ${fmtDate(data.to)} (kék) vs. ${fmtDate(data.focusPeriod.from)} – ${fmtDate(data.focusPeriod.to)} (szürke) — a napok sorrendje szerint illesztve, nem naptári dátum szerint`;
+  renderComparisonChart(document.getElementById('compare-trend-chart'), data.curDaily, data.focusDaily);
+
+  // --- Hét napjai szerinti oszlopdiagram ---
+  renderWeekdayChart(document.getElementById('compare-weekday-chart'), data.curWeekday, data.focusWeekday, data.overview[data.focus].label);
+
+  // --- Legnagyobb mozgások ---
+  const gainersBox = document.getElementById('compare-gainers-list');
+  gainersBox.innerHTML = data.topGainers.length
+    ? data.topGainers.map((m) => `
+        <div class="compare-mover-row">
+          <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
+          <span class="compare-mover-delta up">▲ ${fmtHuf(m.deltaRevenue)}</span>
+        </div>`).join('')
+    : '<div class="empty-state">Nincs kiugró növekedés.</div>';
+  const losersBox = document.getElementById('compare-losers-list');
+  losersBox.innerHTML = data.topLosers.length
+    ? data.topLosers.map((m) => `
+        <div class="compare-mover-row">
+          <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
+          <span class="compare-mover-delta down">▼ ${fmtHuf(Math.abs(m.deltaRevenue))}</span>
+        </div>`).join('')
+    : '<div class="empty-state">Nincs kiugró visszaesés.</div>';
+}
+
+/* Két vonalat egymásra illesztő SVG-diagram — a jelenlegi időszakot és a
+   kiválasztott viszonyítási alapot napok sorrendje szerint (nem naptári
+   dátum szerint) veti egybe, hogy a görbék ALAKJA közvetlenül összevethető
+   legyen. */
+function renderComparisonChart(container, curPoints, focusPoints) {
+  container.innerHTML = '';
+  if (!curPoints.length) { container.innerHTML = '<div class="empty-state">Nincs megjeleníthető adat.</div>'; return; }
+  const W = container.clientWidth || 560, H = 280;
+  const padL = 54, padR = 16, padT = 16, padB = 28;
+  const n = Math.max(curPoints.length, focusPoints.length);
+  const max = Math.max(...curPoints.map((p) => p.revenue), ...focusPoints.map((p) => p.revenue), 1);
+  const stepX = (W - padL - padR) / Math.max(n - 1, 1);
+  const x = (i) => padL + i * stepX;
+  const y = (v) => padT + (H - padT - padB) * (1 - v / max);
+  const pathOf = (pts) => pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.revenue).toFixed(1)}`).join(' ');
+
+  let gridSvg = '';
+  for (let g = 0; g <= 4; g++) {
+    const gy = padT + ((H - padT - padB) / 4) * g;
+    const val = Math.round(max * (1 - g / 4));
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#D3E6F5" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+  }
+  const labelEvery = Math.max(Math.ceil(n / 7), 1);
+  let labelsSvg = '';
+  for (let i = 0; i < n; i++) {
+    if (i % labelEvery === 0 || i === n - 1) {
+      labelsSvg += `<text x="${x(i)}" y="${H - 8}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="Inter">${i + 1}. nap</text>`;
+    }
+  }
+
+  container.innerHTML = `
+    <div class="chart-tooltip" id="chart-tooltip-cmp" hidden></div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      ${gridSvg}
+      <path d="${pathOf(focusPoints)}" fill="none" stroke="#9AA9B8" stroke-width="2" stroke-dasharray="5,4" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${pathOf(curPoints)}" fill="none" stroke="#3D71A8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      ${labelsSvg}
+    </svg>
+    <div class="chart-legend">
+      <span><i style="background:#3D71A8;"></i>Jelenlegi időszak</span>
+      <span><i style="background:#9AA9B8;"></i>Viszonyítási alap</span>
+    </div>`;
+}
+
+/* Csoportosított oszlopdiagram — hét napja szerint, 2 oszlop naponta
+   (jelenlegi vs. viszonyítási alap). */
+function renderWeekdayChart(container, curWd, focusWd, focusLabel) {
+  container.innerHTML = '';
+  const W = container.clientWidth || 560, H = 220;
+  const padL = 54, padR = 16, padT = 16, padB = 30;
+  const max = Math.max(...curWd.map((w) => w.avgRevenue), ...focusWd.map((w) => w.avgRevenue), 1);
+  const groupW = (W - padL - padR) / 7;
+  const barW = groupW * 0.32;
+  let bars = '';
+  let labels = '';
+  const order = [1, 2, 3, 4, 5, 6, 0]; // hétfőtől induljon, ne vasárnappal
+  order.forEach((wd, gi) => {
+    const cur = curWd.find((w) => w.wd === wd);
+    const foc = focusWd.find((w) => w.wd === wd);
+    const gx = padL + gi * groupW;
+    const curH = (H - padT - padB) * (cur.avgRevenue / max);
+    const focH = (H - padT - padB) * (foc.avgRevenue / max);
+    bars += `<rect x="${(gx + groupW / 2 - barW - 2).toFixed(1)}" y="${(H - padB - curH).toFixed(1)}" width="${barW}" height="${curH.toFixed(1)}" fill="#3D71A8" rx="3"/>`;
+    bars += `<rect x="${(gx + groupW / 2 + 2).toFixed(1)}" y="${(H - padB - focH).toFixed(1)}" width="${barW}" height="${focH.toFixed(1)}" fill="#9AA9B8" rx="3"/>`;
+    labels += `<text x="${(gx + groupW / 2).toFixed(1)}" y="${H - 10}" font-size="10.5" fill="#6C8299" text-anchor="middle" font-family="Inter">${cur.label.slice(0, 3)}</text>`;
+  });
+  let gridSvg = '';
+  for (let g = 0; g <= 3; g++) {
+    const gy = padT + ((H - padT - padB) / 3) * g;
+    const val = Math.round(max * (1 - g / 3));
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+  }
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      ${gridSvg}${bars}${labels}
+    </svg>
+    <div class="chart-legend">
+      <span><i style="background:#3D71A8;"></i>Jelenlegi időszak (napi átlag)</span>
+      <span><i style="background:#9AA9B8;"></i>${escapeHtml(focusLabel)} (napi átlag)</span>
+    </div>`;
+}
 
 async function loadRevenueView() {
   const { from, to } = state.range;
@@ -1708,7 +1851,7 @@ async function loadStockReceiptLog() {
   const logTbody = document.querySelector('#stock-log-table tbody');
   logTbody.innerHTML = '';
   if (!receipts.items.length) {
-    logTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Még nincs rögzített bevételezés.</td></tr>';
+    logTbody.innerHTML = '<tr><td colspan="7" class="empty-state">Még nincs rögzített bevételezés.</td></tr>';
     return;
   }
   receipts.items.forEach((r) => {
@@ -1719,6 +1862,7 @@ async function loadStockReceiptLog() {
       <td class="num">${r.mennyiseg} ${escapeHtml(r.me || '')}</td>
       <td>${escapeHtml(r.szallito || '—')}</td>
       <td>${escapeHtml(r.megjegyzes || '—')}</td>
+      <td data-no-sort>${r.szamlaFajl ? `<a href="/api/stock/receipt-file?id=${r.id}" target="_blank" class="btn-tiny">📎 Számla</a>` : '—'}</td>
       <td><button class="btn-delete-receipt" data-id="${r.id}" title="Törlés">✕</button></td>`;
     logTbody.appendChild(tr);
   });
@@ -1732,6 +1876,28 @@ async function loadStockReceiptLog() {
     });
   });
   makeSortableTable('stock-log-table');
+}
+
+document.getElementById('stock-szamla-input').addEventListener('change', () => {
+  const file = document.getElementById('stock-szamla-input').files[0];
+  const preview = document.getElementById('stock-szamla-preview');
+  if (!file) { preview.hidden = true; preview.innerHTML = ''; return; }
+  if (file.type.startsWith('image/')) {
+    const url = URL.createObjectURL(file);
+    preview.innerHTML = `<img src="${url}" alt="Számla előnézet">`;
+  } else {
+    preview.innerHTML = `<span class="stock-szamla-filename">📄 ${escapeHtml(file.name)}</span>`;
+  }
+  preview.hidden = false;
+});
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Nem sikerült beolvasni a fájlt.'));
+    reader.readAsDataURL(file);
+  });
 }
 
 document.getElementById('stock-receipt-form').addEventListener('submit', async (e) => {
@@ -1750,10 +1916,18 @@ document.getElementById('stock-receipt-form').addEventListener('submit', async (
       datum: document.getElementById('stock-datum-input').value,
       megjegyzes: document.getElementById('stock-megjegyzes-input').value,
     };
+    const szamlaFile = document.getElementById('stock-szamla-input').files[0];
+    if (szamlaFile) {
+      btn.textContent = 'Fájl feltöltése…';
+      body.fajlAdat = await readFileAsBase64(szamlaFile);
+      body.fajlNev = szamlaFile.name;
+    }
     await api('/api/stock/receipt', { method: 'POST', body: JSON.stringify(body) });
     msg.textContent = '✓ Bevételezés rögzítve.'; msg.className = 'stock-form-msg ok';
     document.getElementById('stock-receipt-form').reset();
     document.getElementById('stock-datum-input').value = todayIso();
+    document.getElementById('stock-szamla-preview').hidden = true;
+    document.getElementById('stock-szamla-preview').innerHTML = '';
     loadStockReceiptLog();
   } catch (e2) {
     msg.textContent = e2.message; msg.className = 'stock-form-msg error';

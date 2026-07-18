@@ -254,6 +254,7 @@ stockDb.exec(`
     beszerzesi_ar NUMERIC,
     szallito TEXT,
     megjegyzes TEXT,
+    szamla_fajl TEXT,
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_bevetelezesek_company ON bevetelezesek(company_key);
@@ -267,6 +268,14 @@ stockDb.exec(`
     PRIMARY KEY (company_key, scope, nev)
   );
 `);
+{
+  const cols = stockDb.prepare(`PRAGMA table_info(bevetelezesek)`).all();
+  if (!cols.some((c) => c.name === 'szamla_fajl')) {
+    stockDb.exec(`ALTER TABLE bevetelezesek ADD COLUMN szamla_fajl TEXT`);
+  }
+}
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // Cikktörzs kétirányú szinkron — a webes felület (egyenként, tömegesen vagy
@@ -1244,6 +1253,160 @@ route('POST', '/api/admin/users/delete', async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Dátum-aritmetika segédfüggvények az összehasonlító nézethez.
+// ---------------------------------------------------------------------------
+function addDaysISO(iso, days) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function addMonthsISO(iso, months) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+function addYearsISO(iso, years) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return d.toISOString().slice(0, 10);
+}
+function monthRangeOf(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  const y = d.getUTCFullYear(), m = d.getUTCMonth();
+  const first = new Date(Date.UTC(y, m, 1));
+  const last = new Date(Date.UTC(y, m + 1, 0));
+  return { from: first.toISOString().slice(0, 10), to: last.toISOString().slice(0, 10) };
+}
+function periodRevenue(k, from, to) {
+  return get(k,
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
+    [from, to]
+  );
+}
+function pctChange(cur, prev) {
+  if (!prev) return cur > 0 ? 100 : 0;
+  return Math.round(((cur - prev) / prev) * 1000) / 10;
+}
+
+// Átfogó időszak-összehasonlítás — a kért 4 viszonyítási alap
+// (előző hét, előző hónap, előző év azonos időszaka, előző év azonos
+// naptári hónapja) mindegyikére kiszámolja a forgalom/nyugtaszám
+// eltérést, PLUSZ a kiválasztott egy konkrét viszonyítási alaphoz
+// napi-index illesztésű trendet, hét napjai szerinti bontást, és a
+// legnagyobb elmozdulást mutató cikkeket — ez adja a valódi, mélyebb
+// megértést, nem csak egy szám-eltérést.
+route('GET', '/api/compare', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const focus = ['prev-week', 'prev-month', 'same-period-last-year', 'same-month-last-year'].includes(query.compare)
+    ? query.compare : 'same-period-last-year';
+
+  const spanDays = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+  const monthOf = monthRangeOf(to);
+
+  const periods = {
+    'prev-week': { from: addDaysISO(from, -7), to: addDaysISO(to, -7), label: 'Előző hét' },
+    'prev-month': { from: addMonthsISO(from, -1), to: addMonthsISO(to, -1), label: 'Előző hónap' },
+    'same-period-last-year': { from: addYearsISO(from, -1), to: addYearsISO(to, -1), label: 'Előző év, azonos időszak' },
+    'same-month-last-year': { from: addYearsISO(monthOf.from, -1), to: addYearsISO(monthOf.to, -1), label: 'Előző év, azonos naptári hónap' },
+  };
+
+  const cur = periodRevenue(k, from, to);
+  const overview = {};
+  for (const [key, p] of Object.entries(periods)) {
+    const r = periodRevenue(k, p.from, p.to);
+    overview[key] = {
+      label: p.label, from: p.from, to: p.to,
+      revenue: r.revenue, receiptCount: r.cnt,
+      revenueDeltaPct: pctChange(cur.revenue, r.revenue),
+      countDeltaPct: pctChange(cur.cnt, r.cnt),
+    };
+  }
+
+  // Napi-index illesztett trend a kiválasztott viszonyítási időszakhoz —
+  // NEM naptári dátum szerint fedjük egymásra a két időszakot, hanem
+  // "1. nap, 2. nap, ..." szerint, hogy a GÖRBE ALAKJA közvetlenül
+  // összevethető legyen, függetlenül attól, hogy ténylegesen mikor volt.
+  const focusPeriod = periods[focus];
+  function dailySeries(pFrom, pTo) {
+    const rows = all(k,
+      `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+       FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat`,
+      [pFrom, pTo]
+    );
+    const map = new Map(rows.map((r) => [r.d, r.revenue]));
+    const out = [];
+    let d = pFrom;
+    let i = 0;
+    while (d <= pTo) {
+      out.push({ idx: i, d, revenue: map.get(d) || 0 });
+      d = addDaysISO(d, 1);
+      i++;
+    }
+    return out;
+  }
+  const curDaily = dailySeries(from, to);
+  const focusDaily = dailySeries(focusPeriod.from, focusPeriod.to);
+
+  // Hét napjai szerinti átlagos forgalom — sokszor ez fedi fel a valódi
+  // mintázatot (pl. "a hétvégék erősödtek, a hétköznapok gyengültek").
+  function weekdayBreakdown(pFrom, pTo) {
+    const rows = all(k,
+      `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd,
+              IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(DISTINCT keltdat) AS napok
+       FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY wd`,
+      [pFrom, pTo]
+    );
+    const byWd = new Map(rows.map((r) => [r.wd, r]));
+    const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+    return labels.map((label, wd) => {
+      const r = byWd.get(wd);
+      return { wd, label, avgRevenue: r && r.napok ? Math.round(r.revenue / r.napok) : 0 };
+    });
+  }
+  const curWeekday = weekdayBreakdown(from, to);
+  const focusWeekday = weekdayBreakdown(focusPeriod.from, focusPeriod.to);
+
+  // Legnagyobb elmozdulást mutató cikkek — abszolút Ft-eltérés szerint,
+  // mert egy adatelemzőnek ez sokkal informatívabb, mint a puszta
+  // százalék (egy 2 Ft-os tétel 300%-os "növekedése" lényegtelen).
+  const curProducts = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [from, to]
+  );
+  const focusProducts = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [focusPeriod.from, focusPeriod.to]
+  );
+  const focusMap = new Map(focusProducts.map((p) => [p.nev, p]));
+  const allNames = new Set([...curProducts.map((p) => p.nev), ...focusProducts.map((p) => p.nev)]);
+  const movers = [...allNames].map((nev) => {
+    const c = curProducts.find((p) => p.nev === nev) || { revenue: 0, menny: 0 };
+    const f = focusMap.get(nev) || { revenue: 0, menny: 0 };
+    return { nev, curRevenue: c.revenue, focusRevenue: f.revenue, deltaRevenue: c.revenue - f.revenue, deltaMenny: c.menny - f.menny };
+  }).sort((a, b) => Math.abs(b.deltaRevenue) - Math.abs(a.deltaRevenue));
+  const topGainers = movers.filter((m) => m.deltaRevenue > 0).slice(0, 8);
+  const topLosers = movers.filter((m) => m.deltaRevenue < 0).slice(0, 8);
+
+  sendJson(res, 200, {
+    from, to, spanDays, focus,
+    current: { revenue: cur.revenue, receiptCount: cur.cnt },
+    overview,
+    focusPeriod: { from: focusPeriod.from, to: focusPeriod.to, label: focusPeriod.label },
+    curDaily, focusDaily,
+    curWeekday, focusWeekday,
+    topGainers, topLosers,
+  });
+});
+
 route('GET', '/api/summary', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
@@ -1742,7 +1905,7 @@ route('GET', '/api/stock/receipts', async (req, res, query) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
   const rows = stockDb.prepare(
-    `SELECT id, datum, cikk_nev AS cikkNev, me, mennyiseg, beszerzesi_ar AS beszerzesiAr, szallito, megjegyzes, created_at AS createdAt
+    `SELECT id, datum, cikk_nev AS cikkNev, me, mennyiseg, beszerzesi_ar AS beszerzesiAr, szallito, megjegyzes, szamla_fajl AS szamlaFajl, created_at AS createdAt
      FROM bevetelezesek WHERE company_key = ? ORDER BY id DESC LIMIT ?`
   ).all(session.companyKey, limit);
   sendJson(res, 200, { items: rows });
@@ -1762,13 +1925,48 @@ route('POST', '/api/stock/receipt', async (req, res) => {
   const szallito = String(body.szallito || '').trim() || null;
   const megjegyzes = String(body.megjegyzes || '').trim() || null;
 
+  // Számla-fotó/fájl csatolása — opcionális, base64-ben érkezik (data URL
+  // vagy nyers base64), a szerver menti fájlba, csak a fájlnevet tároljuk el.
+  let szamlaFajl = null;
+  if (body.fajlAdat && body.fajlNev) {
+    const MAX_BYTES = 8 * 1024 * 1024; // 8 MB — bőven elég egy telefonos fotóhoz/PDF-hez
+    const match = /^data:([^;]+);base64,(.+)$/.exec(body.fajlAdat);
+    const b64 = match ? match[2] : body.fajlAdat;
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length > MAX_BYTES) return sendJson(res, 400, { error: 'A csatolt fájl túl nagy (max. 8 MB).' });
+    const ext = (path.extname(String(body.fajlNev)) || '.jpg').slice(0, 6).replace(/[^a-zA-Z0-9.]/g, '');
+    const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
+    szamlaFajl = `${crypto.randomBytes(12).toString('hex')}${ext}`;
+    fs.writeFileSync(path.join(safeDir, szamlaFajl), buf);
+  }
+
   const result = stockDb.prepare(
-    `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(session.companyKey, datum, cikkNev, me, mennyiseg, beszerzesiAr, szallito, megjegyzes, new Date().toISOString());
+    `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, szamla_fajl, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(session.companyKey, datum, cikkNev, me, mennyiseg, beszerzesiAr, szallito, megjegyzes, szamlaFajl, new Date().toISOString());
 
   logActivity({ type: 'stock_receipt_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${cikkNev}: ${mennyiseg} ${me || ''}`.trim() });
   sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+// A bevételezéshez csatolt számla-fájl (fotó/PDF) letöltése/megtekintése —
+// csak a saját cég munkamenete érheti el.
+route('GET', '/api/stock/receipt-file', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const id = parseInt(query.id, 10);
+  if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
+  const row = stockDb.prepare(`SELECT szamla_fajl FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
+  if (!row || !row.szamla_fajl) return sendJson(res, 404, { error: 'Nincs csatolt fájl.' });
+  const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  const filePath = path.join(safeDir, row.szamla_fajl);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található.' });
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.pdf': 'application/pdf', '.heic': 'image/heic' }[ext] || 'application/octet-stream';
+  const data = fs.readFileSync(filePath);
+  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' });
+  res.end(data);
 });
 
 route('DELETE', '/api/stock/receipt', async (req, res, query) => {
@@ -1776,9 +1974,15 @@ route('DELETE', '/api/stock/receipt', async (req, res, query) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const id = parseInt(query.id, 10);
   if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
-  const existing = stockDb.prepare(`SELECT cikk_nev, mennyiseg FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
+  const existing = stockDb.prepare(`SELECT cikk_nev, mennyiseg, szamla_fajl FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
   const result = stockDb.prepare(`DELETE FROM bevetelezesek WHERE id = ? AND company_key = ?`).run(id, session.companyKey);
   if (result.changes === 0) return sendJson(res, 404, { error: 'Nem található (vagy nem a te cégedhez tartozik).' });
+  if (existing && existing.szamla_fajl) {
+    try {
+      const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+      fs.unlinkSync(path.join(safeDir, existing.szamla_fajl));
+    } catch (_) { /* ha a fájl már nincs a lemezen, nem gond */ }
+  }
   logActivity({ type: 'stock_receipt_delete', ok: true, companyKey: session.companyKey, nev: session.nev, detail: existing ? `${existing.cikk_nev}: ${existing.mennyiseg}` : `#${id}` });
   sendJson(res, 200, { ok: true });
 });

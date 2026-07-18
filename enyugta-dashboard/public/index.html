@@ -223,6 +223,7 @@
     <nav class="nav">
       <button class="nav-item is-active" data-view="overview">Áttekintés</button>
       <button class="nav-item" data-view="revenue">Forgalom</button>
+      <button class="nav-item" data-view="compare">Összehasonlítás</button>
       <button class="nav-item" data-view="products">Cikk eladások</button>
       <button class="nav-item" data-view="masterdata">Cikktörzs</button>
       <button class="nav-item" data-view="receipts">Nyugták</button>
@@ -362,6 +363,50 @@
             <tbody></tbody>
             </table>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- --- ÖSSZEHASONLÍTÁS --- -->
+    <section class="view" data-view="compare" hidden>
+      <div class="card">
+        <div class="card-title">Melyik időszakhoz hasonlítsuk?</div>
+        <p class="card-subtitle" style="margin-bottom:12px;">a fenti dátumválasztóval kiválasztott időszakot vetjük össze a lenti négy viszonyítási alap egyikével</p>
+        <div class="compare-type-row group-toggle" id="compare-type-row">
+          <button class="chip is-active" data-compare="prev-week">Előző hét</button>
+          <button class="chip" data-compare="prev-month">Előző hónap</button>
+          <button class="chip" data-compare="same-period-last-year">Előző év — azonos időszak</button>
+          <button class="chip" data-compare="same-month-last-year">Előző év — azonos hónap</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Áttekintés — mind a négy viszonyítási alap</div>
+        <div class="compare-overview-grid" id="compare-overview-grid"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" id="compare-trend-title">Napi trend, egymásra illesztve</div>
+        <p class="card-subtitle" id="compare-trend-sub" style="margin-bottom:12px;"></p>
+        <div id="compare-trend-chart" class="chart-holder chart-holder--tall"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Forgalom a hét napjai szerint</div>
+        <p class="card-subtitle" style="margin-bottom:12px;">átlagos napi forgalom, hétköznaponként — ez mutatja meg, ha egy adott nap erősödött vagy gyengült</p>
+        <div id="compare-weekday-chart" class="chart-holder"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Legnagyobb növekedés</div>
+          <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-növekedés szerint</p>
+          <div id="compare-gainers-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Legnagyobb visszaesés</div>
+          <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-csökkenés szerint</p>
+          <div id="compare-losers-list"></div>
         </div>
       </div>
     </section>
@@ -632,6 +677,11 @@
             <label for="stock-megjegyzes-input">Megjegyzés</label>
             <input id="stock-megjegyzes-input" placeholder="opcionális">
           </div>
+          <div class="stock-field stock-field-wide">
+            <label for="stock-szamla-input">Számla csatolása (fotó vagy fájl)</label>
+            <input type="file" id="stock-szamla-input" accept="image/*,.pdf" capture="environment">
+            <div id="stock-szamla-preview" class="stock-szamla-preview" hidden></div>
+          </div>
           <button type="submit" class="btn-primary" id="stock-add-btn">Bevételezés rögzítése</button>
           <div class="stock-form-msg" id="stock-form-msg"></div>
         </form>
@@ -641,7 +691,7 @@
         <div class="card-title">Bevételezési napló</div>
         <div class="table-scroll">
           <table class="data-table" id="stock-log-table">
-          <thead><tr><th>Dátum</th><th>Cikk</th><th class="td-right">Mennyiség</th><th>Szállító</th><th>Megjegyzés</th><th></th></tr></thead>
+          <thead><tr><th>Dátum</th><th>Cikk</th><th class="td-right">Mennyiség</th><th>Szállító</th><th>Megjegyzés</th><th data-no-sort>Számla</th><th></th></tr></thead>
           <tbody></tbody>
           </table>
         </div>
