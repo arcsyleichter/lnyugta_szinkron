@@ -1548,9 +1548,12 @@ async function loadNtakView() {
     diagCard.hidden = true;
   }
 
+  const ntakrmsHiba = data.diag && data.diag.error && data.diag.error.includes('no such table: ntakrms');
   const statusBox = document.getElementById('ntak-status-summary');
   if (!data.submissionsByStatus.length) {
-    statusBox.innerHTML = '<div class="empty-state">Nincs NTAK adatküldés a kiválasztott időszakban.</div>';
+    statusBox.innerHTML = ntakrmsHiba
+      ? '<div class="empty-state">Ez az androidos alkalmazás-verzió nem küld részletes küldési naplót — csak a napi nyitás-zárás eredménye érhető el lent.</div>'
+      : '<div class="empty-state">Nincs NTAK adatküldés a kiválasztott időszakban.</div>';
   } else {
     statusBox.innerHTML = data.submissionsByStatus
       .map((r) => `<div class="ntak-summary-item">${ntakStatusBadge(r.ellenorzott)}<span class="ntak-summary-count">${r.cnt}</span></div>`)
@@ -1564,7 +1567,9 @@ async function loadNtakView() {
   const subTbody = document.querySelector('#ntak-submissions-table tbody');
   subTbody.innerHTML = '';
   if (!data.recent.length) {
-    subTbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs adatküldés a kiválasztott időszakban.</td></tr>';
+    subTbody.innerHTML = ntakrmsHiba
+      ? '<tr><td colspan="5" class="empty-state">Ez az androidos alkalmazás-verzió nem küld részletes küldési naplót.</td></tr>'
+      : '<tr><td colspan="5" class="empty-state">Nincs adatküldés a kiválasztott időszakban.</td></tr>';
   } else {
     data.recent.forEach((r) => {
       const tr = document.createElement('tr');
