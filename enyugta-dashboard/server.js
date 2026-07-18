@@ -2694,6 +2694,28 @@ route('POST', '/api/admin/companies/assign-reseller', async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+// Egy adott cég/telephely legutóbb szinkronizált .db fájljának letöltése —
+// pontosan az van a lemezen, amit az androidos app legutóbb feltöltött.
+route('GET', '/api/admin/companies/download-db', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const key = String(query.key || '');
+  if (!key || !companyIndex.has(key)) return sendJson(res, 404, { error: 'Ismeretlen cég/telephely.' });
+  const filePath = dbFileForKey(key);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található a lemezen — még nem érkezett szinkron.' });
+  const entry = companyIndex.get(key);
+  const { telephelyKod } = splitSiteKey(key);
+  const safeName = `${(entry.nev || 'ceg').replace(/[^a-zA-Z0-9_\-]/g, '_')}_${entry.adoszam || ''}_${telephelyKod || '01'}.db`;
+  const data = fs.readFileSync(filePath);
+  logActivity({ type: 'admin_db_download', ok: true, companyKey: key, nev: 'admin', detail: `Adatbázis letöltve: ${safeName}` });
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${safeName}"`,
+    'Content-Length': data.length,
+  });
+  res.end(data);
+});
+
 // Tevékenység-napló — minden esemény cégenként és típusonként megkülönböztetve.
 // Szűrhető companyKey és type szerint (mindkettő opcionális); emellett egy
 // cégenkénti+típusonkénti összesítő mátrixot is visszaad a csoportosított

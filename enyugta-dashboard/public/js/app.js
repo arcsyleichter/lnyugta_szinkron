@@ -676,7 +676,10 @@ async function loadAdminOverview() {
       <td>${escapeHtml(c.source || '—')}</td>
       <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
       <td><button class="btn-license-check" data-adoszam="${escapeHtml(c.adoszam)}" title="Adószám vágólapra másolása, majd az lszamla megnyitása">🔗 Licenc</button></td>
-      <td><button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button></td>`;
+      <td>
+        <button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button>
+        <a class="btn-tiny" href="/api/admin/companies/download-db?key=${encodeURIComponent(c.key)}" title="Legutóbb szinkronizált .db fájl letöltése">⬇ DB</a>
+      </td>`;
     compTbody.appendChild(tr);
   });
   compTbody.querySelectorAll('.btn-send-code').forEach((btn) => {
@@ -824,6 +827,7 @@ const ACTIVITY_TYPE_LABELS = {
   user_update: 'Felhasználó módosítva',
   user_delete: 'Felhasználó törölve',
   company_reseller_assign: 'Cég viszonteladóhoz rendelve',
+  admin_db_download: 'Admin: adatbázis letöltve',
 };
 const activityFilter = { company: '', type: '' };
 
