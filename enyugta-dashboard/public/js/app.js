@@ -299,6 +299,21 @@ function openLicenseFeatureModal(f) {
   document.getElementById('license-feature-modal-backdrop').hidden = false;
 }
 document.getElementById('license-feature-new-btn').addEventListener('click', () => openLicenseFeatureModal(null));
+document.getElementById('license-feature-seed-real-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('license-feature-seed-real-btn');
+  btn.disabled = true; btn.textContent = 'Pótlás…';
+  try {
+    const res = await api('/api/admin/license/features/seed-real', { method: 'POST' });
+    alert(res.added.length
+      ? `Pótolva: ${res.added.join(', ')}`
+      : 'Mind a 12 valós funkció már megvolt a katalógusban — nem volt mit pótolni.');
+    loadLicenseFeatures();
+  } catch (e) {
+    alert('Nem sikerült: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Hiányzó valós funkciók pótlása';
+  }
+});
 document.getElementById('license-feature-modal-close').addEventListener('click', () => {
   document.getElementById('license-feature-modal-backdrop').hidden = true;
 });

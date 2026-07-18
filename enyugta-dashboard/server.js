@@ -445,6 +445,25 @@ licenseDb.exec(`
     PRIMARY KEY (package_id, feature_key)
   );
 `);
+// A ténylegesen Androidban hardkódolt, VALÓS funkció-azonosítók listája —
+// ez az egyetlen forrás, amit két helyen is használunk: (1) vadonatúj,
+// üres telepítésnél automatikus kezdő feltöltéshez, (2) egy már futó,
+// meglévő katalógusnál a hiányzó elemek biztonságos, admin által
+// kezdeményezett pótlásához (lásd /api/admin/license/features/seed-real).
+const REAL_LICENSE_FEATURE_DEFAULTS = [
+  ['SZAMLSZEM', 'Számla személyre szabása', '', 0, 0],
+  ['NTAK', 'NTAK', '', 0, 1],
+  ['EXTNYOMT', 'Konyhai nyomtató', '', 0, 2],
+  ['VIRTUO', 'Virtuo fizetés', '', 0, 3],
+  ['VISSZAJAROKEZELES', 'Visszajáró kezelése', '', 0, 4],
+  ['REPOHAR', 'Repohár', '', 0, 5],
+  ['KEPESTERM', 'Képes termék', '', 0, 6],
+  ['MERLEGELES', 'Mérlegelés', '', 0, 7],
+  ['VONALKOD', 'Vonalkód generálás', '', 0, 8],
+  ['PINTEGRACIO', 'PIN integráció', '', 0, 9],
+  ['WEBTERMEK', 'Webes termékkezelés', 'Db szinkronizáció.', 0, 10],
+  ['WEBTERMARCSI', 'Webes termék fel/letöltés', 'A honlapodra fel/letöltést engedélyezi.', 0, 11],
+];
 // Első indításkor feltöltjük egy induló katalógussal — ezt az admin
 // utólag szabadon szerkesztheti (átnevezheti, árazhatja, kivezetheti,
 // újat vehet fel). A kulcsok a ténylegesen Androidban hardkódolt,
@@ -453,26 +472,13 @@ licenseDb.exec(`
   const count = licenseDb.prepare('SELECT COUNT(*) AS c FROM license_features').get().c;
   if (count === 0) {
     const now = new Date().toISOString();
-    const defaults = [
-      ['SZAMLSZEM', 'Számla személyre szabása', '', 0, 0],
-      ['NTAK', 'NTAK', '', 0, 1],
-      ['EXTNYOMT', 'Konyhai nyomtató', '', 0, 2],
-      ['VIRTUO', 'Virtuo fizetés', '', 0, 3],
-      ['VISSZAJAROKEZELES', 'Visszajáró kezelése', '', 0, 4],
-      ['REPOHAR', 'Repohár', '', 0, 5],
-      ['KEPESTERM', 'Képes termék', '', 0, 6],
-      ['MERLEGELES', 'Mérlegelés', '', 0, 7],
-      ['VONALKOD', 'Vonalkód generálás', '', 0, 8],
-      ['PINTEGRACIO', 'PIN integráció', '', 0, 9],
-      ['WEBTERMEK', 'Webes termékkezelés', 'Db szinkronizáció.', 0, 10],
-      ['WEBTERMARCSI', 'Webes termék fel/letöltés', 'A honlapodra fel/letöltést engedélyezi.', 0, 11],
-    ];
-    for (const [key, nev, leiras, alapAr, sorrend] of defaults) {
+    for (const [key, nev, leiras, alapAr, sorrend] of REAL_LICENSE_FEATURE_DEFAULTS) {
       licenseDb.prepare(
         `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)`
       ).run(key, nev, leiras, alapAr, sorrend, now);
     }
   }
+
 }
 
 // Egyszerű, ékezet- és írásjel-mentes "slug" egy funkció-kulcshoz, a
@@ -1549,6 +1555,30 @@ route('GET', '/api/admin/license/features', async (req, res) => {
 // hardkódolt funkció-azonosítót használja, ne egy AI-generált slugot).
 // Meglévő kulcs átnevezésére (a company_licenses kiosztásokkal együtt)
 // külön végpont van: /api/admin/license/features/rename-key.
+// Egy már ÉLŐ, meglévő katalógusnál is biztonságosan pótolja a valós,
+// Androidban hardkódolt kulcsok közül azokat, amik MÉG NINCSENEK benne —
+// ami már megvan (akár a régi, AI-tippre generált néven), azt EGYÁLTALÁN
+// NEM bántja. A meglévő, feleslegessé vált kulcsokat ezután kézzel,
+// szabadon átnevezheted (rename-key) vagy törölheted, a saját tempódban.
+route('POST', '/api/admin/license/features/seed-real', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const now = new Date().toISOString();
+  const added = [];
+  for (const [key, nev, leiras, alapAr, sorrend] of REAL_LICENSE_FEATURE_DEFAULTS) {
+    const exists = licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(key);
+    if (exists) continue;
+    licenseDb.prepare(
+      `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)`
+    ).run(key, nev, leiras, alapAr, sorrend, now);
+    added.push(key);
+  }
+  if (added.length) {
+    logActivity({ type: 'license_feature_seed_real', ok: true, companyKey: null, nev: 'admin', detail: `Hiányzó valós funkciók pótolva: ${added.join(', ')}` });
+  }
+  sendJson(res, 200, { ok: true, added });
+});
+
 route('POST', '/api/admin/license/features/save', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
