@@ -1434,11 +1434,23 @@ route('GET', '/api/compare', async (req, res, query) => {
     periodB = { from: `${y - 1}-01-01`, to: addYearsISO(today, -1), label: `${y - 1} azonos időszaka` };
   } else if (mode === 'month') {
     const monthStart = today.slice(0, 8) + '01';
-    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
     const prevMonthStart = addMonthsISO(monthStart, -1);
     const prevMonthSameDay = addMonthsISO(today, -1);
     periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
     periodB = { from: prevMonthStart, to: prevMonthSameDay, label: 'Előző hónap (azonos hosszban)' };
+  } else if (mode === 'same-month-last-year') {
+    const monthStart = today.slice(0, 8) + '01';
+    const dayOfMonth = parseInt(today.slice(8, 10), 10);
+    const lastYearMonthStart = addYearsISO(monthStart, -1);
+    // Ha a hónap tört (pl. ma a hónap 18. napja), az előző év azonos
+    // hónapját is CSAK ugyanaddig a napig nézzük, ne a teljes hónapig —
+    // rövidebb hónapnál (pl. február) a hónap tényleges utolsó napjára
+    // szorítva, hogy sose lépjünk át a következő hónapba.
+    const lastYearMonthEndFull = addDaysISO(addMonthsISO(lastYearMonthStart, 1), -1);
+    const lastYearSameDay = addDaysISO(lastYearMonthStart, dayOfMonth - 1);
+    const lastYearTo = lastYearSameDay <= lastYearMonthEndFull ? lastYearSameDay : lastYearMonthEndFull;
+    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
+    periodB = { from: lastYearMonthStart, to: lastYearTo, label: 'Előző év, ugyanez a hónap (azonos napig)' };
   } else if (mode === 'week') {
     const mondayThis = mondayOfWeek(today);
     periodA = { from: mondayThis, to: today, label: 'Ez a hét (eddig)' };
