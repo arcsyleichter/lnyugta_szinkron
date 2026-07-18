@@ -385,6 +385,29 @@ licenseDb.exec(`
     UNIQUE(ceg_kulcs, feature_key)
   );
   CREATE INDEX IF NOT EXISTS idx_company_licenses_ceg ON company_licenses(ceg_kulcs);
+
+  -- Cégenkénti eszközkorlát (hány androidos eszköz futtathatja egyszerre a
+  -- licencet) — ha egy cégre nincs sor, nincs korlát (a jelenlegi, korlát
+  -- nélküli állapot marad, amíg admin explicit be nem állítja).
+  CREATE TABLE IF NOT EXISTS company_device_limits (
+    ceg_kulcs TEXT PRIMARY KEY,
+    eszkoz_limit INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- Melyik cégnél melyik eszköz már regisztrált — ez foglalja el a fenti
+  -- korlát egy-egy "helyét". Az eszköz_azonosító magától az androidos
+  -- appból jön (amit ő már úgyis ismer/küld), nincs hozzá semmi extra
+  -- admin-adminisztráció, magától töltődik fel lekérdezéskor.
+  CREATE TABLE IF NOT EXISTS company_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ceg_kulcs TEXT NOT NULL,
+    eszkoz_azonosito TEXT NOT NULL,
+    elso_latott TEXT NOT NULL,
+    utolso_latott TEXT NOT NULL,
+    UNIQUE(ceg_kulcs, eszkoz_azonosito)
+  );
+  CREATE INDEX IF NOT EXISTS idx_company_devices_ceg ON company_devices(ceg_kulcs);
 `);
 // Első indításkor feltöltjük egy induló katalógussal — ezt az admin
 // utólag szabadon szerkesztheti (átnevezheti, árazhatja, kivezetheti,
@@ -1469,9 +1492,12 @@ route('GET', '/api/admin/license/features', async (req, res) => {
   });
 });
 
-// Funkció felvétele / szerkesztése (upsert `key` alapján — ha nincs `key`
-// megadva, a névből generálunk egyet). A kulcs utólag nem módosítható,
-// mert a company_licenses táblát is ez azonosítja.
+// Funkció felvétele / szerkesztése (upsert `key` alapján). Ha nincs `key`
+// megadva, a névből generálunk egyet — de admin megadhat SAJÁT, explicit
+// kulcsot is felvételkor (pl. hogy pontosan az androidos appban már
+// hardkódolt funkció-azonosítót használja, ne egy AI-generált slugot).
+// Meglévő kulcs átnevezésére (a company_licenses kiosztásokkal együtt)
+// külön végpont van: /api/admin/license/features/rename-key.
 route('POST', '/api/admin/license/features/save', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
@@ -1483,28 +1509,52 @@ route('POST', '/api/admin/license/features/save', async (req, res) => {
   const aktiv = body.aktiv === false ? 0 : 1;
   const leiras = String(body.leiras || '').trim();
   let key = String(body.key || '').trim();
-  const isNew = !key;
+  const existing = key ? licenseDb.prepare('SELECT key FROM license_features WHERE key = ?').get(key) : null;
+  const isNew = !existing;
   if (isNew) {
-    key = slugifyFeatureKey(nev);
-    // Ütközés esetén (ugyanaz a slug már foglalt) számot fűzünk a végére.
-    let candidate = key, n = 2;
-    while (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(candidate)) {
-      candidate = `${key}_${n}`; n += 1;
+    if (!key) {
+      key = slugifyFeatureKey(nev);
+      // Ütközés esetén (ugyanaz a slug már foglalt) számot fűzünk a végére.
+      let candidate = key, n = 2;
+      while (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(candidate)) {
+        candidate = `${key}_${n}`; n += 1;
+      }
+      key = candidate;
     }
-    key = candidate;
     licenseDb.prepare(
       `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(key, nev, leiras, alapAr, aktiv, sorrend, new Date().toISOString());
     logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Új funkció felvéve: ${nev} (${key})` });
   } else {
-    const existing = licenseDb.prepare('SELECT key FROM license_features WHERE key = ?').get(key);
-    if (!existing) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
     licenseDb.prepare(
       `UPDATE license_features SET nev = ?, leiras = ?, alap_ar = ?, aktiv = ?, sorrend = ? WHERE key = ?`
     ).run(nev, leiras, alapAr, aktiv, sorrend, key);
     logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Funkció módosítva: ${nev} (${key})` });
   }
   sendJson(res, 200, { ok: true, key });
+});
+
+// Meglévő funkció-kulcs átnevezése — arra kell, ha egy korábban tippre
+// felvett kulcsot utólag az androidos appban ténylegesen használt, fix
+// azonosítóra kell cserélni. A már kiosztott company_licenses sorokat is
+// átvezeti az új kulcsra, hogy egyetlen meglévő cég licence se vesszen el.
+route('POST', '/api/admin/license/features/rename-key', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { key, ujKulcs } = await readJsonBody(req);
+  const regi = String(key || '').trim();
+  const uj = String(ujKulcs || '').trim();
+  if (!regi || !uj) return sendJson(res, 400, { error: 'Hiányzó régi vagy új kulcs.' });
+  if (regi === uj) return sendJson(res, 200, { ok: true, key: uj });
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(regi);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  if (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(uj)) {
+    return sendJson(res, 400, { error: 'Az új kulcs már foglalt egy másik funkciónál.' });
+  }
+  licenseDb.prepare('UPDATE license_features SET key = ? WHERE key = ?').run(uj, regi);
+  licenseDb.prepare('UPDATE company_licenses SET feature_key = ? WHERE feature_key = ?').run(uj, regi);
+  logActivity({ type: 'license_feature_rename', ok: true, companyKey: null, nev: 'admin', detail: `Funkció-kulcs átnevezve: ${feature.nev} (${regi} → ${uj})` });
+  sendJson(res, 200, { ok: true, key: uj });
 });
 
 // Funkció törlése a katalógusból — csak akkor engedjük, ha egyetlen cég
@@ -1543,6 +1593,16 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
     if (!grantsByCeg.has(row.ceg_kulcs)) grantsByCeg.set(row.ceg_kulcs, new Map());
     grantsByCeg.get(row.ceg_kulcs).set(row.feature_key, row);
   }
+  // Eszközszám cégenként (hány regisztrált eszköz van), a beállított
+  // korláttal együtt — hogy az admin lista egyben mutassa, pl. "3 / 5".
+  const deviceCountByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, COUNT(*) AS c FROM company_devices GROUP BY ceg_kulcs').all()
+      .map((r) => [r.ceg_kulcs, r.c])
+  );
+  const deviceLimitByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, eszkoz_limit FROM company_device_limits').all()
+      .map((r) => [r.ceg_kulcs, r.eszkoz_limit])
+  );
 
   const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
     const grants = grantsByCeg.get(cegKulcs) || new Map();
@@ -1555,7 +1615,11 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
         aktiv: row ? !!row.aktiv : false, ...status,
       };
     });
-    return { cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses };
+    return {
+      cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
+      eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
+      eszkozLimit: deviceLimitByCeg.has(cegKulcs) ? deviceLimitByCeg.get(cegKulcs) : null,
+    };
   }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
 
   sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
@@ -1596,6 +1660,64 @@ route('POST', '/api/admin/license/revoke', async (req, res) => {
   const changes = licenseDb.prepare('DELETE FROM company_licenses WHERE ceg_kulcs = ? AND feature_key = ?').run(cegKulcs, featureKey).changes;
   if (!changes) return sendJson(res, 404, { error: 'Ez a cég nem rendelkezik ezzel a funkcióval.' });
   logActivity({ type: 'license_revoke', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `Licenc visszavonva: ${feature?.nev || featureKey}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Cég eszközkorlátjának beállítása/módosítása — ha eszkozLimit 0 vagy
+// hiányzik, a korlát törlődik (ismét korlátlan lesz, ez az alapállapot).
+route('POST', '/api/admin/license/device-limit', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, eszkozLimit } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const limit = parseInt(eszkozLimit, 10) || 0;
+  if (limit <= 0) {
+    licenseDb.prepare('DELETE FROM company_device_limits WHERE ceg_kulcs = ?').run(cegKulcs);
+    logActivity({ type: 'license_device_limit', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs, detail: 'Eszközkorlát törölve (korlátlan).' });
+  } else {
+    licenseDb.prepare(`
+      INSERT INTO company_device_limits (ceg_kulcs, eszkoz_limit, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(ceg_kulcs) DO UPDATE SET eszkoz_limit = excluded.eszkoz_limit, updated_at = excluded.updated_at
+    `).run(cegKulcs, limit, new Date().toISOString());
+    logActivity({ type: 'license_device_limit', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs, detail: `Eszközkorlát beállítva: ${limit} db.` });
+  }
+  sendJson(res, 200, { ok: true });
+});
+
+// Egy cég regisztrált eszközeinek listája + a beállított korlát — az admin
+// felület ebből rakja ki, hogy pl. "3 / 5 eszköz foglalt".
+route('GET', '/api/admin/license/devices', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const cegKulcs = String(query.cegKulcs || '').trim();
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const limitRow = licenseDb.prepare('SELECT eszkoz_limit FROM company_device_limits WHERE ceg_kulcs = ?').get(cegKulcs);
+  const devices = licenseDb.prepare(
+    'SELECT id, eszkoz_azonosito, elso_latott, utolso_latott FROM company_devices WHERE ceg_kulcs = ? ORDER BY elso_latott'
+  ).all(cegKulcs);
+  sendJson(res, 200, {
+    cegKulcs,
+    eszkozLimit: limitRow ? limitRow.eszkoz_limit : null,
+    devices: devices.map((d) => ({ id: d.id, eszkozAzonosito: d.eszkoz_azonosito, elsoLatott: d.elso_latott, utolsoLatott: d.utolso_latott })),
+  });
+});
+
+// Egy eszköz eltávolítása a cég regisztrált eszközei közül — pl. ha az
+// ügyfél lecserélt egy telefont, ezzel szabadul fel a helye az újnak.
+route('POST', '/api/admin/license/devices/remove', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT ceg_kulcs, eszkoz_azonosito FROM company_devices WHERE id = ?').get(id);
+  if (!device) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  licenseDb.prepare('DELETE FROM company_devices WHERE id = ?').run(id);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === device.ceg_kulcs);
+  logActivity({
+    type: 'license_device_remove', ok: true, companyKey: device.ceg_kulcs, nev: anySite?.nev || device.ceg_kulcs,
+    detail: `Eszköz eltávolítva a regisztráltak közül: ${device.eszkoz_azonosito}`,
+  });
   sendJson(res, 200, { ok: true });
 });
 
@@ -2967,6 +3089,66 @@ route('GET', '/api/sync/companies', async (req, res) => {
   sendJson(res, 200, { count: list.length, companies: list });
 });
 
+// Élesedés előtt (LICENSE_ENFORCE nincs beállítva / "0"): minden aktív
+// katalógus-funkció mindenkinek engedélyezett, a company_licenses tábla
+// tartalmától függetlenül — ez a jelenlegi, bevezetés előtti állapot.
+// Élesedéskor egyetlen env-változóval (LICENSE_ENFORCE=1) kapcsoljuk be a
+// tényleges érvényesítést, kódmódosítás és újracsomagolás nélkül.
+//
+// Bekapcsolt érvényesítés esetén minden cég kap egy LICENSE_TRIAL_DAYS
+// (alapértelmezetten 7) napos ingyenes próbaidőt, az első szinkronjától
+// számítva — ezalatt ugyanúgy minden funkció engedélyezett, a `lejarat`
+// mező pedig a próba végét mutatja. Nincs külön "próba" jelző vagy
+// figyelmeztető mező: az app a meglévő lejarat-mezőt pontosan ugyanúgy
+// kezeli, mint egy valódi, fizetett licencnél — a szerver oldalon a próba
+// technikailag nem más, mint egy ideiglenes, mindenre kiterjedő "engedély".
+// A próba lejárta UTÁN kizárólag a ténylegesen kiosztott (company_licenses)
+// funkciók maradnak engedélyezve.
+const LICENSE_ENFORCE = process.env.LICENSE_ENFORCE === '1';
+const LICENSE_TRIAL_DAYS = parseInt(process.env.LICENSE_TRIAL_DAYS || '7', 10);
+
+// A próbaidő kezdete: az adott cég legkorábban létrehozott telephelye —
+// gyakorlatilag az első regisztráció/szinkron időpontja. Nincs hozzá külön
+// tábla/mező, a telephelyek.json már meglévő "letrehozva" mezőjét
+// használjuk fel erre.
+function companyFirstSeen(cegKulcs) {
+  const sites = listTelephelyek(cegKulcs);
+  if (!sites.length) return null;
+  return sites.reduce((min, t) => (!min || t.letrehozva < min ? t.letrehozva : min), null);
+}
+function companyTrialEnd(cegKulcs) {
+  const firstSeen = companyFirstSeen(cegKulcs);
+  if (!firstSeen) return null;
+  return new Date(new Date(firstSeen).getTime() + LICENSE_TRIAL_DAYS * 86400000);
+}
+
+// Eszköz-regisztráció ellenőrzése/nyilvántartása egy licenc-lekérdezéskor.
+// Ha az adott eszköz ennél a cégnél már ismert, csak frissítjük az
+// "utoljára látott" időbélyeget és true-val térünk vissza. Ha ismeretlen
+// eszköz, és van még szabad hely a cég eszközkorlátján belül (vagy a
+// cégre egyáltalán nincs korlát beállítva — ez az alapállapot), akkor
+// magától regisztrálódik, nincs hozzá admin-beavatkozás. Ha a korlát már
+// betelt, false-t ad vissza — a hívó ekkor mindent letilt a válaszban.
+function registerOrCheckDevice(cegKulcs, eszkozAzonosito) {
+  const now = new Date().toISOString();
+  const existing = licenseDb.prepare(
+    'SELECT id FROM company_devices WHERE ceg_kulcs = ? AND eszkoz_azonosito = ?'
+  ).get(cegKulcs, eszkozAzonosito);
+  if (existing) {
+    licenseDb.prepare('UPDATE company_devices SET utolso_latott = ? WHERE id = ?').run(now, existing.id);
+    return true;
+  }
+  const limitRow = licenseDb.prepare('SELECT eszkoz_limit FROM company_device_limits WHERE ceg_kulcs = ?').get(cegKulcs);
+  if (limitRow) {
+    const used = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_devices WHERE ceg_kulcs = ?').get(cegKulcs).c;
+    if (used >= limitRow.eszkoz_limit) return false;
+  }
+  licenseDb.prepare(
+    'INSERT INTO company_devices (ceg_kulcs, eszkoz_azonosito, elso_latott, utolso_latott) VALUES (?, ?, ?, ?)'
+  ).run(cegKulcs, eszkozAzonosito, now, now);
+  return true;
+}
+
 // Licenc-állapot lekérdezése az androidos app számára — ugyanúgy
 // x-api-key-jel hitelesít, mint a többi szinkron végpont (NEM böngésző-
 // session). Ez váltja ki a korábbi lszamla-alapú licenc-lekérdezést: az
@@ -2978,21 +3160,42 @@ route('GET', '/api/license/status', async (req, res, query) => {
   const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
   if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
 
-  const grants = new Map(
-    licenseDb.prepare('SELECT * FROM company_licenses WHERE ceg_kulcs = ?').all(cegKulcs).map((r) => [r.feature_key, r])
-  );
-  const catalog = licenseDb.prepare('SELECT key, nev, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
-  const features = catalog.map((f) => {
-    const row = grants.get(f.key);
-    const status = licenseRowStatus(row);
-    return {
-      key: f.key, nev: f.nev,
-      engedelyezve: !!row && !!row.aktiv && status.allapot !== 'expired',
-      lejarat: row ? row.lejarat : null,
-      allapot: status.allapot,
-    };
-  });
-  sendJson(res, 200, { adoszam: query.adoszam || '', cegKulcs, features });
+  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
+  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
+  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
+  // mező a válaszban).
+  const eszkoz = String(query.eszkoz || '').trim();
+  const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
+
+  const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
+  const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
+  const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
+
+  let features;
+  if (eszkozRegisztralva === false) {
+    // Betelt az eszközkorlát, és ez egy még ismeretlen eszköz — nincs neki
+    // hely, minden funkció letiltva, ugyanúgy, mint egy nem fizető cégnél.
+    features = catalog.map((f) => ({ key: f.key, engedelyezve: false, lejarat: null }));
+  } else if (inTrial) {
+    const trialLejarat = trialEnd ? trialEnd.toISOString().slice(0, 10) : null;
+    features = catalog.map((f) => ({ key: f.key, engedelyezve: true, lejarat: trialLejarat }));
+  } else {
+    const grants = new Map(
+      licenseDb.prepare('SELECT * FROM company_licenses WHERE ceg_kulcs = ?').all(cegKulcs).map((r) => [r.feature_key, r])
+    );
+    features = catalog.map((f) => {
+      const row = grants.get(f.key);
+      const status = licenseRowStatus(row);
+      return {
+        key: f.key,
+        engedelyezve: !!row && !!row.aktiv && status.allapot !== 'expired',
+        lejarat: row ? row.lejarat : null,
+      };
+    });
+  }
+  const payload = { adoszam: query.adoszam || '', cegKulcs, features };
+  if (eszkoz) payload.eszkozRegisztralva = eszkozRegisztralva;
+  sendJson(res, 200, payload);
 });
 
 // ---------------------------------------------------------------------------
