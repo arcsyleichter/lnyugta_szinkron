@@ -99,7 +99,7 @@ function showTelephelyScreen() { hideAllScreens(); telephelyScreen.hidden = fals
 function showTelephelyWaitingScreen() { hideAllScreens(); telephelyWaitingScreen.hidden = false; }
 function showApp() { hideAllScreens(); appScreen.hidden = false; document.getElementById('back-to-admin-btn').hidden = !state.viaAdmin; }
 function showAdminLogin() { hideAllScreens(); adminLoginScreen.hidden = false; }
-function showAdmin() { hideAllScreens(); adminScreen.hidden = false; showAdminView('overview'); renderLicencMock(); }
+function showAdmin() { hideAllScreens(); adminScreen.hidden = false; showAdminView('overview'); loadLicenseData(); }
 
 /* ============================================================
    Admin — navigációs menü (blokkonként külön nézet)
@@ -116,6 +116,7 @@ document.querySelectorAll('.admin-nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
     showAdminView(btn.dataset.adminView);
     if (btn.dataset.adminView === 'felhasznalok') loadAdminUsers();
+    if (btn.dataset.adminView === 'licenc') loadLicenseData();
   });
 });
 
@@ -134,27 +135,199 @@ document.getElementById('admin-mobile-tab-more').addEventListener('click', () =>
 });
 
 /* ============================================================
-   Admin — Licenc-kezelés (MINTA adatok, nem élő)
+   Admin — Licenc-kezelés (élő adatok: funkció-katalógus + cégenkénti
+   licencek — az androidos app a /api/license/status végponton kérdezi
+   le ugyanezt, a szinkron x-api-key-jel hitelesítve).
    ============================================================ */
-const LICENC_MOCK_ROWS = [
-  { nev: 'Corvin Presszó Kft.', adoszam: '18774455-1-42', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.132.132', allapot: 'ok', allapotSzoveg: 'érvényes', regDatum: '2026-04-14' },
-  { nev: 'Zöld Kanál Vendéglő Kft.', adoszam: '24681357-2-09', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.118.118', allapot: 'warn', allapotSzoveg: '6 napon belül lejár', regDatum: '2026-01-06' },
-  { nev: 'PACHIRA GROUP Kft.', adoszam: '27129430-2-41', telephely: 'Fő telephely', program: 'ENYUGTA_GO', verzio: '1.122.122', allapot: 'expired', allapotSzoveg: 'lejárt', regDatum: '2026-03-21' },
-  { nev: 'Kis Bolt (telephely)', adoszam: '18774455-1-42', telephely: 'Kis Bolt', program: '—', verzio: '—', allapot: 'none', allapotSzoveg: 'nincs regisztráció', regDatum: '—' },
-];
-function renderLicencMock() {
-  const tbody = document.querySelector('#admin-licenc-table tbody');
-  tbody.innerHTML = LICENC_MOCK_ROWS.map((r) => `
-    <tr>
-      <td>${escapeHtml(r.nev)}</td>
-      <td class="ntak-uuid">${escapeHtml(r.adoszam)}</td>
-      <td>${escapeHtml(r.telephely)}</td>
-      <td>${escapeHtml(r.program)}</td>
-      <td>${escapeHtml(r.verzio)}</td>
-      <td><span class="licenc-badge licenc-badge--${r.allapot}">${escapeHtml(r.allapotSzoveg)}</span></td>
-      <td>${escapeHtml(r.regDatum)}</td>
-    </tr>`).join('');
+let licenseFeaturesCache = [];
+let licenseCompaniesCache = [];
+
+async function loadLicenseData() {
+  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies()]);
 }
+
+async function loadLicenseFeatures() {
+  try {
+    const data = await api('/api/admin/license/features');
+    licenseFeaturesCache = data.features;
+    renderLicenseFeatures();
+  } catch (e) {
+    document.querySelector('#admin-license-features-table tbody').innerHTML =
+      `<tr><td colspan="5" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderLicenseFeatures() {
+  const tbody = document.querySelector('#admin-license-features-table tbody');
+  if (!licenseFeaturesCache.length) { tbody.innerHTML = '<tr><td colspan="5" class="muted">Még nincs egyetlen funkció sem a katalógusban.</td></tr>'; return; }
+  tbody.innerHTML = licenseFeaturesCache.map((f) => `
+    <tr data-key="${escapeHtml(f.key)}">
+      <td>${escapeHtml(f.nev)}</td>
+      <td>${escapeHtml(f.leiras || '—')}</td>
+      <td class="td-right">${fmtHuf(f.alapAr)}</td>
+      <td><span class="licenc-badge licenc-badge--${f.aktiv ? 'ok' : 'none'}">${f.aktiv ? 'aktív' : 'kivezetve'}</span></td>
+      <td>
+        <button class="btn-tiny btn-license-feature-edit">Szerkesztés</button>
+        <button class="btn-tiny btn-license-feature-delete">Törlés</button>
+      </td>
+    </tr>`).join('');
+
+  tbody.querySelectorAll('.btn-license-feature-edit').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.closest('tr').dataset.key;
+      const f = licenseFeaturesCache.find((x) => x.key === key);
+      openLicenseFeatureModal(f);
+    });
+  });
+  tbody.querySelectorAll('.btn-license-feature-delete').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const key = btn.closest('tr').dataset.key;
+      const f = licenseFeaturesCache.find((x) => x.key === key);
+      if (!confirm(`Biztosan törlöd ezt a funkciót a katalógusból: ${f.nev}?`)) return;
+      try {
+        await api('/api/admin/license/features/delete', { method: 'POST', body: JSON.stringify({ key }) });
+        loadLicenseData();
+      } catch (e) {
+        alert('Nem sikerült törölni: ' + e.message);
+      }
+    });
+  });
+}
+
+function openLicenseFeatureModal(f) {
+  document.getElementById('license-feature-modal-title').textContent = f ? 'Funkció szerkesztése' : 'Új funkció';
+  document.getElementById('license-feature-key').value = f ? f.key : '';
+  document.getElementById('license-feature-nev').value = f ? f.nev : '';
+  document.getElementById('license-feature-leiras').value = f ? (f.leiras || '') : '';
+  document.getElementById('license-feature-ar').value = f ? f.alapAr : 0;
+  document.getElementById('license-feature-aktiv').checked = f ? f.aktiv : true;
+  document.getElementById('license-feature-msg').textContent = '';
+  document.getElementById('license-feature-modal-backdrop').hidden = false;
+}
+document.getElementById('license-feature-new-btn').addEventListener('click', () => openLicenseFeatureModal(null));
+document.getElementById('license-feature-modal-close').addEventListener('click', () => {
+  document.getElementById('license-feature-modal-backdrop').hidden = true;
+});
+document.getElementById('license-feature-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'license-feature-modal-backdrop') e.target.hidden = true;
+});
+document.getElementById('license-feature-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('license-feature-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const body = {
+      key: document.getElementById('license-feature-key').value || undefined,
+      nev: document.getElementById('license-feature-nev').value.trim(),
+      leiras: document.getElementById('license-feature-leiras').value.trim(),
+      alapAr: Number(document.getElementById('license-feature-ar').value) || 0,
+      aktiv: document.getElementById('license-feature-aktiv').checked,
+    };
+    await api('/api/admin/license/features/save', { method: 'POST', body: JSON.stringify(body) });
+    document.getElementById('license-feature-modal-backdrop').hidden = true;
+    loadLicenseData();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+async function loadLicenseCompanies() {
+  try {
+    const data = await api('/api/admin/license/companies');
+    licenseCompaniesCache = data.companies;
+    renderLicenseCompanies();
+  } catch (e) {
+    document.querySelector('#admin-licenc-table tbody').innerHTML =
+      `<tr><td colspan="4" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderLicenseCompanies() {
+  const tbody = document.querySelector('#admin-licenc-table tbody');
+  if (!licenseCompaniesCache.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">Még nincs egyetlen ismert cég sem.</td></tr>'; return; }
+  tbody.innerHTML = licenseCompaniesCache.map((c) => {
+    const kiosztott = c.licenses.filter((l) => l.kiosztva);
+    const badges = kiosztott.length
+      ? kiosztott.map((l) => `<span class="licenc-badge licenc-badge--${l.allapot}" style="margin:2px 4px 2px 0;">${escapeHtml(l.nev)}</span>`).join('')
+      : '<span class="licenc-badge licenc-badge--none">nincs kiosztott funkció</span>';
+    return `
+    <tr data-ceg="${escapeHtml(c.cegKulcs)}">
+      <td>${escapeHtml(c.nev)}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${badges}</td>
+      <td><button class="btn-tiny btn-license-manage">Kezelés</button></td>
+    </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('.btn-license-manage').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const cegKulcs = btn.closest('tr').dataset.ceg;
+      const c = licenseCompaniesCache.find((x) => x.cegKulcs === cegKulcs);
+      openLicenseGrantModal(c);
+    });
+  });
+}
+
+function openLicenseGrantModal(c) {
+  document.getElementById('license-grant-modal-title').textContent = `Licencek — ${c.nev}`;
+  document.getElementById('license-grant-modal-subtitle').textContent = c.adoszam;
+  const list = document.getElementById('license-grant-list');
+  list.innerHTML = c.licenses.map((l) => `
+    <div class="license-grant-row" data-key="${escapeHtml(l.key)}" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--line);">
+      <label style="flex:1 1 220px;display:flex;align-items:center;gap:8px;font-size:13px;">
+        <input type="checkbox" class="lg-aktiv" ${l.aktiv ? 'checked' : ''}> ${escapeHtml(l.nev)}
+      </label>
+      <input type="number" class="lg-ar" min="0" step="100" value="${l.ar != null ? l.ar : l.alapAr}" style="width:100px;padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;" title="Ár (Ft)">
+      <input type="date" class="lg-lejarat" value="${l.lejarat || ''}" style="padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;" title="Lejárat (üresen: nincs lejárat)">
+      <span class="licenc-badge licenc-badge--${l.allapot}">${escapeHtml(l.allapotSzoveg)}</span>
+      <button class="btn-tiny lg-save">Mentés</button>
+      ${l.kiosztva ? '<button class="btn-tiny lg-revoke">Visszavonás</button>' : ''}
+    </div>`).join('');
+
+  list.querySelectorAll('.license-grant-row').forEach((row) => {
+    const featureKey = row.dataset.key;
+    row.querySelector('.lg-save').addEventListener('click', async () => {
+      try {
+        await api('/api/admin/license/grant', {
+          method: 'POST',
+          body: JSON.stringify({
+            cegKulcs: c.cegKulcs,
+            featureKey,
+            ar: Number(row.querySelector('.lg-ar').value) || 0,
+            lejarat: row.querySelector('.lg-lejarat').value || null,
+            aktiv: row.querySelector('.lg-aktiv').checked,
+          }),
+        });
+        await loadLicenseCompanies();
+        const fresh = licenseCompaniesCache.find((x) => x.cegKulcs === c.cegKulcs);
+        openLicenseGrantModal(fresh);
+      } catch (e) {
+        alert('Nem sikerült menteni: ' + e.message);
+      }
+    });
+    const revokeBtn = row.querySelector('.lg-revoke');
+    if (revokeBtn) {
+      revokeBtn.addEventListener('click', async () => {
+        if (!confirm('Biztosan visszavonod ezt a funkciót ettől a cégtől?')) return;
+        try {
+          await api('/api/admin/license/revoke', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, featureKey }) });
+          await loadLicenseCompanies();
+          const fresh = licenseCompaniesCache.find((x) => x.cegKulcs === c.cegKulcs);
+          openLicenseGrantModal(fresh);
+        } catch (e) {
+          alert('Nem sikerült visszavonni: ' + e.message);
+        }
+      });
+    }
+  });
+  document.getElementById('license-grant-modal-backdrop').hidden = false;
+}
+document.getElementById('license-grant-modal-close').addEventListener('click', () => {
+  document.getElementById('license-grant-modal-backdrop').hidden = true;
+});
+document.getElementById('license-grant-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'license-grant-modal-backdrop') e.target.hidden = true;
+});
 
 /* ============================================================
    Admin — felhasználó meghívása (viszonteladó / cégtulajdonos / üzletvezető)

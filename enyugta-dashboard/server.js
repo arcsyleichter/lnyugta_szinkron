@@ -350,6 +350,89 @@ usersDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
 `);
 
+// ---------------------------------------------------------------------------
+// Licenc-kezelés — az androidos L-NYUGTA GO app licencét ezután a mi
+// szerverünk tartja nyilván és szolgálja ki (nem az lszamla rendszer).
+// Az lszamla modell mintájára (progtip_tul) a licenc FUNKCIÓNKÉNT (opción-
+// ként) engedélyezett, mindegyik saját árral — nem csak egyetlen céges
+// szintű lejárati dátum. Két tábla:
+//   - license_features: a funkció-KATALÓGUS (mit lehet egyáltalán árulni),
+//     admin szerkeszti (hozzáad/átnevez/áraz/kivezet) — data/license.db
+//   - company_licenses: melyik CÉG melyik funkcióhoz fér hozzá, milyen
+//     áron, meddig érvényesen (lejarat lehet NULL = nincs lejárat/örökös)
+// ---------------------------------------------------------------------------
+const LICENSE_DB_PATH = path.join(DATA_DIR, 'license.db');
+const licenseDb = new DatabaseSync(LICENSE_DB_PATH, { readOnly: false });
+licenseDb.exec(`
+  CREATE TABLE IF NOT EXISTS license_features (
+    key TEXT PRIMARY KEY,
+    nev TEXT NOT NULL,
+    leiras TEXT,
+    alap_ar INTEGER NOT NULL DEFAULT 0,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    sorrend INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS company_licenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ceg_kulcs TEXT NOT NULL,
+    feature_key TEXT NOT NULL,
+    ar INTEGER NOT NULL DEFAULT 0,
+    lejarat TEXT,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    jovahagyta TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ceg_kulcs, feature_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_company_licenses_ceg ON company_licenses(ceg_kulcs);
+`);
+// Első indításkor feltöltjük egy induló katalógussal — ezt az admin
+// utólag szabadon szerkesztheti (átnevezheti, árazhatja, kivezetheti,
+// újat vehet fel), ez csak egy ésszerű kiindulópont.
+{
+  const count = licenseDb.prepare('SELECT COUNT(*) AS c FROM license_features').get().c;
+  if (count === 0) {
+    const now = new Date().toISOString();
+    const defaults = [
+      ['alap_nyugta', 'Alap nyugta-nézegető', 'Élő értékesítési adatok, napi/időszaki bontásban.', 0, 0],
+      ['cikkcsoport_kezeles', 'Cikkcsoport kezelés', 'Cikkcsoportok létrehozása, szerkesztése a weben.', 2900, 1],
+      ['osszehasonlitas', 'Időszak-összehasonlítás', 'Két időszak automatikus, szöveges elemzéssel támogatott összevetése.', 1900, 2],
+      ['export_riport', 'Riport export (CSV/Excel)', 'Táblázatok exportálása CSV-be, Excelben natívan megnyitható formátumban.', 1500, 3],
+      ['tobb_telephely', 'Több telephely kezelése', 'Egynél több telephely nyilvántartása és külön-külön áttekintése.', 3900, 4],
+      ['ntak_figyeles', 'NTAK állapot-figyelés', 'Az NTAK adatküldés állapotának automatikus figyelése és jelzése.', 2400, 5],
+    ];
+    for (const [key, nev, leiras, alapAr, sorrend] of defaults) {
+      licenseDb.prepare(
+        `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)`
+      ).run(key, nev, leiras, alapAr, sorrend, now);
+    }
+  }
+}
+
+// Egyszerű, ékezet- és írásjel-mentes "slug" egy funkció-kulcshoz, a
+// megadott névből — csak akkor kell, ha az admin nem ad meg sajátot.
+function slugifyFeatureKey(nev) {
+  const noAccent = String(nev || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return noAccent.slice(0, 40) || `funkcio_${Date.now()}`;
+}
+
+// Egy company_licenses sor "állapotát" (badge) számolja ki — ugyanaz a
+// szín-konvenció, mint amit korábban az lszamla-mintájú admin makett is
+// használt (piros = lejárt, sárga = hamarosan lejár, zöld = érvényes,
+// szürke = nincs regisztráció).
+function licenseRowStatus(row) {
+  if (!row) return { allapot: 'none', allapotSzoveg: 'nincs regisztráció' };
+  if (!row.aktiv) return { allapot: 'expired', allapotSzoveg: 'letiltva' };
+  if (row.lejarat) {
+    const days = Math.floor((new Date(row.lejarat + 'T00:00:00Z') - new Date(todayIsoServer() + 'T00:00:00Z')) / 86400000);
+    if (days < 0) return { allapot: 'expired', allapotSzoveg: 'lejárt' };
+    if (days <= 7) return { allapot: 'warn', allapotSzoveg: days === 0 ? 'ma jár le' : `${days} napon belül lejár` };
+  }
+  return { allapot: 'ok', allapotSzoveg: 'érvényes' };
+}
+
 function addProductChange(companyKey, changeType, payload, source, meta) {
   // Ha ugyanerre a cikkre/csoportra már van egy még FÜGGŐBEN lévő korábbi
   // módosítás, azt előbb töröljük — különben soha nem tudna teljesülni
@@ -1368,6 +1451,151 @@ route('POST', '/api/admin/users/delete', async (req, res) => {
   }
   usersDb.prepare('DELETE FROM users WHERE id = ?').run(id);
   logActivity({ type: 'user_delete', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `${u.email} (${u.role}) törölve` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Admin — Licenc-kezelés
+// ---------------------------------------------------------------------------
+
+// Funkció-katalógus listája (aktív és kivezetett is, hogy a korábban
+// kiosztott, de már kivezetett funkciók se tűnjenek el nyomtalanul).
+route('GET', '/api/admin/license/features', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = licenseDb.prepare(`SELECT key, nev, leiras, alap_ar, aktiv, sorrend FROM license_features ORDER BY sorrend, nev`).all();
+  sendJson(res, 200, {
+    features: rows.map((r) => ({ key: r.key, nev: r.nev, leiras: r.leiras || '', alapAr: r.alap_ar, aktiv: !!r.aktiv, sorrend: r.sorrend })),
+  });
+});
+
+// Funkció felvétele / szerkesztése (upsert `key` alapján — ha nincs `key`
+// megadva, a névből generálunk egyet). A kulcs utólag nem módosítható,
+// mert a company_licenses táblát is ez azonosítja.
+route('POST', '/api/admin/license/features/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const nev = String(body.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A funkció nevének megadása kötelező.' });
+  const alapAr = Math.max(0, parseInt(body.alapAr, 10) || 0);
+  const sorrend = parseInt(body.sorrend, 10) || 0;
+  const aktiv = body.aktiv === false ? 0 : 1;
+  const leiras = String(body.leiras || '').trim();
+  let key = String(body.key || '').trim();
+  const isNew = !key;
+  if (isNew) {
+    key = slugifyFeatureKey(nev);
+    // Ütközés esetén (ugyanaz a slug már foglalt) számot fűzünk a végére.
+    let candidate = key, n = 2;
+    while (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(candidate)) {
+      candidate = `${key}_${n}`; n += 1;
+    }
+    key = candidate;
+    licenseDb.prepare(
+      `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(key, nev, leiras, alapAr, aktiv, sorrend, new Date().toISOString());
+    logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Új funkció felvéve: ${nev} (${key})` });
+  } else {
+    const existing = licenseDb.prepare('SELECT key FROM license_features WHERE key = ?').get(key);
+    if (!existing) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+    licenseDb.prepare(
+      `UPDATE license_features SET nev = ?, leiras = ?, alap_ar = ?, aktiv = ?, sorrend = ? WHERE key = ?`
+    ).run(nev, leiras, alapAr, aktiv, sorrend, key);
+    logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Funkció módosítva: ${nev} (${key})` });
+  }
+  sendJson(res, 200, { ok: true, key });
+});
+
+// Funkció törlése a katalógusból — csak akkor engedjük, ha egyetlen cég
+// sem rendelkezik vele (különben inkább kapcsold ki az "aktív" jelzőt).
+route('POST', '/api/admin/license/features/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { key } = await readJsonBody(req);
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(key);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  const inUse = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_licenses WHERE feature_key = ?').get(key).c;
+  if (inUse > 0) {
+    return sendJson(res, 400, { error: `Ez a funkció ${inUse} cégnél van kiosztva — előbb vond vissza azoknál, vagy kapcsold ki helyette az "aktív" jelzőt.` });
+  }
+  licenseDb.prepare('DELETE FROM license_features WHERE key = ?').run(key);
+  logActivity({ type: 'license_feature_delete', ok: true, companyKey: null, nev: 'admin', detail: `Funkció törölve a katalógusból: ${feature.nev} (${key})` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Cégenkénti licenc-áttekintés — minden ismert cég (a companyIndexből,
+// telephelyenként deduplikálva egyetlen céges sorra), mindegyikhez az
+// összes katalógus-funkció aktuális állapotával (kiosztva/nincs kiosztva).
+route('GET', '/api/admin/license/companies', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const features = licenseDb.prepare(`SELECT key, nev, alap_ar, aktiv FROM license_features ORDER BY sorrend, nev`).all();
+
+  // Cégek deduplikálása cégkulcs szerint — egy cégnek több telephelye is
+  // lehet a companyIndexben, de a licenc céges szintű, nem telephelyszintű.
+  const byCeg = new Map();
+  for (const entry of companyIndex.values()) {
+    if (!byCeg.has(entry.cegKulcs)) byCeg.set(entry.cegKulcs, entry);
+  }
+  const grantsByCeg = new Map();
+  for (const row of licenseDb.prepare('SELECT * FROM company_licenses').all()) {
+    if (!grantsByCeg.has(row.ceg_kulcs)) grantsByCeg.set(row.ceg_kulcs, new Map());
+    grantsByCeg.get(row.ceg_kulcs).set(row.feature_key, row);
+  }
+
+  const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
+    const grants = grantsByCeg.get(cegKulcs) || new Map();
+    const licenses = features.map((f) => {
+      const row = grants.get(f.key);
+      const status = licenseRowStatus(row);
+      return {
+        key: f.key, nev: f.nev, alapAr: f.alap_ar, katalogusAktiv: !!f.aktiv,
+        kiosztva: !!row, ar: row ? row.ar : null, lejarat: row ? row.lejarat : null,
+        aktiv: row ? !!row.aktiv : false, ...status,
+      };
+    });
+    return { cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses };
+  }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
+
+  sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
+});
+
+// Licenc kiosztása / módosítása egy cégnek egy adott funkcióra — upsert.
+route('POST', '/api/admin/license/grant', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, featureKey, ar, lejarat, aktiv } = await readJsonBody(req);
+  if (!cegKulcs || !featureKey) return sendJson(res, 400, { error: 'Hiányzó cégkulcs vagy funkció-kulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(featureKey);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  const cleanAr = Math.max(0, parseInt(ar, 10) || 0);
+  const cleanLejarat = /^\d{4}-\d{2}-\d{2}$/.test(lejarat || '') ? lejarat : null;
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  licenseDb.prepare(`
+    INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET ar = excluded.ar, lejarat = excluded.lejarat, aktiv = excluded.aktiv, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+  `).run(cegKulcs, featureKey, cleanAr, cleanLejarat, cleanAktiv, 'admin', new Date().toISOString());
+  logActivity({
+    type: 'license_grant', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Licenc frissítve — ${feature.nev}: ${cleanAr} Ft${cleanLejarat ? `, lejárat: ${cleanLejarat}` : ', nincs lejárat'}${cleanAktiv ? '' : ' (letiltva)'}`,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+// Licenc visszavonása (a kiosztás teljes törlése — a cég ismét
+// "nincs regisztráció" állapotba kerül az adott funkcióra).
+route('POST', '/api/admin/license/revoke', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, featureKey } = await readJsonBody(req);
+  const feature = licenseDb.prepare('SELECT nev FROM license_features WHERE key = ?').get(featureKey);
+  const changes = licenseDb.prepare('DELETE FROM company_licenses WHERE ceg_kulcs = ? AND feature_key = ?').run(cegKulcs, featureKey).changes;
+  if (!changes) return sendJson(res, 404, { error: 'Ez a cég nem rendelkezik ezzel a funkcióval.' });
+  logActivity({ type: 'license_revoke', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `Licenc visszavonva: ${feature?.nev || featureKey}` });
   sendJson(res, 200, { ok: true });
 });
 
@@ -2737,6 +2965,34 @@ route('GET', '/api/sync/companies', async (req, res) => {
     ...(meta[key] || { lastSync: null, source: null }),
   }));
   sendJson(res, 200, { count: list.length, companies: list });
+});
+
+// Licenc-állapot lekérdezése az androidos app számára — ugyanúgy
+// x-api-key-jel hitelesít, mint a többi szinkron végpont (NEM böngésző-
+// session). Ez váltja ki a korábbi lszamla-alapú licenc-lekérdezést: az
+// app mostantól a saját szerverünktől kérdezi le, melyik funkciókhoz fér
+// hozzá az adott cég, és meddig érvényesen.
+route('GET', '/api/license/status', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+
+  const grants = new Map(
+    licenseDb.prepare('SELECT * FROM company_licenses WHERE ceg_kulcs = ?').all(cegKulcs).map((r) => [r.feature_key, r])
+  );
+  const catalog = licenseDb.prepare('SELECT key, nev, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
+  const features = catalog.map((f) => {
+    const row = grants.get(f.key);
+    const status = licenseRowStatus(row);
+    return {
+      key: f.key, nev: f.nev,
+      engedelyezve: !!row && !!row.aktiv && status.allapot !== 'expired',
+      lejarat: row ? row.lejarat : null,
+      allapot: status.allapot,
+    };
+  });
+  sendJson(res, 200, { adoszam: query.adoszam || '', cegKulcs, features });
 });
 
 // ---------------------------------------------------------------------------

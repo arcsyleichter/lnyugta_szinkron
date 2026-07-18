@@ -1059,21 +1059,29 @@
       <div class="card">
         <div class="card-title-row">
           <div>
-            <div class="card-title">Licenc-kezelés</div>
-            <div class="card-subtitle">koncepció-terv — az lszamla rendszerrel való jövőbeli összekapcsolásról, MINTA adatokkal</div>
+            <div class="card-title">Funkció-katalógus</div>
+            <div class="card-subtitle">az androidos app licencei ezekből az opciókból épülnek fel — funkciónként saját árral</div>
           </div>
-          <span class="licenc-mock-badge">Minta felület — nem élő adat</span>
+          <button class="btn-secondary" id="license-feature-new-btn">+ Új funkció</button>
         </div>
-        <p class="licenc-mock-lede">
-          Ez a nézet azt mutatja meg, hogyan nézne ki a licenc-adatok integrációja, ha
-          egyszer élő kapcsolat lenne az lszamla rendszerrel (kulcs-alapú export vagy API
-          — jelszó-alapú, automatikus lekérdezést a szerver biztonsági okból nem végezhet).
-          Az alábbi táblázat MINTA adatokat mutat, a valós lszamla szín-konvenció szerint
-          (piros = lejárt, sárga = hamarosan lejár, zöld = ingyenes).
-        </p>
+        <div class="table-scroll">
+          <table class="data-table" id="admin-license-features-table">
+          <thead><tr><th>Funkció</th><th>Leírás</th><th class="td-right">Alapár</th><th>Állapot</th><th></th></tr></thead>
+          <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Cégenkénti licencek</div>
+            <div class="card-subtitle">minden ismert cég, funkciónkénti engedélyezéssel — az androidos app ezt kérdezi le a szerverünktől</div>
+          </div>
+        </div>
         <div class="table-scroll">
           <table class="data-table" id="admin-licenc-table">
-          <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Program</th><th>Verzió</th><th>Állapot</th><th>Reg. dátum</th></tr></thead>
+          <thead><tr><th>Cégnév</th><th>Adószám</th><th>Kiosztott funkciók</th><th></th></tr></thead>
           <tbody></tbody>
           </table>
         </div>
@@ -1151,6 +1159,36 @@
         <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
         <div class="profile-form-msg" id="user-edit-msg"></div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="license-feature-modal-backdrop" hidden>
+    <div class="modal">
+      <button class="modal-close" id="license-feature-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:16px;" id="license-feature-modal-title">Új funkció</div>
+      <form id="license-feature-form">
+        <input type="hidden" id="license-feature-key">
+        <label for="license-feature-nev" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Név</label>
+        <input id="license-feature-nev" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label for="license-feature-leiras" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Leírás</label>
+        <input id="license-feature-leiras" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label for="license-feature-ar" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Alapár (Ft)</label>
+        <input id="license-feature-ar" type="number" min="0" step="100" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:16px;">
+          <input id="license-feature-aktiv" type="checkbox" checked> Aktív (választható a katalógusban)
+        </label>
+        <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
+        <div class="profile-form-msg" id="license-feature-msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="license-grant-modal-backdrop" hidden>
+    <div class="modal">
+      <button class="modal-close" id="license-grant-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:4px;" id="license-grant-modal-title">Licencek kezelése</div>
+      <div class="card-subtitle" style="margin-bottom:16px;" id="license-grant-modal-subtitle"></div>
+      <div id="license-grant-list"></div>
     </div>
   </div>
 </div>
