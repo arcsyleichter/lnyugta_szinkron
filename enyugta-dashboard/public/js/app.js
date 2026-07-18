@@ -1374,6 +1374,146 @@ document.querySelectorAll('#group-toggle .chip').forEach((chip) => {
   });
 });
 
+document.getElementById('analysis-type-row').querySelectorAll('.chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#analysis-type-row .chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    const type = chip.dataset.analysis;
+    document.getElementById('analysis-period-panel').hidden = type !== 'period';
+    document.getElementById('analysis-hours-panel').hidden = type !== 'hours';
+  });
+});
+
+// Alapértelmezett vizsgált időszak: utolsó 90 nap — elég hosszú ahhoz, hogy
+// minden hét napjából legyen több előfordulás, statisztikailag stabilabb
+// átlagot adva, mint egy-két hét.
+(function initHoursDefaultRange() {
+  const to = todayIso();
+  const from = new Date(Date.now() - 89 * 86400000).toISOString().slice(0, 10);
+  document.getElementById('hours-to').value = to;
+  document.getElementById('hours-from').value = from;
+})();
+
+document.getElementById('hours-run-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('hours-run-btn');
+  const msg = document.getElementById('hours-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Számolás…';
+  try {
+    const from = document.getElementById('hours-from').value;
+    const to = document.getElementById('hours-to').value;
+    if (!from || !to) throw new Error('Add meg a vizsgált időszakot.');
+    const data = await api(`/api/analysis/opening-hours?from=${from}&to=${to}`);
+    renderHoursResults(data);
+    document.getElementById('hours-results').hidden = false;
+  } catch (e) {
+    msg.textContent = e.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Elemzés indítása';
+  }
+});
+
+let hoursAnalysisData = null;
+
+function renderHoursResults(data) {
+  hoursAnalysisData = data;
+  document.getElementById('hours-global-analysis').textContent = data.globalRecommendation;
+
+  // A hőtérkép csak azt az óra-tartományt mutatja, ami ténylegesen releváns
+  // (a legkorábbi nyitástól a legkésőbbi zárásig, egy kis ráhagyással) —
+  // nincs értelme 0-24 óráig mutatni egy nappali nyitvatartású boltnál.
+  const activeDays = data.weekdays.filter((w) => w.napok > 0);
+  let minH = 23, maxH = 0;
+  activeDays.forEach((w) => {
+    const oh = w.avgNyitas ? parseInt(w.avgNyitas.slice(0, 2), 10) : 8;
+    const ch = w.avgZaras ? parseInt(w.avgZaras.slice(0, 2), 10) + 1 : 20;
+    if (oh - 1 < minH) minH = Math.max(0, oh - 1);
+    if (ch + 1 > maxH) maxH = Math.min(23, ch + 1);
+  });
+  if (!activeDays.length) { minH = 8; maxH = 20; }
+
+  const globalMax = Math.max(...data.heatmap.flat(), 1);
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  let html = '<table><thead><tr><th></th>';
+  for (let h = minH; h <= maxH; h++) html += `<th>${h}</th>`;
+  html += '</tr></thead><tbody>';
+  order.forEach((wd) => {
+    const w = data.weekdays[wd];
+    const oh = w.avgNyitas ? parseInt(w.avgNyitas.slice(0, 2), 10) : null;
+    const ch = w.avgZaras ? parseInt(w.avgZaras.slice(0, 2), 10) : null;
+    html += `<tr><th class="hh-wd-label">${w.label}</th>`;
+    for (let h = minH; h <= maxH; h++) {
+      const v = w.hourly[h] || 0;
+      const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
+      const alpha = Math.min(1, v / globalMax);
+      const bg = isOpen ? `rgba(61,113,168,${(0.08 + alpha * 0.85).toFixed(2)})` : 'transparent';
+      const cls = isOpen ? '' : 'hh-closed';
+      html += `<td><div class="hh-cell ${cls}" style="background:${bg}" title="${w.label} ${h}:00 — ${fmtHuf(v)}${isOpen ? '' : ' (zárva)'}"></div></td>`;
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('hours-heatmap').innerHTML = html;
+
+  // Napi részletek választó — csak azok a napok, amikhez van adat.
+  const picker = document.getElementById('hours-day-picker');
+  picker.innerHTML = order.filter((wd) => data.weekdays[wd].napok > 0)
+    .map((wd, i) => `<button class="chip${i === 0 ? ' is-active' : ''}" data-wd="${wd}">${data.weekdays[wd].label}</button>`).join('');
+  picker.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      picker.querySelectorAll('.chip').forEach((c) => c.classList.remove('is-active'));
+      chip.classList.add('is-active');
+      renderHoursDayDetail(Number(chip.dataset.wd));
+    });
+  });
+  const firstWd = order.find((wd) => data.weekdays[wd].napok > 0);
+  if (firstWd !== undefined) renderHoursDayDetail(firstWd);
+}
+
+function renderHoursDayDetail(wd) {
+  const w = hoursAnalysisData.weekdays[wd];
+  document.getElementById('hours-day-analysis').textContent = w.recommendation || 'Nincs elegendő adat ehhez a naphoz.';
+
+  const container = document.getElementById('hours-day-chart');
+  container.innerHTML = '';
+  const oh = w.avgNyitas ? parseInt(w.avgNyitas.slice(0, 2), 10) : null;
+  const ch = w.avgZaras ? parseInt(w.avgZaras.slice(0, 2), 10) : null;
+  const minH = oh !== null ? Math.max(0, oh - 1) : 6;
+  const maxH = ch !== null ? Math.min(23, ch + 1) : 22;
+  const hours = [];
+  for (let h = minH; h <= maxH; h++) hours.push(h);
+
+  const W = container.clientWidth || 560, H = 220;
+  const padL = 54, padR = 16, padT = 16, padB = 28;
+  const max = Math.max(...hours.map((h) => w.hourly[h] || 0), 1);
+  const groupW = (W - padL - padR) / hours.length;
+  const barW = groupW * 0.6;
+  let bars = '', labels = '';
+  hours.forEach((h, i) => {
+    const v = w.hourly[h] || 0;
+    const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
+    const barH = (H - padT - padB) * (v / max);
+    const gx = padL + i * groupW;
+    bars += `<rect x="${(gx + groupW / 2 - barW / 2).toFixed(1)}" y="${(H - padB - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" fill="${isOpen ? '#3D71A8' : '#C8CDD4'}" rx="3"/>`;
+    labels += `<text x="${(gx + groupW / 2).toFixed(1)}" y="${H - 10}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="IBM Plex Mono">${h}</text>`;
+  });
+  let gridSvg = '';
+  for (let g = 0; g <= 3; g++) {
+    const gy = padT + ((H - padT - padB) / 3) * g;
+    const val = Math.round(max * (1 - g / 3));
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+  }
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      ${gridSvg}${bars}${labels}
+    </svg>
+    <div class="chart-legend">
+      <span><i style="background:#3D71A8;"></i>Nyitvatartáson belül</span>
+      <span><i style="background:#C8CDD4;"></i>Nyitvatartáson kívül</span>
+    </div>`;
+}
+
 let compareState = { mode: 'years' };
 
 function initCompareYearSelects() {

@@ -223,7 +223,7 @@
     <nav class="nav">
       <button class="nav-item is-active" data-view="overview">Áttekintés</button>
       <button class="nav-item" data-view="revenue">Forgalom</button>
-      <button class="nav-item" data-view="compare">Összehasonlítás</button>
+      <button class="nav-item" data-view="compare">Elemzés</button>
       <button class="nav-item" data-view="products">Cikk eladások</button>
       <button class="nav-item" data-view="masterdata">Cikktörzs</button>
       <button class="nav-item" data-view="receipts">Nyugták</button>
@@ -370,6 +370,15 @@
     <!-- --- ÖSSZEHASONLÍTÁS --- -->
     <section class="view" data-view="compare" hidden>
       <div class="card">
+        <div class="card-title">Milyen elemzést szeretnél?</div>
+        <div class="compare-type-row group-toggle" id="analysis-type-row">
+          <button class="chip is-active" data-analysis="period">Időszak-összehasonlítás</button>
+          <button class="chip" data-analysis="hours">Nyitvatartás optimalizálása</button>
+        </div>
+      </div>
+
+      <div id="analysis-period-panel">
+      <div class="card">
         <div class="card-title">Mit hasonlítsunk össze?</div>
         <div class="compare-type-row group-toggle" id="compare-mode-row">
           <button class="chip is-active" data-mode="years">Teljes évek</button>
@@ -475,6 +484,46 @@
             <div class="card-title">Legnagyobb visszaesés</div>
             <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-csökkenés szerint</p>
             <div id="compare-losers-list"></div>
+          </div>
+        </div>
+      </div>
+      </div>
+
+      <div id="analysis-hours-panel" hidden>
+        <div class="card">
+          <div class="card-title">Vizsgált időszak</div>
+          <div class="compare-mode-controls" style="margin-top:0;">
+            <div class="stock-field">
+              <label for="hours-from">Kezdete</label>
+              <input type="date" id="hours-from">
+            </div>
+            <div class="stock-field">
+              <label for="hours-to">Vége</label>
+              <input type="date" id="hours-to">
+            </div>
+            <button class="btn-primary" id="hours-run-btn">Elemzés indítása</button>
+          </div>
+          <div class="stock-form-msg" id="hours-msg"></div>
+        </div>
+
+        <div id="hours-results" hidden>
+          <div class="card">
+            <div class="card-title">Összegzés</div>
+            <p class="compare-analysis" id="hours-global-analysis"></p>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Forgalom napszak és hét napja szerint</div>
+            <p class="card-subtitle" style="margin-bottom:12px;">minél sötétebb egy mező, annál nagyobb az adott órában lebonyolított forgalom — a nyitvatartáson kívüli órák halványítva</p>
+            <div id="hours-heatmap"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Napi részletek</div>
+            <p class="card-subtitle" style="margin-bottom:12px;">válassz egy napot a részletes óránkénti bontáshoz</p>
+            <div class="compare-type-row group-toggle" id="hours-day-picker"></div>
+            <div id="hours-day-chart" class="chart-holder"></div>
+            <p class="compare-analysis" id="hours-day-analysis"></p>
           </div>
         </div>
       </div>

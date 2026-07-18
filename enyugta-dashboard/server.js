@@ -1512,6 +1512,119 @@ route('GET', '/api/compare/products', async (req, res, query) => {
   sendJson(res, 200, { items: rows.map((r) => r.nev) });
 });
 
+// ---------------------------------------------------------------------------
+// Nyitvatartás-optimalizálás — hét napja szerint összeveti a TÉNYLEGESEN
+// rögzített nyitvatartást a valós, óránkénti forgalmi eloszlással, hogy
+// megmutassa: van-e "holt" (nyitva, de érdemi eladás nélküli) időszak a
+// nyitvatartás szélein, vagy fordítva — zárás közelében is van-e még
+// számottevő forgalom, ami esetleg hosszabbítást indokolna.
+// ---------------------------------------------------------------------------
+route('GET', '/api/analysis/opening-hours', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : todayIsoServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : addDaysISO(to, -89);
+
+  const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+
+  // Tényleges, rögzített nyitvatartás átlaga hét napja szerint.
+  const openRows = all(k,
+    `SELECT CAST(strftime('%w', targynap) AS INTEGER) AS wd,
+            AVG(CAST(strftime('%H', nyitas) AS INTEGER) + CAST(strftime('%M', nyitas) AS INTEGER)/60.0) AS nyitasOra,
+            AVG(CAST(strftime('%H', zaras) AS INTEGER) + CAST(strftime('%M', zaras) AS INTEGER)/60.0) AS zarasOra,
+            COUNT(*) AS napok
+     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? AND nyitas IS NOT NULL AND zaras IS NOT NULL
+     GROUP BY wd`,
+    [from, to]
+  );
+  const openByWd = new Map(openRows.map((r) => [r.wd, r]));
+
+  // Óránkénti forgalmi eloszlás, hét napja szerint — a nyugta TÉNYLEGES
+  // kezdési időpontja (rendkezdatum) alapján, nem a szinkron időpontja.
+  const hourlyRows = all(k,
+    `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd, CAST(strftime('%H', rendkezdatum) AS INTEGER) AS hh,
+            IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND rendkezdatum IS NOT NULL AND ${NOT_STORNO}
+     GROUP BY wd, hh`,
+    [from, to]
+  );
+  const hourlyMap = new Map(); // "wd-hh" -> revenue
+  hourlyRows.forEach((r) => hourlyMap.set(`${r.wd}-${r.hh}`, r.revenue));
+
+  const fmtHH = (dec) => {
+    if (dec === undefined || dec === null || Number.isNaN(dec)) return null;
+    const h = Math.floor(dec), m = Math.round((dec - h) * 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+
+  const weekdays = [];
+  const heatmap = []; // [wd][hh] = revenue, csak akkor ha van legalabb 1 nap adat
+  for (let wd = 0; wd < 7; wd++) {
+    const hourly = [];
+    let total = 0, peak = 0;
+    for (let h = 0; h < 24; h++) {
+      const v = hourlyMap.get(`${wd}-${h}`) || 0;
+      hourly.push(v);
+      total += v;
+      if (v > peak) peak = v;
+    }
+    heatmap.push(hourly);
+
+    const open = openByWd.get(wd);
+    let deadZoneStartHours = 0, deadZoneEndHours = 0, recommendation = null;
+    if (open && peak > 0) {
+      const threshold = peak * 0.08; // önkényes, de bevált küszöb: a csúcsóra 8%-a alatt "elhanyagolható" forgalom
+      const openH = Math.round(open.nyitasOra);
+      const closeH = Math.round(open.zarasOra);
+      for (let h = openH; h < closeH; h++) {
+        if (hourly[h] <= threshold) deadZoneStartHours++; else break;
+      }
+      for (let h = closeH - 1; h >= openH; h--) {
+        if (hourly[h] <= threshold) deadZoneEndHours++; else break;
+      }
+      const lastHourShare = hourly[closeH - 1] ? Math.round((hourly[closeH - 1] / total) * 100) : 0;
+
+      const parts = [];
+      if (deadZoneEndHours >= 1) {
+        parts.push(`A zárás előtti ${deadZoneEndHours} óra érdemi forgalom nélkül telik (a nyitvatartás vége: ${fmtHH(open.zarasOra)}) — érdemes lehet fontolóra venni a korábbi zárást.`);
+      }
+      if (deadZoneStartHours >= 1) {
+        parts.push(`A nyitás utáni ${deadZoneStartHours} óra is jellemzően forgalom nélkül telik (nyitás: ${fmtHH(open.nyitasOra)}) — később nyitva is elegendő lehet.`);
+      }
+      if (deadZoneEndHours === 0 && lastHourShare >= 10) {
+        parts.push(`A zárás előtti utolsó órában is jelentős (a napi forgalom ${lastHourShare}%-a) az eladás — érdemes megfontolni a nyitvatartás meghosszabbítását.`);
+      }
+      if (!parts.length) {
+        parts.push(`A nyitvatartás jól illeszkedik a tényleges forgalmi mintázathoz, nincs számottevő holt időszak.`);
+      }
+      recommendation = parts.join(' ');
+    }
+
+    weekdays.push({
+      wd, label: labels[wd],
+      avgNyitas: open ? fmtHH(open.nyitasOra) : null,
+      avgZaras: open ? fmtHH(open.zarasOra) : null,
+      napok: open ? open.napok : 0,
+      hourly, totalRevenue: total, peakRevenue: peak,
+      deadZoneStartHours, deadZoneEndHours, recommendation,
+    });
+  }
+
+  // Globális, összegző megállapítás — melyik nap(ok) mutatják a legnagyobb
+  // eltérést, hogy azonnal odairányítsuk a figyelmet.
+  const withIssues = weekdays.filter((w) => w.recommendation && (w.deadZoneStartHours > 0 || w.deadZoneEndHours > 0));
+  let globalRecommendation;
+  if (!withIssues.length) {
+    globalRecommendation = 'A vizsgált időszakban a nyitvatartás minden napon jól illeszkedik a tényleges forgalmi mintázathoz.';
+  } else {
+    const worst = [...withIssues].sort((a, b) => (b.deadZoneStartHours + b.deadZoneEndHours) - (a.deadZoneStartHours + a.deadZoneEndHours))[0];
+    globalRecommendation = `A legnagyobb, nyitvatartással kapcsolatos eltérés ${worst.label.toLowerCase()}on/-en látszik — lásd lent a részleteket. ${withIssues.length} napon van érdemi eltérés a nyitvatartás és a tényleges forgalom között.`;
+  }
+
+  sendJson(res, 200, { from, to, weekdays, heatmap, globalRecommendation });
+});
+
 route('GET', '/api/summary', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
