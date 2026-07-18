@@ -999,9 +999,8 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     btn.classList.add('is-active');
     const view = btn.dataset.view;
     document.querySelectorAll('.view').forEach((v) => { v.hidden = v.dataset.view !== view; });
-    document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt' || view === 'masterdata');
+    document.getElementById('main-topbar').hidden = (view === 'stock' || view === 'stock-receipt' || view === 'masterdata' || view === 'compare');
     if (view === 'revenue') loadRevenueView();
-    if (view === 'compare') loadCompareView();
     if (view === 'products') loadProductsView(true);
     if (view === 'masterdata') loadMasterdataView();
     if (view === 'receipts') loadReceiptsView(true);
@@ -1134,7 +1133,6 @@ async function refreshAll(spin) {
     await loadOverview();
     const activeView = document.querySelector('.nav-item.is-active').dataset.view;
     if (activeView === 'revenue') await loadRevenueView();
-    if (activeView === 'compare') await loadCompareView();
     if (activeView === 'products') await loadProductsView(false);
     if (activeView === 'receipts') await loadReceiptsView(false);
     if (activeView === 'ntak') await loadNtakView();
@@ -1376,61 +1374,144 @@ document.querySelectorAll('#group-toggle .chip').forEach((chip) => {
   });
 });
 
-let compareState = { focus: 'prev-week' };
+let compareState = { mode: 'years' };
 
-document.getElementById('compare-type-row').querySelectorAll('.chip').forEach((chip) => {
+function initCompareYearSelects() {
+  const thisYear = new Date().getFullYear();
+  const yA = document.getElementById('compare-yearA');
+  const yB = document.getElementById('compare-yearB');
+  yA.innerHTML = ''; yB.innerHTML = '';
+  for (let y = thisYear; y >= thisYear - 6; y--) {
+    yA.innerHTML += `<option value="${y}" ${y === thisYear ? 'selected' : ''}>${y}</option>`;
+    yB.innerHTML += `<option value="${y}" ${y === thisYear - 1 ? 'selected' : ''}>${y}</option>`;
+  }
+}
+initCompareYearSelects();
+
+document.getElementById('compare-mode-row').querySelectorAll('.chip').forEach((chip) => {
   chip.addEventListener('click', () => {
-    document.querySelectorAll('#compare-type-row .chip').forEach((c) => c.classList.remove('is-active'));
+    document.querySelectorAll('#compare-mode-row .chip').forEach((c) => c.classList.remove('is-active'));
     chip.classList.add('is-active');
-    compareState.focus = chip.dataset.compare;
-    loadCompareView();
+    compareState.mode = chip.dataset.mode;
+    document.getElementById('compare-controls-years').hidden = compareState.mode !== 'years';
+    document.getElementById('compare-controls-custom').hidden = compareState.mode !== 'custom';
+    document.getElementById('compare-controls-weekday').hidden = compareState.mode !== 'weekday';
+    document.getElementById('compare-results').hidden = true;
+    document.getElementById('compare-msg').textContent = '';
   });
 });
 
-async function loadCompareView() {
-  const { from, to } = state.range;
-  const data = await api(`/api/compare?from=${from}&to=${to}&compare=${compareState.focus}`);
+let compareCikkTimer = null;
+document.getElementById('compare-cikk-input').addEventListener('input', () => {
+  clearTimeout(compareCikkTimer);
+  const q = document.getElementById('compare-cikk-input').value.trim();
+  compareCikkTimer = setTimeout(async () => {
+    if (q.length < 2) return;
+    try {
+      const res = await api(`/api/compare/products?q=${encodeURIComponent(q)}`);
+      document.getElementById('compare-cikk-list').innerHTML = res.items.map((n) => `<option value="${escapeHtml(n)}">`).join('');
+    } catch (_) { /* csendben, ez csak kényelmi segédlet */ }
+  }, 250);
+});
 
-  // --- Áttekintő kártyák, mind a négy viszonyítási alaphoz ---
+document.getElementById('compare-run-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('compare-run-btn');
+  const msg = document.getElementById('compare-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Számolás…';
+  try {
+    const cikk = document.getElementById('compare-cikk-input').value.trim();
+    const params = new URLSearchParams({ mode: compareState.mode });
+    if (cikk) params.set('cikk', cikk);
+
+    if (compareState.mode === 'years') {
+      params.set('yearA', document.getElementById('compare-yearA').value);
+      params.set('yearB', document.getElementById('compare-yearB').value);
+    } else if (compareState.mode === 'custom') {
+      const fromA = document.getElementById('compare-fromA').value;
+      const toA = document.getElementById('compare-toA').value;
+      const fromB = document.getElementById('compare-fromB').value;
+      const toB = document.getElementById('compare-toB').value;
+      if (!fromA || !toA || !fromB || !toB) throw new Error('Add meg mind a négy dátumot.');
+      params.set('fromA', fromA); params.set('toA', toA); params.set('fromB', fromB); params.set('toB', toB);
+    } else if (compareState.mode === 'weekday') {
+      const from = document.getElementById('compare-wd-from').value;
+      const to = document.getElementById('compare-wd-to').value;
+      if (!from || !to) throw new Error('Add meg az időszak kezdetét és végét.');
+      params.set('from', from); params.set('to', to);
+      params.set('weekday', document.getElementById('compare-wd-day').value);
+    }
+
+    const data = await api(`/api/compare?${params.toString()}`);
+    if (compareState.mode === 'weekday') renderWeekdayTrendResults(data);
+    else renderCompareResults(data);
+    document.getElementById('compare-results').hidden = false;
+  } catch (e) {
+    msg.textContent = e.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Elemzés indítása';
+  }
+});
+
+function renderCompareResults(data) {
+  document.getElementById('compare-trend-card').hidden = false;
+  document.getElementById('compare-weekday-card').hidden = false;
+  document.getElementById('compare-movers-grid').hidden = !data.movers;
+
   const grid = document.getElementById('compare-overview-grid');
-  grid.innerHTML = Object.entries(data.overview).map(([key, o]) => {
-    const isFocus = key === data.focus;
-    const trendClass = o.revenueDeltaPct >= 0 ? 'up' : 'down';
-    const arrow = o.revenueDeltaPct >= 0 ? '▲' : '▼';
-    return `
-      <div class="compare-overview-card${isFocus ? ' is-focus' : ''}">
-        <div class="compare-overview-label">${escapeHtml(o.label)}</div>
-        <div class="compare-overview-value">${fmtHuf(o.revenue)}</div>
-        <div class="compare-overview-delta ${trendClass}">${arrow} ${Math.abs(o.revenueDeltaPct)}% a jelenlegi ${fmtHuf(data.current.revenue)}-hoz képest</div>
-      </div>`;
-  }).join('');
+  const cards = [data.periodA, data.periodB];
+  grid.innerHTML = cards.map((p, i) => `
+    <div class="compare-overview-card${i === 0 ? ' is-focus' : ''}">
+      <div class="compare-overview-label">${escapeHtml(p.label)} (${fmtDate(p.from)} – ${fmtDate(p.to)})</div>
+      <div class="compare-overview-value">${fmtHuf(p.revenue)}</div>
+      <div class="compare-overview-delta">${p.receiptCount} nyugta</div>
+    </div>`).join('');
+  document.getElementById('compare-overview-analysis').textContent = data.analysis;
 
-  // --- Napi-index illesztett trend (két vonal, felirat az adott viszonyítási alappal) ---
-  document.getElementById('compare-trend-title').textContent = `Napi trend — jelenlegi időszak vs. ${data.overview[data.focus].label.toLowerCase()}`;
+  document.getElementById('compare-trend-title').textContent = `Napi trend, egymásra illesztve — ${data.periodA.label} vs. ${data.periodB.label}`;
   document.getElementById('compare-trend-sub').textContent =
-    `${fmtDate(data.from)} – ${fmtDate(data.to)} (kék) vs. ${fmtDate(data.focusPeriod.from)} – ${fmtDate(data.focusPeriod.to)} (szürke) — a napok sorrendje szerint illesztve, nem naptári dátum szerint`;
-  renderComparisonChart(document.getElementById('compare-trend-chart'), data.curDaily, data.focusDaily);
+    `${fmtDate(data.periodA.from)} – ${fmtDate(data.periodA.to)} (kék) vs. ${fmtDate(data.periodB.from)} – ${fmtDate(data.periodB.to)} (szürke) — napok sorrendje szerint illesztve`;
+  renderComparisonChart(document.getElementById('compare-trend-chart'), data.dailyA, data.dailyB);
 
-  // --- Hét napjai szerinti oszlopdiagram ---
-  renderWeekdayChart(document.getElementById('compare-weekday-chart'), data.curWeekday, data.focusWeekday, data.overview[data.focus].label);
+  renderWeekdayChart(document.getElementById('compare-weekday-chart'), data.weekdayA, data.weekdayB, data.periodB.label);
 
-  // --- Legnagyobb mozgások ---
-  const gainersBox = document.getElementById('compare-gainers-list');
-  gainersBox.innerHTML = data.topGainers.length
-    ? data.topGainers.map((m) => `
-        <div class="compare-mover-row">
-          <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
-          <span class="compare-mover-delta up">▲ ${fmtHuf(m.deltaRevenue)}</span>
-        </div>`).join('')
-    : '<div class="empty-state">Nincs kiugró növekedés.</div>';
-  const losersBox = document.getElementById('compare-losers-list');
-  losersBox.innerHTML = data.topLosers.length
-    ? data.topLosers.map((m) => `
-        <div class="compare-mover-row">
-          <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
-          <span class="compare-mover-delta down">▼ ${fmtHuf(Math.abs(m.deltaRevenue))}</span>
-        </div>`).join('')
-    : '<div class="empty-state">Nincs kiugró visszaesés.</div>';
+  if (data.movers) {
+    const gainersBox = document.getElementById('compare-gainers-list');
+    gainersBox.innerHTML = data.movers.gainers.length
+      ? data.movers.gainers.map((m) => `
+          <div class="compare-mover-row">
+            <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
+            <span class="compare-mover-delta up">▲ ${fmtHuf(m.deltaRevenue)}</span>
+          </div>`).join('')
+      : '<div class="empty-state">Nincs kiugró növekedés.</div>';
+    const losersBox = document.getElementById('compare-losers-list');
+    losersBox.innerHTML = data.movers.losers.length
+      ? data.movers.losers.map((m) => `
+          <div class="compare-mover-row">
+            <span class="compare-mover-name">${escapeHtml(m.nev)}</span>
+            <span class="compare-mover-delta down">▼ ${fmtHuf(Math.abs(m.deltaRevenue))}</span>
+          </div>`).join('')
+      : '<div class="empty-state">Nincs kiugró visszaesés.</div>';
+  }
+}
+
+function renderWeekdayTrendResults(data) {
+  document.getElementById('compare-weekday-card').hidden = true;
+  document.getElementById('compare-movers-grid').hidden = true;
+  document.getElementById('compare-trend-card').hidden = false;
+
+  const grid = document.getElementById('compare-overview-grid');
+  grid.innerHTML = `
+    <div class="compare-overview-card is-focus">
+      <div class="compare-overview-label">${escapeHtml(data.weekdayLabel)}k — ${fmtDate(data.from)} – ${fmtDate(data.to)}</div>
+      <div class="compare-overview-value">${fmtHuf(data.avg)} <span style="font-size:11px;font-weight:400;color:var(--text-dim);">átlag / nap</span></div>
+      <div class="compare-overview-delta">${data.points.length} előfordulás</div>
+    </div>`;
+  document.getElementById('compare-overview-analysis').textContent = data.analysis;
+
+  document.getElementById('compare-trend-title').textContent = `${data.weekdayLabel}k trendje`;
+  document.getElementById('compare-trend-sub').textContent = `Minden ${data.weekdayLabel.toLowerCase()} forgalma időrendben, ${fmtDate(data.from)} – ${fmtDate(data.to)} között`;
+  renderSingleTrendChart(document.getElementById('compare-trend-chart'), data.points);
 }
 
 /* Két vonalat egymásra illesztő SVG-diagram — a jelenlegi időszakot és a
@@ -1465,7 +1546,6 @@ function renderComparisonChart(container, curPoints, focusPoints) {
   }
 
   container.innerHTML = `
-    <div class="chart-tooltip" id="chart-tooltip-cmp" hidden></div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
       ${gridSvg}
       <path d="${pathOf(focusPoints)}" fill="none" stroke="#9AA9B8" stroke-width="2" stroke-dasharray="5,4" stroke-linejoin="round" stroke-linecap="round"/>
@@ -1473,9 +1553,47 @@ function renderComparisonChart(container, curPoints, focusPoints) {
       ${labelsSvg}
     </svg>
     <div class="chart-legend">
-      <span><i style="background:#3D71A8;"></i>Jelenlegi időszak</span>
-      <span><i style="background:#9AA9B8;"></i>Viszonyítási alap</span>
+      <span><i style="background:#3D71A8;"></i>1. időszak</span>
+      <span><i style="background:#9AA9B8;"></i>2. időszak</span>
     </div>`;
+}
+
+/* Egyetlen vonalat mutató SVG-diagram — a hét-napi trend nézethez, ahol
+   nincs A/B összehasonlítás, csak egy folytonos idősor. */
+function renderSingleTrendChart(container, points) {
+  container.innerHTML = '';
+  if (!points.length) { container.innerHTML = '<div class="empty-state">Nincs megjeleníthető adat.</div>'; return; }
+  const W = container.clientWidth || 560, H = 280;
+  const padL = 54, padR = 16, padT = 16, padB = 32;
+  const max = Math.max(...points.map((p) => p.revenue), 1);
+  const stepX = (W - padL - padR) / Math.max(points.length - 1, 1);
+  const x = (i) => padL + i * stepX;
+  const y = (v) => padT + (H - padT - padB) * (1 - v / max);
+  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.revenue).toFixed(1)}`).join(' ');
+
+  let gridSvg = '';
+  for (let g = 0; g <= 4; g++) {
+    const gy = padT + ((H - padT - padB) / 4) * g;
+    const val = Math.round(max * (1 - g / 4));
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#D3E6F5" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+  }
+  const labelEvery = Math.max(Math.ceil(points.length / 8), 1);
+  let labelsSvg = '';
+  const dots = points.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.revenue).toFixed(1)}" r="3" fill="#3D71A8"/>`).join('');
+  points.forEach((p, i) => {
+    if (i % labelEvery === 0 || i === points.length - 1) {
+      labelsSvg += `<text x="${x(i)}" y="${H - 10}" font-size="9.5" fill="#6C8299" text-anchor="middle" font-family="Inter" transform="rotate(0)">${shortDate(p.d)}</text>`;
+    }
+  });
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      ${gridSvg}
+      <path d="${path}" fill="none" stroke="#3D71A8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots}
+      ${labelsSvg}
+    </svg>`;
 }
 
 /* Csoportosított oszlopdiagram — hét napja szerint, 2 oszlop naponta
@@ -1512,10 +1630,11 @@ function renderWeekdayChart(container, curWd, focusWd, focusLabel) {
       ${gridSvg}${bars}${labels}
     </svg>
     <div class="chart-legend">
-      <span><i style="background:#3D71A8;"></i>Jelenlegi időszak (napi átlag)</span>
+      <span><i style="background:#3D71A8;"></i>1. időszak (napi átlag)</span>
       <span><i style="background:#9AA9B8;"></i>${escapeHtml(focusLabel)} (napi átlag)</span>
     </div>`;
 }
+
 
 async function loadRevenueView() {
   const { from, to } = state.range;

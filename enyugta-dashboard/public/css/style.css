@@ -229,6 +229,13 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .chart-legend{ display:flex; gap:16px; margin-top:8px; font-size:12px; color:var(--text-dim); }
 .chart-legend span{ display:flex; align-items:center; gap:6px; }
 .chart-legend i{ width:12px; height:3px; border-radius:2px; display:inline-block; }
+.compare-mode-controls{ display:flex; flex-wrap:wrap; gap:12px; margin-top:14px; align-items:flex-end; }
+.compare-mode-controls select{ border:1px solid var(--line); border-radius:7px; padding:9px 10px; font-size:13px; }
+.compare-analysis{
+  margin-top:14px; padding:12px 14px; background:var(--paper-dim); border-left:3px solid var(--jade);
+  border-radius:0 8px 8px 0; font-size:13px; line-height:1.6; color:var(--text);
+}
+.compare-analysis::before{ content:'📊 '; }
 .btn-refresh{
   background:var(--marigold); color:var(--ink); border:none; padding:9px 16px; border-radius:8px; font-weight:600; font-size:13px;
   display:flex; align-items:center; gap:6px;

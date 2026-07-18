@@ -370,43 +370,111 @@
     <!-- --- ÖSSZEHASONLÍTÁS --- -->
     <section class="view" data-view="compare" hidden>
       <div class="card">
-        <div class="card-title">Melyik időszakhoz hasonlítsuk?</div>
-        <p class="card-subtitle" style="margin-bottom:12px;">a fenti dátumválasztóval kiválasztott időszakot vetjük össze a lenti négy viszonyítási alap egyikével</p>
-        <div class="compare-type-row group-toggle" id="compare-type-row">
-          <button class="chip is-active" data-compare="prev-week">Előző hét</button>
-          <button class="chip" data-compare="prev-month">Előző hónap</button>
-          <button class="chip" data-compare="same-period-last-year">Előző év — azonos időszak</button>
-          <button class="chip" data-compare="same-month-last-year">Előző év — azonos hónap</button>
+        <div class="card-title">Mit hasonlítsunk össze?</div>
+        <div class="compare-type-row group-toggle" id="compare-mode-row">
+          <button class="chip is-active" data-mode="years">Teljes évek</button>
+          <button class="chip" data-mode="ytd">Az év eddigi időszaka</button>
+          <button class="chip" data-mode="month">Ez a hónap vs. előző</button>
+          <button class="chip" data-mode="week">Ez a hét vs. előző</button>
+          <button class="chip" data-mode="custom">2 egyedi időszak</button>
+          <button class="chip" data-mode="weekday">Egy adott hét-nap trendje</button>
         </div>
-      </div>
 
-      <div class="card">
-        <div class="card-title">Áttekintés — mind a négy viszonyítási alap</div>
-        <div class="compare-overview-grid" id="compare-overview-grid"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title" id="compare-trend-title">Napi trend, egymásra illesztve</div>
-        <p class="card-subtitle" id="compare-trend-sub" style="margin-bottom:12px;"></p>
-        <div id="compare-trend-chart" class="chart-holder chart-holder--tall"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Forgalom a hét napjai szerint</div>
-        <p class="card-subtitle" style="margin-bottom:12px;">átlagos napi forgalom, hétköznaponként — ez mutatja meg, ha egy adott nap erősödött vagy gyengült</p>
-        <div id="compare-weekday-chart" class="chart-holder"></div>
-      </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-title">Legnagyobb növekedés</div>
-          <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-növekedés szerint</p>
-          <div id="compare-gainers-list"></div>
+        <div class="compare-mode-controls" id="compare-controls-years" hidden>
+          <div class="stock-field">
+            <label for="compare-yearA">Első év</label>
+            <select id="compare-yearA"></select>
+          </div>
+          <div class="stock-field">
+            <label for="compare-yearB">Második év</label>
+            <select id="compare-yearB"></select>
+          </div>
         </div>
+
+        <div class="compare-mode-controls" id="compare-controls-custom" hidden>
+          <div class="stock-field">
+            <label for="compare-fromA">1. időszak — kezdete</label>
+            <input type="date" id="compare-fromA">
+          </div>
+          <div class="stock-field">
+            <label for="compare-toA">1. időszak — vége</label>
+            <input type="date" id="compare-toA">
+          </div>
+          <div class="stock-field">
+            <label for="compare-fromB">2. időszak — kezdete</label>
+            <input type="date" id="compare-fromB">
+          </div>
+          <div class="stock-field">
+            <label for="compare-toB">2. időszak — vége</label>
+            <input type="date" id="compare-toB">
+          </div>
+          <div class="card-subtitle" style="flex-basis:100%;">A két időszaknak azonos hosszúnak kell lennie.</div>
+        </div>
+
+        <div class="compare-mode-controls" id="compare-controls-weekday" hidden>
+          <div class="stock-field">
+            <label for="compare-wd-from">Időszak kezdete</label>
+            <input type="date" id="compare-wd-from">
+          </div>
+          <div class="stock-field">
+            <label for="compare-wd-to">Időszak vége</label>
+            <input type="date" id="compare-wd-to">
+          </div>
+          <div class="stock-field">
+            <label for="compare-wd-day">Hét napja</label>
+            <select id="compare-wd-day">
+              <option value="1">Hétfő</option>
+              <option value="2">Kedd</option>
+              <option value="3" selected>Szerda</option>
+              <option value="4">Csütörtök</option>
+              <option value="5">Péntek</option>
+              <option value="6">Szombat</option>
+              <option value="0">Vasárnap</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="compare-mode-controls" id="compare-controls-cikk">
+          <div class="stock-field stock-field-wide">
+            <label for="compare-cikk-input">Cikk szűkítés (opcionális — üresen a teljes forgalmat elemzi)</label>
+            <input list="compare-cikk-list" id="compare-cikk-input" placeholder="pl. Espresso">
+            <datalist id="compare-cikk-list"></datalist>
+          </div>
+        </div>
+
+        <button class="btn-primary" id="compare-run-btn" style="margin-top:14px;">Elemzés indítása</button>
+        <div class="stock-form-msg" id="compare-msg"></div>
+      </div>
+
+      <div id="compare-results" hidden>
         <div class="card">
-          <div class="card-title">Legnagyobb visszaesés</div>
-          <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-csökkenés szerint</p>
-          <div id="compare-losers-list"></div>
+          <div class="compare-overview-grid" id="compare-overview-grid"></div>
+          <p class="compare-analysis" id="compare-overview-analysis"></p>
+        </div>
+
+        <div class="card" id="compare-trend-card">
+          <div class="card-title" id="compare-trend-title">Napi trend, egymásra illesztve</div>
+          <p class="card-subtitle" id="compare-trend-sub" style="margin-bottom:12px;"></p>
+          <div id="compare-trend-chart" class="chart-holder chart-holder--tall"></div>
+        </div>
+
+        <div class="card" id="compare-weekday-card">
+          <div class="card-title">Forgalom a hét napjai szerint</div>
+          <p class="card-subtitle" style="margin-bottom:12px;">átlagos napi forgalom, hétköznaponként</p>
+          <div id="compare-weekday-chart" class="chart-holder"></div>
+        </div>
+
+        <div class="grid-2" id="compare-movers-grid">
+          <div class="card">
+            <div class="card-title">Legnagyobb növekedés</div>
+            <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-növekedés szerint</p>
+            <div id="compare-gainers-list"></div>
+          </div>
+          <div class="card">
+            <div class="card-title">Legnagyobb visszaesés</div>
+            <p class="card-subtitle" style="margin-bottom:12px;">cikkek, Ft-ban mért árbevétel-csökkenés szerint</p>
+            <div id="compare-losers-list"></div>
+          </div>
         </div>
       </div>
     </section>

@@ -1253,8 +1253,12 @@ route('POST', '/api/admin/users/delete', async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+
 // ---------------------------------------------------------------------------
-// Dátum-aritmetika segédfüggvények az összehasonlító nézethez.
+// Összehasonlítás — rugalmas, mód-alapú elemzési motor. Minden mód pontosan
+// két, azonos hosszúságú időszakot (A és B) állít elő különböző logika
+// szerint, utána egy KÖZÖS számítás fut le mindkettőre (napi sorozat, hét
+// napjai szerinti bontás, cikk-mozgások, automatikus szöveges elemzés).
 // ---------------------------------------------------------------------------
 function addDaysISO(iso, days) {
   const d = new Date(iso + 'T00:00:00Z');
@@ -1271,140 +1275,229 @@ function addYearsISO(iso, years) {
   d.setUTCFullYear(d.getUTCFullYear() + years);
   return d.toISOString().slice(0, 10);
 }
-function monthRangeOf(iso) {
-  const d = new Date(iso + 'T00:00:00Z');
-  const y = d.getUTCFullYear(), m = d.getUTCMonth();
-  const first = new Date(Date.UTC(y, m, 1));
-  const last = new Date(Date.UTC(y, m + 1, 0));
-  return { from: first.toISOString().slice(0, 10), to: last.toISOString().slice(0, 10) };
+function spanDaysOf(from, to) { return Math.round((new Date(to) - new Date(from)) / 86400000) + 1; }
+function weekdayOfISO(iso) { return new Date(iso + 'T00:00:00Z').getUTCDay(); }
+function mondayOfWeek(iso) {
+  const wd = weekdayOfISO(iso); // 0=vasárnap
+  const back = wd === 0 ? 6 : wd - 1;
+  return addDaysISO(iso, -back);
 }
-function periodRevenue(k, from, to) {
+
+function periodRevenue(k, from, to, cikk) {
+  if (cikk) {
+    const r = get(k,
+      `SELECT IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny, COUNT(DISTINCT nf.bsz) AS cnt
+       FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+       WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ?`,
+      [from, to, cikk]
+    );
+    return { revenue: r.revenue, cnt: r.cnt, menny: r.menny };
+  }
   return get(k,
     `SELECT COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
      FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
     [from, to]
   );
 }
-function pctChange(cur, prev) {
-  if (!prev) return cur > 0 ? 100 : 0;
-  return Math.round(((cur - prev) / prev) * 1000) / 10;
+function dailySeries(k, from, to, cikk) {
+  const rows = cikk
+    ? all(k,
+        `SELECT nf.keltdat AS d, IFNULL(SUM(nt.sorbrutto),0) AS revenue
+         FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+         WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ? GROUP BY nf.keltdat`,
+        [from, to, cikk]
+      )
+    : all(k,
+        `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat`,
+        [from, to]
+      );
+  const map = new Map(rows.map((r) => [r.d, r.revenue]));
+  const out = [];
+  let d = from, i = 0;
+  while (d <= to) { out.push({ idx: i, d, revenue: map.get(d) || 0 }); d = addDaysISO(d, 1); i++; }
+  return out;
+}
+function weekdayBreakdown(k, from, to, cikk) {
+  const rows = cikk
+    ? all(k,
+        `SELECT CAST(strftime('%w', nf.keltdat) AS INTEGER) AS wd,
+                IFNULL(SUM(nt.sorbrutto),0) AS revenue, COUNT(DISTINCT nf.keltdat) AS napok
+         FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+         WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ? GROUP BY wd`,
+        [from, to, cikk]
+      )
+    : all(k,
+        `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd,
+                IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(DISTINCT keltdat) AS napok
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY wd`,
+        [from, to]
+      );
+  const byWd = new Map(rows.map((r) => [r.wd, r]));
+  const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+  return labels.map((label, wd) => {
+    const r = byWd.get(wd);
+    return { wd, label, avgRevenue: r && r.napok ? Math.round(r.revenue / r.napok) : 0 };
+  });
+}
+function productMovers(k, fromA, toA, fromB, toB) {
+  const a = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [fromA, toA]
+  );
+  const b = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [fromB, toB]
+  );
+  const bMap = new Map(b.map((p) => [p.nev, p]));
+  const names = new Set([...a.map((p) => p.nev), ...b.map((p) => p.nev)]);
+  const movers = [...names].map((nev) => {
+    const pa = a.find((p) => p.nev === nev) || { revenue: 0, menny: 0 };
+    const pb = bMap.get(nev) || { revenue: 0, menny: 0 };
+    return { nev, aRevenue: pa.revenue, bRevenue: pb.revenue, deltaRevenue: pa.revenue - pb.revenue, deltaMenny: pa.menny - pb.menny };
+  }).sort((x, y) => Math.abs(y.deltaRevenue) - Math.abs(x.deltaRevenue));
+  return { gainers: movers.filter((m) => m.deltaRevenue > 0).slice(0, 8), losers: movers.filter((m) => m.deltaRevenue < 0).slice(0, 8) };
+}
+function pctChange(a, b) { if (!b) return a > 0 ? 100 : 0; return Math.round(((a - b) / b) * 1000) / 10; }
+
+// Rövid, legfeljebb ~50 szavas, automatikusan generált, "szakértői szemű"
+// elemzés-szöveg — a tényleges számított adatokra reagál, sablon-alapon.
+function buildAnalysisText({ labelA, labelB, revenueA, revenueB, weekdayA, weekdayB, movers }) {
+  const delta = pctChange(revenueA, revenueB);
+  const parts = [];
+  if (revenueB === 0 && revenueA === 0) {
+    parts.push(`Egyik időszakban sincs forgalom — nincs miből következtetni.`);
+    return parts.join(' ');
+  }
+  const irany = delta > 0 ? 'nőtt' : delta < 0 ? 'csökkent' : 'nem változott';
+  parts.push(`A forgalom ${Math.abs(delta)}%-kal ${irany} (${labelA}: ${Math.round(revenueA).toLocaleString('hu-HU')} Ft, ${labelB}: ${Math.round(revenueB).toLocaleString('hu-HU')} Ft).`);
+
+  if (weekdayA && weekdayB) {
+    let bestWd = null, bestDelta = -Infinity;
+    for (let i = 0; i < weekdayA.length; i++) {
+      const d = weekdayA[i].avgRevenue - weekdayB[i].avgRevenue;
+      if (Math.abs(d) > Math.abs(bestDelta)) { bestDelta = d; bestWd = weekdayA[i].label; }
+    }
+    if (bestWd && Math.abs(bestDelta) > 0) {
+      parts.push(`A legnagyobb eltérés ${bestWd}-n mutatkozik (${bestDelta > 0 ? '+' : ''}${Math.round(bestDelta).toLocaleString('hu-HU')} Ft/nap átlagosan).`);
+    }
+  }
+  if (movers && (movers.gainers.length || movers.losers.length)) {
+    const top = movers.gainers[0] || movers.losers[0];
+    if (top) {
+      const irany2 = top.deltaRevenue > 0 ? 'húzta leginkább a növekedést' : 'okozta leginkább a visszaesést';
+      parts.push(`A(z) "${top.nev}" ${irany2} (${top.deltaRevenue > 0 ? '+' : ''}${Math.round(top.deltaRevenue).toLocaleString('hu-HU')} Ft).`);
+    }
+  }
+  return parts.join(' ');
 }
 
-// Átfogó időszak-összehasonlítás — a kért 4 viszonyítási alap
-// (előző hét, előző hónap, előző év azonos időszaka, előző év azonos
-// naptári hónapja) mindegyikére kiszámolja a forgalom/nyugtaszám
-// eltérést, PLUSZ a kiválasztott egy konkrét viszonyítási alaphoz
-// napi-index illesztésű trendet, hét napjai szerinti bontást, és a
-// legnagyobb elmozdulást mutató cikkeket — ez adja a valódi, mélyebb
-// megértést, nem csak egy szám-eltérést.
+function computeComparison(k, periodA, periodB, cikk) {
+  const a = periodRevenue(k, periodA.from, periodA.to, cikk);
+  const b = periodRevenue(k, periodB.from, periodB.to, cikk);
+  const dailyA = dailySeries(k, periodA.from, periodA.to, cikk);
+  const dailyB = dailySeries(k, periodB.from, periodB.to, cikk);
+  const weekdayA = weekdayBreakdown(k, periodA.from, periodA.to, cikk);
+  const weekdayB = weekdayBreakdown(k, periodB.from, periodB.to, cikk);
+  const movers = cikk ? null : productMovers(k, periodA.from, periodA.to, periodB.from, periodB.to);
+  const analysis = buildAnalysisText({
+    labelA: periodA.label, labelB: periodB.label,
+    revenueA: a.revenue, revenueB: b.revenue, weekdayA, weekdayB, movers,
+  });
+  return {
+    periodA: { ...periodA, revenue: a.revenue, receiptCount: a.cnt },
+    periodB: { ...periodB, revenue: b.revenue, receiptCount: b.cnt },
+    deltaPct: pctChange(a.revenue, b.revenue),
+    dailyA, dailyB, weekdayA, weekdayB, movers, analysis,
+  };
+}
+
 route('GET', '/api/compare', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const k = session.companyKey;
-  const { from, to } = resolveRange(query);
-  const focus = ['prev-week', 'prev-month', 'same-period-last-year', 'same-month-last-year'].includes(query.compare)
-    ? query.compare : 'same-period-last-year';
+  const mode = query.mode || '';
+  const cikk = query.cikk ? String(query.cikk) : null;
+  const today = todayIsoServer();
+  let periodA, periodB;
 
-  const spanDays = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
-  const monthOf = monthRangeOf(to);
-
-  const periods = {
-    'prev-week': { from: addDaysISO(from, -7), to: addDaysISO(to, -7), label: 'Előző hét' },
-    'prev-month': { from: addMonthsISO(from, -1), to: addMonthsISO(to, -1), label: 'Előző hónap' },
-    'same-period-last-year': { from: addYearsISO(from, -1), to: addYearsISO(to, -1), label: 'Előző év, azonos időszak' },
-    'same-month-last-year': { from: addYearsISO(monthOf.from, -1), to: addYearsISO(monthOf.to, -1), label: 'Előző év, azonos naptári hónap' },
-  };
-
-  const cur = periodRevenue(k, from, to);
-  const overview = {};
-  for (const [key, p] of Object.entries(periods)) {
-    const r = periodRevenue(k, p.from, p.to);
-    overview[key] = {
-      label: p.label, from: p.from, to: p.to,
-      revenue: r.revenue, receiptCount: r.cnt,
-      revenueDeltaPct: pctChange(cur.revenue, r.revenue),
-      countDeltaPct: pctChange(cur.cnt, r.cnt),
-    };
-  }
-
-  // Napi-index illesztett trend a kiválasztott viszonyítási időszakhoz —
-  // NEM naptári dátum szerint fedjük egymásra a két időszakot, hanem
-  // "1. nap, 2. nap, ..." szerint, hogy a GÖRBE ALAKJA közvetlenül
-  // összevethető legyen, függetlenül attól, hogy ténylegesen mikor volt.
-  const focusPeriod = periods[focus];
-  function dailySeries(pFrom, pTo) {
-    const rows = all(k,
-      `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
-       FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat`,
-      [pFrom, pTo]
-    );
-    const map = new Map(rows.map((r) => [r.d, r.revenue]));
-    const out = [];
-    let d = pFrom;
-    let i = 0;
-    while (d <= pTo) {
-      out.push({ idx: i, d, revenue: map.get(d) || 0 });
-      d = addDaysISO(d, 1);
-      i++;
-    }
-    return out;
-  }
-  const curDaily = dailySeries(from, to);
-  const focusDaily = dailySeries(focusPeriod.from, focusPeriod.to);
-
-  // Hét napjai szerinti átlagos forgalom — sokszor ez fedi fel a valódi
-  // mintázatot (pl. "a hétvégék erősödtek, a hétköznapok gyengültek").
-  function weekdayBreakdown(pFrom, pTo) {
-    const rows = all(k,
-      `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd,
-              IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(DISTINCT keltdat) AS napok
-       FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY wd`,
-      [pFrom, pTo]
-    );
-    const byWd = new Map(rows.map((r) => [r.wd, r]));
+  if (mode === 'years') {
+    const yA = parseInt(query.yearA, 10), yB = parseInt(query.yearB, 10);
+    if (!yA || !yB) return sendJson(res, 400, { error: 'Válassz ki két évet.' });
+    periodA = { from: `${yA}-01-01`, to: `${yA}-12-31`, label: String(yA) };
+    periodB = { from: `${yB}-01-01`, to: `${yB}-12-31`, label: String(yB) };
+  } else if (mode === 'ytd') {
+    const y = parseInt(today.slice(0, 4), 10);
+    periodA = { from: `${y}-01-01`, to: today, label: `${y} eddig` };
+    periodB = { from: `${y - 1}-01-01`, to: addYearsISO(today, -1), label: `${y - 1} azonos időszaka` };
+  } else if (mode === 'month') {
+    const monthStart = today.slice(0, 8) + '01';
+    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
+    const prevMonthStart = addMonthsISO(monthStart, -1);
+    const prevMonthSameDay = addMonthsISO(today, -1);
+    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
+    periodB = { from: prevMonthStart, to: prevMonthSameDay, label: 'Előző hónap (azonos hosszban)' };
+  } else if (mode === 'week') {
+    const mondayThis = mondayOfWeek(today);
+    periodA = { from: mondayThis, to: today, label: 'Ez a hét (eddig)' };
+    periodB = { from: addDaysISO(mondayThis, -7), to: addDaysISO(today, -7), label: 'Előző hét (azonos hosszban)' };
+  } else if (mode === 'custom') {
+    const { fromA, toA, fromB, toB } = query;
+    if (!fromA || !toA || !fromB || !toB) return sendJson(res, 400, { error: 'Add meg mind a két időszak kezdő és záró dátumát.' });
+    const lenA = spanDaysOf(fromA, toA), lenB = spanDaysOf(fromB, toB);
+    if (lenA !== lenB) return sendJson(res, 400, { error: `A két időszaknak azonos hosszúnak kell lennie (jelenleg ${lenA} vs. ${lenB} nap).` });
+    periodA = { from: fromA, to: toA, label: `${fromA} – ${toA}` };
+    periodB = { from: fromB, to: toB, label: `${fromB} – ${toB}` };
+  } else if (mode === 'weekday') {
+    // Nem A/B összehasonlítás, hanem EGY adott hét-napjának minden
+    // előfordulása egy kiválasztott időszakon belül — trendként.
+    const { from, to } = query;
+    const wd = parseInt(query.weekday, 10);
+    if (!from || !to || Number.isNaN(wd)) return sendJson(res, 400, { error: 'Add meg az időszakot és a hét napját.' });
+    const rows = cikk
+      ? all(k,
+          `SELECT nf.keltdat AS d, IFNULL(SUM(nt.sorbrutto),0) AS revenue
+           FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+           WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ?
+             AND CAST(strftime('%w', nf.keltdat) AS INTEGER) = ?
+           GROUP BY nf.keltdat ORDER BY nf.keltdat`,
+          [from, to, cikk, wd]
+        )
+      : all(k,
+          `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+           FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} AND CAST(strftime('%w', keltdat) AS INTEGER) = ?
+           GROUP BY keltdat ORDER BY keltdat`,
+          [from, to, wd]
+        );
     const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
-    return labels.map((label, wd) => {
-      const r = byWd.get(wd);
-      return { wd, label, avgRevenue: r && r.napok ? Math.round(r.revenue / r.napok) : 0 };
-    });
+    const avg = rows.length ? rows.reduce((s, r) => s + r.revenue, 0) / rows.length : 0;
+    const max = rows.reduce((m, r) => Math.max(m, r.revenue), 0);
+    const trend = rows.length >= 2 ? pctChange(rows[rows.length - 1].revenue, rows[0].revenue) : 0;
+    const analysis = rows.length
+      ? `${rows.length} ${labels[wd].toLowerCase()} volt a vizsgált időszakban, átlagosan ${Math.round(avg).toLocaleString('hu-HU')} Ft forgalommal. ` +
+        `A legerősebb nap ${Math.round(max).toLocaleString('hu-HU')} Ft-ot hozott. ` +
+        `Az első és az utolsó előfordulás között ${trend > 0 ? '+' : ''}${trend}% a változás.`
+      : `Nincs adat a kiválasztott napra ebben az időszakban.`;
+    return sendJson(res, 200, { mode, weekday: wd, weekdayLabel: labels[wd], from, to, points: rows, avg: Math.round(avg), analysis });
+  } else {
+    return sendJson(res, 400, { error: 'Ismeretlen vagy hiányzó mód.' });
   }
-  const curWeekday = weekdayBreakdown(from, to);
-  const focusWeekday = weekdayBreakdown(focusPeriod.from, focusPeriod.to);
 
-  // Legnagyobb elmozdulást mutató cikkek — abszolút Ft-eltérés szerint,
-  // mert egy adatelemzőnek ez sokkal informatívabb, mint a puszta
-  // százalék (egy 2 Ft-os tétel 300%-os "növekedése" lényegtelen).
-  const curProducts = all(k,
-    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
-     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
-     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
-    [from, to]
-  );
-  const focusProducts = all(k,
-    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
-     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
-     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
-    [focusPeriod.from, focusPeriod.to]
-  );
-  const focusMap = new Map(focusProducts.map((p) => [p.nev, p]));
-  const allNames = new Set([...curProducts.map((p) => p.nev), ...focusProducts.map((p) => p.nev)]);
-  const movers = [...allNames].map((nev) => {
-    const c = curProducts.find((p) => p.nev === nev) || { revenue: 0, menny: 0 };
-    const f = focusMap.get(nev) || { revenue: 0, menny: 0 };
-    return { nev, curRevenue: c.revenue, focusRevenue: f.revenue, deltaRevenue: c.revenue - f.revenue, deltaMenny: c.menny - f.menny };
-  }).sort((a, b) => Math.abs(b.deltaRevenue) - Math.abs(a.deltaRevenue));
-  const topGainers = movers.filter((m) => m.deltaRevenue > 0).slice(0, 8);
-  const topLosers = movers.filter((m) => m.deltaRevenue < 0).slice(0, 8);
+  sendJson(res, 200, { mode, cikk, ...computeComparison(k, periodA, periodB, cikk) });
+});
 
-  sendJson(res, 200, {
-    from, to, spanDays, focus,
-    current: { revenue: cur.revenue, receiptCount: cur.cnt },
-    overview,
-    focusPeriod: { from: focusPeriod.from, to: focusPeriod.to, label: focusPeriod.label },
-    curDaily, focusDaily,
-    curWeekday, focusWeekday,
-    topGainers, topLosers,
-  });
+route('GET', '/api/compare/products', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const q = String(query.q || '').trim();
+  const rows = all(k,
+    `SELECT DISTINCT megnevezes AS nev FROM cikkt WHERE status='A' ${q ? 'AND megnevezes LIKE ?' : ''} ORDER BY megnevezes LIMIT 30`,
+    q ? [`%${q}%`] : []
+  );
+  sendJson(res, 200, { items: rows.map((r) => r.nev) });
 });
 
 route('GET', '/api/summary', async (req, res, query) => {
