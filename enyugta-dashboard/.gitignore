@@ -13,6 +13,10 @@ data/stock.db
 # létrejön első induláskor
 data/product-changes.db
 
+# Licenc-adatbázis (funkció-katalógus + cégenkénti kiosztás) — szintén
+# automatikusan létrejön első induláskor, élő/szerverenkénti adat
+data/license.db
+
 # Feltöltés közbeni ideiglenes fájlok
 data/companies/*.db.uploading
 
