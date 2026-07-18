@@ -1075,6 +1075,17 @@
       <div class="card">
         <div class="card-title-row">
           <div>
+            <div class="card-title">Csomagok</div>
+            <div class="card-subtitle">egyes funkciók egy néven, egy áron, egyszerre kioszthatók — a többi funkció önállóan, külön fizetős marad</div>
+          </div>
+          <button class="btn-secondary" id="license-package-new-btn">+ Új csomag</button>
+        </div>
+        <div id="license-packages-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title-row">
+          <div>
             <div class="card-title">Cégenkénti licencek</div>
             <div class="card-subtitle">minden ismert cég, funkciónkénti engedélyezéssel — az androidos app ezt kérdezi le a szerverünktől</div>
           </div>
@@ -1183,11 +1194,61 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="license-package-modal-backdrop" hidden>
+    <div class="modal">
+      <button class="modal-close" id="license-package-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:16px;" id="license-package-modal-title">Új csomag</div>
+      <form id="license-package-form">
+        <input type="hidden" id="license-package-id">
+        <label for="license-package-nev" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Csomag neve</label>
+        <input id="license-package-nev" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label for="license-package-leiras" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Leírás</label>
+        <input id="license-package-leiras" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label for="license-package-ar" style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Csomagár (Ft)</label>
+        <input id="license-package-ar" type="number" min="0" step="100" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <label style="display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">Ebbe a csomagba tartozó funkciók</label>
+        <div id="license-package-feature-checks" style="max-height:220px;overflow-y:auto;border:1.5px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:14px;"></div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:16px;">
+          <input id="license-package-aktiv" type="checkbox" checked> Aktív (kioszthatók)
+        </label>
+        <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
+        <div class="profile-form-msg" id="license-package-msg"></div>
+      </form>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="license-grant-modal-backdrop" hidden>
     <div class="modal">
       <button class="modal-close" id="license-grant-modal-close">✕</button>
       <div class="card-title" style="margin-bottom:4px;" id="license-grant-modal-title">Licencek kezelése</div>
       <div class="card-subtitle" style="margin-bottom:16px;" id="license-grant-modal-subtitle"></div>
+      <div id="license-subscription-box" style="border:1.5px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px;background:var(--paper-dim);">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;">
+          <input type="checkbox" id="license-subscription-aktiv"> Alap regisztráció aktív (az előfizetési díj be van fizetve)
+        </label>
+        <p class="card-subtitle" style="margin:6px 0 8px;">Ha ez ki van kapcsolva, az app MINDEN funkciót letilt — ettől függetlenül, hogy lent milyen funkció-kiosztások vannak.</p>
+        <input type="text" id="license-subscription-megjegyzes" placeholder="megjegyzés (opcionális, pl. miért szünetel)" style="width:100%;padding:7px 9px;border:1.5px solid var(--line);border-radius:6px;font-size:12.5px;margin-bottom:8px;">
+        <button class="btn-tiny" id="license-subscription-save">Mentés</button>
+        <span id="license-subscription-msg" style="font-size:12px;margin-left:8px;"></span>
+      </div>
+      <div id="license-device-box" style="border:1.5px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+        <div style="font-weight:600;font-size:13.5px;margin-bottom:6px;">Eszközök</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <label style="font-size:12.5px;">Eszközkorlát (üresen: korlátlan):</label>
+          <input type="number" id="license-device-limit" min="0" style="width:70px;padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;">
+          <button class="btn-tiny" id="license-device-limit-save">Mentés</button>
+        </div>
+        <div id="license-device-list" style="font-size:12.5px;"></div>
+      </div>
+      <div id="license-package-grant-box" style="border:1.5px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+        <div style="font-weight:600;font-size:13.5px;margin-bottom:6px;">Csomag kiosztása</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <select id="license-package-grant-select" style="flex:1 1 180px;padding:7px 9px;border:1.5px solid var(--line);border-radius:6px;"></select>
+          <input type="date" id="license-package-grant-lejarat" style="padding:7px 9px;border:1.5px solid var(--line);border-radius:6px;" title="Lejárat (üresen: nincs lejárat)">
+          <button class="btn-tiny" id="license-package-grant-btn">Kiosztás</button>
+        </div>
+        <span id="license-package-grant-msg" style="font-size:12px;"></span>
+      </div>
       <div id="license-grant-list"></div>
     </div>
   </div>

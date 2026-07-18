@@ -408,21 +408,64 @@ licenseDb.exec(`
     UNIQUE(ceg_kulcs, eszkoz_azonosito)
   );
   CREATE INDEX IF NOT EXISTS idx_company_devices_ceg ON company_devices(ceg_kulcs);
+
+  -- ALAP REGISZTRÁLTSÁG — külön, önálló fogalom a funkciónkénti
+  -- kapcsolóktól. Ez azt válaszolja meg: fizeti-e a cég egyáltalán az
+  -- alap havidíjat? Ha nincs sor egy cégre, ALAPÉRTELMEZETTEN AKTÍV
+  -- (egyetlen meglévő cég se essen ki emiatt visszamenőleg) — az admin
+  -- explicit kapcsolja ki, ha egy cég nem fizet. Szándékosan NINCS
+  -- benne külön "hamarosan lejár" mező vagy késleltetett kikapcsolás —
+  -- egyetlen aktív/inaktív kapcsoló, ahogy a fejlesztő kérte (KISS).
+  CREATE TABLE IF NOT EXISTS company_subscription (
+    ceg_kulcs TEXT PRIMARY KEY,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    megjegyzes TEXT,
+    updated_at TEXT NOT NULL
+  );
+
+  -- CSOMAGOK — egyes funkciók egy néven, egy áron, egyszerre adhatók ki
+  -- ("csomagba kerülnek"), míg mások önállóan, külön fizetősek maradnak.
+  -- Egy csomag csak egy KÉNYELMI GYŰJTŐNÉV — a tényleges hozzáférés
+  -- továbbra is a meglévő company_licenses táblában, funkciónként dől el;
+  -- a "csomag kiosztása" csak egyszerre állítja be a benne lévő összes
+  -- funkciót ugyanazzal a lejárattal. Ez szándékosan egyszerű (KISS): nincs
+  -- külön csomag-szintű előfizetés-nyilvántartás vagy állapotgép.
+  CREATE TABLE IF NOT EXISTS license_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nev TEXT NOT NULL,
+    leiras TEXT,
+    ar INTEGER NOT NULL DEFAULT 0,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    sorrend INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS license_package_features (
+    package_id INTEGER NOT NULL,
+    feature_key TEXT NOT NULL,
+    PRIMARY KEY (package_id, feature_key)
+  );
 `);
 // Első indításkor feltöltjük egy induló katalógussal — ezt az admin
 // utólag szabadon szerkesztheti (átnevezheti, árazhatja, kivezetheti,
-// újat vehet fel), ez csak egy ésszerű kiindulópont.
+// újat vehet fel). A kulcsok a ténylegesen Androidban hardkódolt,
+// valós azonosítók (nem AI-tipp).
 {
   const count = licenseDb.prepare('SELECT COUNT(*) AS c FROM license_features').get().c;
   if (count === 0) {
     const now = new Date().toISOString();
     const defaults = [
-      ['alap_nyugta', 'Alap nyugta-nézegető', 'Élő értékesítési adatok, napi/időszaki bontásban.', 0, 0],
-      ['cikkcsoport_kezeles', 'Cikkcsoport kezelés', 'Cikkcsoportok létrehozása, szerkesztése a weben.', 2900, 1],
-      ['osszehasonlitas', 'Időszak-összehasonlítás', 'Két időszak automatikus, szöveges elemzéssel támogatott összevetése.', 1900, 2],
-      ['export_riport', 'Riport export (CSV/Excel)', 'Táblázatok exportálása CSV-be, Excelben natívan megnyitható formátumban.', 1500, 3],
-      ['tobb_telephely', 'Több telephely kezelése', 'Egynél több telephely nyilvántartása és külön-külön áttekintése.', 3900, 4],
-      ['ntak_figyeles', 'NTAK állapot-figyelés', 'Az NTAK adatküldés állapotának automatikus figyelése és jelzése.', 2400, 5],
+      ['SZAMLSZEM', 'Számla személyre szabása', '', 0, 0],
+      ['NTAK', 'NTAK', '', 0, 1],
+      ['EXTNYOMT', 'Konyhai nyomtató', '', 0, 2],
+      ['VIRTUO', 'Virtuo fizetés', '', 0, 3],
+      ['VISSZAJAROKEZELES', 'Visszajáró kezelése', '', 0, 4],
+      ['REPOHAR', 'Repohár', '', 0, 5],
+      ['KEPESTERM', 'Képes termék', '', 0, 6],
+      ['MERLEGELES', 'Mérlegelés', '', 0, 7],
+      ['VONALKOD', 'Vonalkód generálás', '', 0, 8],
+      ['PINTEGRACIO', 'PIN integráció', '', 0, 9],
+      ['WEBTERMEK', 'Webes termékkezelés', 'Db szinkronizáció.', 0, 10],
+      ['WEBTERMARCSI', 'Webes termék fel/letöltés', 'A honlapodra fel/letöltést engedélyezi.', 0, 11],
     ];
     for (const [key, nev, leiras, alapAr, sorrend] of defaults) {
       licenseDb.prepare(
@@ -441,19 +484,27 @@ function slugifyFeatureKey(nev) {
   return noAccent.slice(0, 40) || `funkcio_${Date.now()}`;
 }
 
-// Egy company_licenses sor "állapotát" (badge) számolja ki — ugyanaz a
-// szín-konvenció, mint amit korábban az lszamla-mintájú admin makett is
-// használt (piros = lejárt, sárga = hamarosan lejár, zöld = érvényes,
-// szürke = nincs regisztráció).
+// Egy company_licenses sor "állapotát" (badge) számolja ki.
+// EGYSZERŰSÍTVE (az androidos fejlesztő KISS-visszajelzése alapján): csak
+// KÉT érdemi állapot van — lejárt vagy érvényes. A korábbi, külön
+// "hamarosan lejár (7 napon belül)" köztes állapotot szándékosan
+// eltávolítottuk — a lejárat dátuma már önmagában megmutatja ezt, egy
+// külön kiszámolt jelző csak felesleges redundancia.
 function licenseRowStatus(row) {
   if (!row) return { allapot: 'none', allapotSzoveg: 'nincs regisztráció' };
   if (!row.aktiv) return { allapot: 'expired', allapotSzoveg: 'letiltva' };
   if (row.lejarat) {
     const days = Math.floor((new Date(row.lejarat + 'T00:00:00Z') - new Date(todayIsoServer() + 'T00:00:00Z')) / 86400000);
     if (days < 0) return { allapot: 'expired', allapotSzoveg: 'lejárt' };
-    if (days <= 7) return { allapot: 'warn', allapotSzoveg: days === 0 ? 'ma jár le' : `${days} napon belül lejár` };
   }
   return { allapot: 'ok', allapotSzoveg: 'érvényes' };
+}
+
+// Alap regisztráltság lekérdezése — ha nincs sor, alapból AKTÍV (lásd a
+// fenti tábla-megjegyzést). Egyszerű, egyetlen igaz/hamis kapcsoló.
+function isBaseSubscriptionActive(cegKulcs) {
+  const row = licenseDb.prepare('SELECT aktiv FROM company_subscription WHERE ceg_kulcs = ?').get(cegKulcs);
+  return !row || !!row.aktiv;
 }
 
 function addProductChange(companyKey, changeType, payload, source, meta) {
@@ -1574,6 +1625,104 @@ route('POST', '/api/admin/license/features/delete', async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// CSOMAGOK — egyszerű, kényelmi gyűjtőnevek a katalógus funkcióira. Egy
+// csomag csak azt adja meg, mely funkciók tartoznak bele; a tényleges
+// hozzáférés-kiosztás mindig a meglévő company_licenses táblát írja.
+// ---------------------------------------------------------------------------
+route('GET', '/api/admin/license/packages', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const packages = licenseDb.prepare('SELECT id, nev, leiras, ar, aktiv, sorrend FROM license_packages ORDER BY sorrend, nev').all();
+  const featureRows = licenseDb.prepare('SELECT package_id, feature_key FROM license_package_features').all();
+  const featuresByPkg = new Map();
+  for (const r of featureRows) {
+    if (!featuresByPkg.has(r.package_id)) featuresByPkg.set(r.package_id, []);
+    featuresByPkg.get(r.package_id).push(r.feature_key);
+  }
+  sendJson(res, 200, {
+    packages: packages.map((p) => ({ ...p, aktiv: !!p.aktiv, featureKeys: featuresByPkg.get(p.id) || [] })),
+  });
+});
+
+// Csomag létrehozása/módosítása — upsert id szerint (id nélkül új).
+route('POST', '/api/admin/license/packages/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, leiras, ar, aktiv, sorrend, featureKeys } = await readJsonBody(req);
+  const cleanNev = String(nev || '').trim();
+  if (!cleanNev) return sendJson(res, 400, { error: 'A csomag nevének megadása kötelező.' });
+  const cleanAr = Math.max(0, parseInt(ar, 10) || 0);
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  const cleanSorrend = parseInt(sorrend, 10) || 0;
+  const cleanKeys = Array.isArray(featureKeys) ? featureKeys.filter((k) => typeof k === 'string' && k) : [];
+  // Csak létező katalógus-kulcsokat fogadunk el a csomagba.
+  const validKeys = new Set(licenseDb.prepare('SELECT key FROM license_features').all().map((r) => r.key));
+  const finalKeys = cleanKeys.filter((k) => validKeys.has(k));
+
+  let pkgId = id ? parseInt(id, 10) : null;
+  if (pkgId) {
+    const exists = licenseDb.prepare('SELECT id FROM license_packages WHERE id = ?').get(pkgId);
+    if (!exists) return sendJson(res, 404, { error: 'Ismeretlen csomag.' });
+    licenseDb.prepare('UPDATE license_packages SET nev = ?, leiras = ?, ar = ?, aktiv = ?, sorrend = ? WHERE id = ?')
+      .run(cleanNev, leiras || null, cleanAr, cleanAktiv, cleanSorrend, pkgId);
+  } else {
+    const result = licenseDb.prepare(
+      'INSERT INTO license_packages (nev, leiras, ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(cleanNev, leiras || null, cleanAr, cleanAktiv, cleanSorrend, new Date().toISOString());
+    pkgId = Number(result.lastInsertRowid);
+  }
+  licenseDb.prepare('DELETE FROM license_package_features WHERE package_id = ?').run(pkgId);
+  for (const key of finalKeys) {
+    licenseDb.prepare('INSERT INTO license_package_features (package_id, feature_key) VALUES (?, ?)').run(pkgId, key);
+  }
+  logActivity({ type: 'license_package_save', ok: true, companyKey: null, nev: 'admin', detail: `Csomag mentve: ${cleanNev} (${finalKeys.length} funkció)` });
+  sendJson(res, 200, { ok: true, id: pkgId });
+});
+
+route('POST', '/api/admin/license/packages/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const pkg = licenseDb.prepare('SELECT nev FROM license_packages WHERE id = ?').get(id);
+  if (!pkg) return sendJson(res, 404, { error: 'Ismeretlen csomag.' });
+  licenseDb.prepare('DELETE FROM license_package_features WHERE package_id = ?').run(id);
+  licenseDb.prepare('DELETE FROM license_packages WHERE id = ?').run(id);
+  logActivity({ type: 'license_package_delete', ok: true, companyKey: null, nev: 'admin', detail: `Csomag törölve: ${pkg.nev}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Egy csomag kiosztása egy cégnek — a csomagban lévő ÖSSZES funkciót
+// egyszerre, ugyanazzal a lejárattal állítja be a company_licenses
+// táblában (a csomag ára itt csak tájékoztató, magára a csomagra nem
+// jön létre külön nyilvántartás — lásd fenti megjegyzés).
+route('POST', '/api/admin/license/packages/grant', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, packageId, lejarat } = await readJsonBody(req);
+  if (!cegKulcs || !packageId) return sendJson(res, 400, { error: 'Hiányzó cégkulcs vagy csomag-azonosító.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const pkg = licenseDb.prepare('SELECT id, nev, ar FROM license_packages WHERE id = ?').get(packageId);
+  if (!pkg) return sendJson(res, 404, { error: 'Ismeretlen csomag.' });
+  const keys = licenseDb.prepare('SELECT feature_key FROM license_package_features WHERE package_id = ?').all(packageId).map((r) => r.feature_key);
+  if (!keys.length) return sendJson(res, 400, { error: 'Ennek a csomagnak nincs funkciója beállítva.' });
+  const cleanLejarat = /^\d{4}-\d{2}-\d{2}$/.test(lejarat || '') ? lejarat : null;
+  const now = new Date().toISOString();
+  for (const key of keys) {
+    licenseDb.prepare(`
+      INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+      VALUES (?, ?, 0, ?, 1, ?, ?)
+      ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+    `).run(cegKulcs, key, cleanLejarat, `admin (csomag: ${pkg.nev})`, now);
+  }
+  logActivity({
+    type: 'license_package_grant', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Csomag kiosztva: ${pkg.nev} (${keys.length} funkció)${cleanLejarat ? `, lejárat: ${cleanLejarat}` : ', nincs lejárat'}`,
+  });
+  sendJson(res, 200, { ok: true, featureCount: keys.length });
+});
+
 // Cégenkénti licenc-áttekintés — minden ismert cég (a companyIndexből,
 // telephelyenként deduplikálva egyetlen céges sorra), mindegyikhez az
 // összes katalógus-funkció aktuális állapotával (kiosztva/nincs kiosztva).
@@ -1603,6 +1752,10 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
     licenseDb.prepare('SELECT ceg_kulcs, eszkoz_limit FROM company_device_limits').all()
       .map((r) => [r.ceg_kulcs, r.eszkoz_limit])
   );
+  const subscriptionByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes FROM company_subscription').all()
+      .map((r) => [r.ceg_kulcs, r])
+  );
 
   const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
     const grants = grantsByCeg.get(cegKulcs) || new Map();
@@ -1615,14 +1768,41 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
         aktiv: row ? !!row.aktiv : false, ...status,
       };
     });
+    const sub = subscriptionByCeg.get(cegKulcs);
     return {
       cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
       eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
       eszkozLimit: deviceLimitByCeg.has(cegKulcs) ? deviceLimitByCeg.get(cegKulcs) : null,
+      alapElofizetesAktiv: !sub || !!sub.aktiv,
+      alapMegjegyzes: sub ? sub.megjegyzes : null,
     };
   }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
 
   sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
+});
+
+// Az alap regisztráltság (a havidíj fizetve van-e) be/kikapcsolása egy
+// cégnek — ettől FÜGGETLEN minden funkció-kiosztás, hogy az admin ne
+// veszítse el a beállításokat, ha egy cég átmenetileg nem fizet, majd
+// visszatér.
+route('POST', '/api/admin/license/subscription', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, aktiv, megjegyzes } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  const cleanMegjegyzes = String(megjegyzes || '').trim() || null;
+  licenseDb.prepare(`
+    INSERT INTO company_subscription (ceg_kulcs, aktiv, megjegyzes, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET aktiv = excluded.aktiv, megjegyzes = excluded.megjegyzes, updated_at = excluded.updated_at
+  `).run(cegKulcs, cleanAktiv, cleanMegjegyzes, new Date().toISOString());
+  logActivity({
+    type: 'license_subscription', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Alap regisztráció ${cleanAktiv ? 'aktiválva' : 'szüneteltetve'}${cleanMegjegyzes ? ` — ${cleanMegjegyzes}` : ''}`,
+  });
+  sendJson(res, 200, { ok: true });
 });
 
 // Licenc kiosztása / módosítása egy cégnek egy adott funkcióra — upsert.
@@ -3167,12 +3347,23 @@ route('GET', '/api/license/status', async (req, res, query) => {
   const eszkoz = String(query.eszkoz || '').trim();
   const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
 
+  // ALAP REGISZTRÁLTSÁG — ez egy, a funkció-kapcsolóktól teljesen külön,
+  // elsődleges kérdés: fizeti-e a cég az alap havidíjat? Ha nem, az APP
+  // ebből egyértelműen, azonnal látja, hogy ez az ok — nem kell
+  // funkciónként találgatnia, miért van minden letiltva.
+  const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
+
   const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
   const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
   const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
 
   let features;
-  if (eszkozRegisztralva === false) {
+  if (!alapElofizetesAktiv) {
+    // Az alap havidíj nincs fizetve — ETTŐL FÜGGETLENÜL, hogy egyébként
+    // milyen funkció-kiosztásai vannak a cégnek, minden funkció le van
+    // tiltva. Ez a legmagasabb prioritású, elsődleges kapcsoló.
+    features = catalog.map((f) => ({ key: f.key, engedelyezve: false, lejarat: null }));
+  } else if (eszkozRegisztralva === false) {
     // Betelt az eszközkorlát, és ez egy még ismeretlen eszköz — nincs neki
     // hely, minden funkció letiltva, ugyanúgy, mint egy nem fizető cégnél.
     features = catalog.map((f) => ({ key: f.key, engedelyezve: false, lejarat: null }));
@@ -3193,7 +3384,7 @@ route('GET', '/api/license/status', async (req, res, query) => {
       };
     });
   }
-  const payload = { adoszam: query.adoszam || '', cegKulcs, features };
+  const payload = { adoszam: query.adoszam || '', cegKulcs, alapElofizetesAktiv, features };
   if (eszkoz) payload.eszkozRegisztralva = eszkozRegisztralva;
   sendJson(res, 200, payload);
 });

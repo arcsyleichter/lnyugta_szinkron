@@ -141,10 +141,104 @@ document.getElementById('admin-mobile-tab-more').addEventListener('click', () =>
    ============================================================ */
 let licenseFeaturesCache = [];
 let licenseCompaniesCache = [];
+let licensePackagesCache = [];
 
 async function loadLicenseData() {
-  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies()]);
+  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages()]);
 }
+
+async function loadLicensePackages() {
+  try {
+    const data = await api('/api/admin/license/packages');
+    licensePackagesCache = data.packages;
+    renderLicensePackages();
+  } catch (e) {
+    document.getElementById('license-packages-list').innerHTML = `<span class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+function renderLicensePackages() {
+  const box = document.getElementById('license-packages-list');
+  if (!licensePackagesCache.length) { box.innerHTML = '<span class="muted">Még nincs egyetlen csomag sem.</span>'; return; }
+  box.innerHTML = licensePackagesCache.map((p) => {
+    const featureNames = p.featureKeys.map((k) => {
+      const f = licenseFeaturesCache.find((x) => x.key === k);
+      return f ? f.nev : k;
+    }).join(', ') || '(nincs funkció hozzárendelve)';
+    return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;">
+      <div style="flex:1 1 260px;">
+        <div style="font-weight:600;font-size:13px;">${escapeHtml(p.nev)} <span class="licenc-badge licenc-badge--${p.aktiv ? 'ok' : 'none'}" style="margin-left:6px;">${p.aktiv ? 'aktív' : 'kivezetve'}</span></div>
+        <div class="card-subtitle" style="margin-top:2px;">${escapeHtml(featureNames)}${p.ar ? ` · ${p.ar.toLocaleString('hu-HU')} Ft` : ''}</div>
+      </div>
+      <div>
+        <button class="btn-tiny btn-license-package-edit" data-id="${p.id}">Szerkesztés</button>
+        <button class="btn-tiny btn-license-package-delete" data-id="${p.id}">Törlés</button>
+      </div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.btn-license-package-edit').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = licensePackagesCache.find((x) => x.id === Number(btn.dataset.id));
+      openLicensePackageModal(p);
+    });
+  });
+  box.querySelectorAll('.btn-license-package-delete').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const p = licensePackagesCache.find((x) => x.id === Number(btn.dataset.id));
+      if (!confirm(`Törlöd a(z) "${p.nev}" csomagot? A már kiosztott funkciók a cégeknél megmaradnak, csak maga a csomag-meghatározás törlődik.`)) return;
+      try {
+        await api('/api/admin/license/packages/delete', { method: 'POST', body: JSON.stringify({ id: p.id }) });
+        loadLicensePackages();
+      } catch (e) { alert('Nem sikerült: ' + e.message); }
+    });
+  });
+}
+
+function openLicensePackageModal(p) {
+  document.getElementById('license-package-modal-title').textContent = p ? 'Csomag szerkesztése' : 'Új csomag';
+  document.getElementById('license-package-id').value = p ? p.id : '';
+  document.getElementById('license-package-nev').value = p ? p.nev : '';
+  document.getElementById('license-package-leiras').value = p ? (p.leiras || '') : '';
+  document.getElementById('license-package-ar').value = p ? p.ar : 0;
+  document.getElementById('license-package-aktiv').checked = p ? p.aktiv : true;
+  document.getElementById('license-package-msg').textContent = '';
+  const checksBox = document.getElementById('license-package-feature-checks');
+  const selectedKeys = new Set(p ? p.featureKeys : []);
+  checksBox.innerHTML = licenseFeaturesCache.map((f) => `
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 0;">
+      <input type="checkbox" value="${escapeHtml(f.key)}" ${selectedKeys.has(f.key) ? 'checked' : ''}> ${escapeHtml(f.nev)}
+    </label>`).join('') || '<span class="muted">Előbb vegyél fel legalább egy funkciót a katalógusba.</span>';
+  document.getElementById('license-package-modal-backdrop').hidden = false;
+}
+document.getElementById('license-package-new-btn').addEventListener('click', () => openLicensePackageModal(null));
+document.getElementById('license-package-modal-close').addEventListener('click', () => {
+  document.getElementById('license-package-modal-backdrop').hidden = true;
+});
+document.getElementById('license-package-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'license-package-modal-backdrop') e.target.hidden = true;
+});
+document.getElementById('license-package-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('license-package-msg');
+  msg.textContent = '';
+  try {
+    const featureKeys = [...document.querySelectorAll('#license-package-feature-checks input:checked')].map((c) => c.value);
+    const body = {
+      id: document.getElementById('license-package-id').value || undefined,
+      nev: document.getElementById('license-package-nev').value.trim(),
+      leiras: document.getElementById('license-package-leiras').value.trim(),
+      ar: Number(document.getElementById('license-package-ar').value) || 0,
+      aktiv: document.getElementById('license-package-aktiv').checked,
+      featureKeys,
+    };
+    await api('/api/admin/license/packages/save', { method: 'POST', body: JSON.stringify(body) });
+    document.getElementById('license-package-modal-backdrop').hidden = true;
+    loadLicensePackages();
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
 
 async function loadLicenseFeatures() {
   try {
@@ -250,11 +344,17 @@ function renderLicenseCompanies() {
     const badges = kiosztott.length
       ? kiosztott.map((l) => `<span class="licenc-badge licenc-badge--${l.allapot}" style="margin:2px 4px 2px 0;">${escapeHtml(l.nev)}</span>`).join('')
       : '<span class="licenc-badge licenc-badge--none">nincs kiosztott funkció</span>';
+    const subBadge = c.alapElofizetesAktiv
+      ? ''
+      : '<span class="licenc-badge licenc-badge--expired" style="margin-right:6px;" title="Az alap havidíj nincs fizetve — minden funkció le van tiltva">⚠ alap regisztráció szünetel</span>';
+    const deviceText = c.eszkozLimit != null ? `${c.eszkozSzam} / ${c.eszkozLimit} eszköz` : `${c.eszkozSzam} eszköz (korlátlan)`;
+    const deviceFull = c.eszkozLimit != null && c.eszkozSzam >= c.eszkozLimit;
+    const deviceBadge = `<span class="licenc-badge licenc-badge--${deviceFull ? 'expired' : 'none'}" style="margin-right:6px;" title="Regisztrált eszközök / korlát">${deviceText}</span>`;
     return `
     <tr data-ceg="${escapeHtml(c.cegKulcs)}">
       <td>${escapeHtml(c.nev)}</td>
       <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-      <td>${badges}</td>
+      <td>${subBadge}${deviceBadge}${badges}</td>
       <td><button class="btn-tiny btn-license-manage">Kezelés</button></td>
     </tr>`;
   }).join('');
@@ -268,9 +368,89 @@ function renderLicenseCompanies() {
   });
 }
 
+async function loadLicenseDeviceList(cegKulcs) {
+  const box = document.getElementById('license-device-list');
+  box.innerHTML = 'Betöltés…';
+  try {
+    const data = await api(`/api/admin/license/devices?cegKulcs=${encodeURIComponent(cegKulcs)}`);
+    if (!data.devices.length) { box.innerHTML = '<span class="muted">Még nincs regisztrált eszköz.</span>'; return; }
+    box.innerHTML = data.devices.map((d) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);">
+        <span title="első látott: ${escapeHtml(d.elsoLatott)} · utolsó: ${escapeHtml(d.utolsoLatott)}">${escapeHtml(d.eszkozAzonosito)}</span>
+        <button class="btn-tiny" data-id="${d.id}">Eltávolítás</button>
+      </div>`).join('');
+    box.querySelectorAll('button[data-id]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Eltávolítod ezt az eszközt a regisztráltak közül? A felszabaduló hely után az eszköz újra tudna regisztrálni (vagy egy másik).')) return;
+        try {
+          await api('/api/admin/license/devices/remove', { method: 'POST', body: JSON.stringify({ id: Number(btn.dataset.id) }) });
+          loadLicenseDeviceList(cegKulcs);
+          loadLicenseData();
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      });
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="muted">${escapeHtml(e.message)}</span>`;
+  }
+}
+
 function openLicenseGrantModal(c) {
-  document.getElementById('license-grant-modal-title').textContent = `Licencek — ${c.nev}`;
-  document.getElementById('license-grant-modal-subtitle').textContent = c.adoszam;
+  document.getElementById('license-device-limit').value = c.eszkozLimit != null ? c.eszkozLimit : '';
+  document.getElementById('license-device-limit-save').onclick = async () => {
+    try {
+      const val = document.getElementById('license-device-limit').value;
+      await api('/api/admin/license/device-limit', {
+        method: 'POST',
+        body: JSON.stringify({ cegKulcs: c.cegKulcs, eszkozLimit: val ? Number(val) : 0 }),
+      });
+      loadLicenseData();
+    } catch (e) { alert('Nem sikerült: ' + e.message); }
+  };
+  loadLicenseDeviceList(c.cegKulcs);
+
+  const pkgSelect = document.getElementById('license-package-grant-select');
+  const activePkgs = licensePackagesCache.filter((p) => p.aktiv);
+  pkgSelect.innerHTML = activePkgs.length
+    ? activePkgs.map((p) => `<option value="${p.id}">${escapeHtml(p.nev)}${p.ar ? ` (${p.ar.toLocaleString('hu-HU')} Ft)` : ''}</option>`).join('')
+    : '<option value="">nincs elérhető csomag</option>';
+  document.getElementById('license-package-grant-lejarat').value = '';
+  const pkgMsg = document.getElementById('license-package-grant-msg');
+  pkgMsg.textContent = '';
+  document.getElementById('license-package-grant-btn').onclick = async () => {
+    const packageId = Number(pkgSelect.value);
+    if (!packageId) return;
+    pkgMsg.textContent = 'Kiosztás…'; pkgMsg.style.color = 'var(--text-dim)';
+    try {
+      const res = await api('/api/admin/license/packages/grant', {
+        method: 'POST',
+        body: JSON.stringify({ cegKulcs: c.cegKulcs, packageId, lejarat: document.getElementById('license-package-grant-lejarat').value }),
+      });
+      pkgMsg.textContent = `✓ ${res.featureCount} funkció kiosztva`; pkgMsg.style.color = 'var(--jade-deep)';
+      loadLicenseData();
+    } catch (e) {
+      pkgMsg.textContent = e.message; pkgMsg.style.color = 'var(--brick)';
+    }
+  };
+
+  const subCheckbox = document.getElementById('license-subscription-aktiv');
+  const subMegjegyzes = document.getElementById('license-subscription-megjegyzes');
+  const subMsg = document.getElementById('license-subscription-msg');
+  subCheckbox.checked = c.alapElofizetesAktiv;
+  subMegjegyzes.value = c.alapMegjegyzes || '';
+  subMsg.textContent = '';
+  document.getElementById('license-subscription-save').onclick = async () => {
+    subMsg.textContent = 'Mentés…'; subMsg.style.color = 'var(--text-dim)';
+    try {
+      await api('/api/admin/license/subscription', {
+        method: 'POST',
+        body: JSON.stringify({ cegKulcs: c.cegKulcs, aktiv: subCheckbox.checked, megjegyzes: subMegjegyzes.value }),
+      });
+      subMsg.textContent = '✓ Mentve'; subMsg.style.color = 'var(--jade-deep)';
+      loadLicenseData();
+    } catch (e) {
+      subMsg.textContent = e.message; subMsg.style.color = 'var(--brick)';
+    }
+  };
   const list = document.getElementById('license-grant-list');
   list.innerHTML = c.licenses.map((l) => `
     <div class="license-grant-row" data-key="${escapeHtml(l.key)}" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--line);">
