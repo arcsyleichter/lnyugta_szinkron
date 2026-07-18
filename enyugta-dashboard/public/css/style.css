@@ -243,7 +243,7 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .hours-heatmap td{ padding:0; text-align:center; }
 .hours-heatmap .hh-cell{
   width:26px; height:22px; border-radius:3px; margin:1px; display:flex; align-items:center; justify-content:center;
-  font-family:var(--font-mono); font-size:9px; color:transparent; cursor:default;
+  font-family:var(--font-mono); font-size:9px; color:transparent; cursor:pointer;
 }
 .hours-heatmap .hh-cell.hh-closed{ background:repeating-linear-gradient(45deg, #F1EFE8, #F1EFE8 3px, #E8E5DC 3px, #E8E5DC 6px); }
 .btn-refresh{

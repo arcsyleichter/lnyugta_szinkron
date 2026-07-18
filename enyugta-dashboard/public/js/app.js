@@ -1443,17 +1443,29 @@ function renderHoursResults(data) {
     const ch = w.avgZaras ? parseInt(w.avgZaras.slice(0, 2), 10) : null;
     html += `<tr><th class="hh-wd-label">${w.label}</th>`;
     for (let h = minH; h <= maxH; h++) {
-      const v = w.hourly[h] || 0;
+      const avg = w.hourlyAvg[h] || 0;
+      const med = w.hourlyMedian[h] || 0;
       const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
-      const alpha = Math.min(1, v / globalMax);
+      const alpha = Math.min(1, avg / globalMax);
       const bg = isOpen ? `rgba(61,113,168,${(0.08 + alpha * 0.85).toFixed(2)})` : 'transparent';
       const cls = isOpen ? '' : 'hh-closed';
-      html += `<td><div class="hh-cell ${cls}" style="background:${bg}" title="${w.label} ${h}:00 — ${fmtHuf(v)}${isOpen ? '' : ' (zárva)'}"></div></td>`;
+      html += `<td><div class="hh-cell ${cls}" data-wd="${wd}" data-hh="${h}" style="background:${bg}"></div></td>`;
     }
     html += '</tr>';
   });
   html += '</tbody></table>';
   document.getElementById('hours-heatmap').innerHTML = html;
+
+  const heatmapTip = document.getElementById('hours-heatmap-tip');
+  document.querySelectorAll('.hh-cell').forEach((cell) => {
+    cell.addEventListener('click', () => {
+      const wd = Number(cell.dataset.wd), h = Number(cell.dataset.hh);
+      const w = data.weekdays[wd];
+      const avg = w.hourlyAvg[h] || 0, med = w.hourlyMedian[h] || 0;
+      heatmapTip.innerHTML = `<b>${w.label} ${h}:00–${h + 1}:00</b> — átlag: ${fmtHuf(avg)}, medián: ${fmtHuf(med)} (${w.napok} ${w.label.toLowerCase()} alapján)`;
+      heatmapTip.hidden = false;
+    });
+  });
 
   // Napi részletek választó — csak azok a napok, amikhez van adat.
   const picker = document.getElementById('hours-day-picker');
@@ -1473,6 +1485,8 @@ function renderHoursResults(data) {
 function renderHoursDayDetail(wd) {
   const w = hoursAnalysisData.weekdays[wd];
   document.getElementById('hours-day-analysis').textContent = w.recommendation || 'Nincs elegendő adat ehhez a naphoz.';
+  document.getElementById('hours-day-sub').textContent =
+    `Az oszlopok az ÁTLAGOS óránkénti forgalmat mutatják, ${w.napok} db ${w.label.toLowerCase()} alapján; a pont a MEDIÁNT jelzi. Kattints egy oszlopra a pontos értékekért.`;
 
   const container = document.getElementById('hours-day-chart');
   container.innerHTML = '';
@@ -1483,19 +1497,23 @@ function renderHoursDayDetail(wd) {
   const hours = [];
   for (let h = minH; h <= maxH; h++) hours.push(h);
 
-  const W = container.clientWidth || 560, H = 220;
-  const padL = 54, padR = 16, padT = 16, padB = 28;
-  const max = Math.max(...hours.map((h) => w.hourly[h] || 0), 1);
+  const W = container.clientWidth || 560, H = 240;
+  const padL = 58, padR = 16, padT = 20, padB = 32;
+  const max = Math.max(...hours.map((h) => Math.max(w.hourlyAvg[h] || 0, w.hourlyMedian[h] || 0)), 1);
   const groupW = (W - padL - padR) / hours.length;
   const barW = groupW * 0.6;
-  let bars = '', labels = '';
+  let bars = '', labels = '', dots = '';
   hours.forEach((h, i) => {
-    const v = w.hourly[h] || 0;
+    const avg = w.hourlyAvg[h] || 0;
+    const med = w.hourlyMedian[h] || 0;
     const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
-    const barH = (H - padT - padB) * (v / max);
+    const barH = (H - padT - padB) * (avg / max);
     const gx = padL + i * groupW;
-    bars += `<rect x="${(gx + groupW / 2 - barW / 2).toFixed(1)}" y="${(H - padB - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" fill="${isOpen ? '#3D71A8' : '#C8CDD4'}" rx="3"/>`;
-    labels += `<text x="${(gx + groupW / 2).toFixed(1)}" y="${H - 10}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="IBM Plex Mono">${h}</text>`;
+    const cx = gx + groupW / 2;
+    bars += `<rect class="hours-bar" data-h="${h}" x="${(cx - barW / 2).toFixed(1)}" y="${(H - padB - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(barH, 1).toFixed(1)}" fill="${isOpen ? '#3D71A8' : '#C8CDD4'}" rx="3" style="cursor:pointer;"/>`;
+    const medY = H - padB - (H - padT - padB) * (med / max);
+    dots += `<circle cx="${cx.toFixed(1)}" cy="${medY.toFixed(1)}" r="3.5" fill="#F0A93E" stroke="#fff" stroke-width="1.2"/>`;
+    labels += `<text x="${cx.toFixed(1)}" y="${H - 12}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="IBM Plex Mono">${h}</text>`;
   });
   let gridSvg = '';
   for (let g = 0; g <= 3; g++) {
@@ -1504,14 +1522,32 @@ function renderHoursDayDetail(wd) {
     gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
     gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
   }
+  const axisLabel = `<text x="${-(H / 2)}" y="14" font-size="10.5" fill="#6C8299" text-anchor="middle" font-family="Inter" transform="rotate(-90)">Átlagos forgalom (Ft)</text>`;
   container.innerHTML = `
+    <div class="chart-tooltip" id="hours-day-tooltip" hidden></div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
-      ${gridSvg}${bars}${labels}
+      ${gridSvg}${axisLabel}${bars}${dots}${labels}
     </svg>
     <div class="chart-legend">
-      <span><i style="background:#3D71A8;"></i>Nyitvatartáson belül</span>
-      <span><i style="background:#C8CDD4;"></i>Nyitvatartáson kívül</span>
+      <span><i style="background:#3D71A8;"></i>Átlag (nyitvatartáson belül)</span>
+      <span><i style="background:#C8CDD4;"></i>Átlag (nyitvatartáson kívül)</span>
+      <span><i style="background:#F0A93E;border-radius:50%;height:8px;width:8px;"></i>Medián</span>
     </div>`;
+
+  const tooltip = document.getElementById('hours-day-tooltip');
+  container.querySelectorAll('.hours-bar').forEach((bar) => {
+    bar.addEventListener('click', () => {
+      const h = Number(bar.dataset.h);
+      const avg = w.hourlyAvg[h] || 0, med = w.hourlyMedian[h] || 0;
+      tooltip.innerHTML = `<strong>${h}:00–${h + 1}:00</strong><br>Átlag: ${fmtHuf(avg)}<br>Medián: ${fmtHuf(med)}<br>${w.napok} nap alapján`;
+      const bx = Number(bar.getAttribute('x')) + Number(bar.getAttribute('width')) / 2;
+      const by = Number(bar.getAttribute('y'));
+      tooltip.style.left = `${(bx / W) * 100}%`;
+      tooltip.style.top = `${by}px`;
+      tooltip.hidden = false;
+    });
+  });
+  container.addEventListener('click', (e) => { if (!e.target.classList.contains('hours-bar')) tooltip.hidden = true; });
 }
 
 let compareState = { mode: 'years' };

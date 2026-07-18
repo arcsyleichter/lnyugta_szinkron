@@ -514,13 +514,16 @@
 
           <div class="card">
             <div class="card-title">Forgalom napszak és hét napja szerint</div>
-            <p class="card-subtitle" style="margin-bottom:12px;">minél sötétebb egy mező, annál nagyobb az adott órában lebonyolított forgalom — a nyitvatartáson kívüli órák halványítva</p>
-            <div id="hours-heatmap"></div>
+            <p class="card-subtitle" style="margin-bottom:12px;">
+              minden mező az ADOTT hét-nap ADOTT órájának ÁTLAGOS (nem összesített) forgalmát mutatja — pl. a "Szerda 17" mező azt jelzi, mennyi volt átlagosan a forgalom 17 és 18 óra között, a vizsgált időszak összes szerdáján. Minél sötétebb egy mező, annál nagyobb az átlagos forgalom. A nyitvatartáson kívüli órák halványítva. Kattints egy mezőre a pontos átlag és medián megtekintéséhez.
+            </p>
+            <div id="hours-heatmap" class="hours-heatmap"></div>
+            <p class="compare-analysis" id="hours-heatmap-tip" hidden></p>
           </div>
 
           <div class="card">
             <div class="card-title">Napi részletek</div>
-            <p class="card-subtitle" style="margin-bottom:12px;">válassz egy napot a részletes óránkénti bontáshoz</p>
+            <p class="card-subtitle" id="hours-day-sub" style="margin-bottom:12px;">válassz egy napot a részletes óránkénti bontáshoz</p>
             <div class="compare-type-row group-toggle" id="hours-day-picker"></div>
             <div id="hours-day-chart" class="chart-holder"></div>
             <p class="compare-analysis" id="hours-day-analysis"></p>

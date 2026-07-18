@@ -1528,29 +1528,51 @@ route('GET', '/api/analysis/opening-hours', async (req, res, query) => {
 
   const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
 
-  // Tényleges, rögzített nyitvatartás átlaga hét napja szerint.
-  const openRows = all(k,
-    `SELECT CAST(strftime('%w', targynap) AS INTEGER) AS wd,
-            AVG(CAST(strftime('%H', nyitas) AS INTEGER) + CAST(strftime('%M', nyitas) AS INTEGER)/60.0) AS nyitasOra,
-            AVG(CAST(strftime('%H', zaras) AS INTEGER) + CAST(strftime('%M', zaras) AS INTEGER)/60.0) AS zarasOra,
-            COUNT(*) AS napok
-     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? AND nyitas IS NOT NULL AND zaras IS NOT NULL
-     GROUP BY wd`,
+  // Tényleges, rögzített nyitvatartás átlaga hét napja szerint, PLUSZ maguk
+  // a konkrét dátumok is (ez kell az óránkénti ÁTLAG/MEDIÁN helyes
+  // számításához — enélkül a "nulla forgalmú óra" napok kimaradnának a
+  // nevezőből, és torzítanák az átlagot).
+  const openDaysRaw = all(k,
+    `SELECT targynap, CAST(strftime('%w', targynap) AS INTEGER) AS wd,
+            CAST(strftime('%H', nyitas) AS INTEGER) + CAST(strftime('%M', nyitas) AS INTEGER)/60.0 AS nyitasOra,
+            CAST(strftime('%H', zaras) AS INTEGER) + CAST(strftime('%M', zaras) AS INTEGER)/60.0 AS zarasOra
+     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? AND nyitas IS NOT NULL AND zaras IS NOT NULL`,
     [from, to]
   );
-  const openByWd = new Map(openRows.map((r) => [r.wd, r]));
+  const datesByWd = new Map(); // wd -> [targynap, ...]
+  const openByWd = new Map(); // wd -> {nyitasOra: atlag, zarasOra: atlag, napok}
+  for (let wd = 0; wd < 7; wd++) datesByWd.set(wd, []);
+  const sumsByWd = new Map();
+  openDaysRaw.forEach((r) => {
+    datesByWd.get(r.wd).push(r.targynap);
+    if (!sumsByWd.has(r.wd)) sumsByWd.set(r.wd, { nyitasSum: 0, zarasSum: 0, n: 0 });
+    const s = sumsByWd.get(r.wd);
+    s.nyitasSum += r.nyitasOra; s.zarasSum += r.zarasOra; s.n++;
+  });
+  for (const [wd, s] of sumsByWd) {
+    openByWd.set(wd, { nyitasOra: s.nyitasSum / s.n, zarasOra: s.zarasSum / s.n, napok: s.n });
+  }
 
-  // Óránkénti forgalmi eloszlás, hét napja szerint — a nyugta TÉNYLEGES
-  // kezdési időpontja (rendkezdatum) alapján, nem a szinkron időpontja.
-  const hourlyRows = all(k,
-    `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd, CAST(strftime('%H', rendkezdatum) AS INTEGER) AS hh,
+  // Óránkénti forgalom, DÁTUMONKÉNT (nem összesítve) — a nyugta TÉNYLEGES
+  // kezdési időpontja (rendkezdatum) alapján, hogy utána a JS oldalon
+  // kiszámolhassuk a helyes, óránkénti ÁTLAGOT és MEDIÁNT (a nulla
+  // forgalmú órákat/napokat is figyelembe véve a nevezőben).
+  const perDateHourly = all(k,
+    `SELECT keltdat, CAST(strftime('%H', rendkezdatum) AS INTEGER) AS hh,
             IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
      FROM nyfej WHERE keltdat BETWEEN ? AND ? AND rendkezdatum IS NOT NULL AND ${NOT_STORNO}
-     GROUP BY wd, hh`,
+     GROUP BY keltdat, hh`,
     [from, to]
   );
-  const hourlyMap = new Map(); // "wd-hh" -> revenue
-  hourlyRows.forEach((r) => hourlyMap.set(`${r.wd}-${r.hh}`, r.revenue));
+  const dateHourMap = new Map(); // "date-hh" -> revenue
+  perDateHourly.forEach((r) => dateHourMap.set(`${r.keltdat}-${r.hh}`, r.revenue));
+
+  function median(arr) {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+  }
 
   const fmtHH = (dec) => {
     if (dec === undefined || dec === null || Number.isNaN(dec)) return null;
@@ -1559,41 +1581,45 @@ route('GET', '/api/analysis/opening-hours', async (req, res, query) => {
   };
 
   const weekdays = [];
-  const heatmap = []; // [wd][hh] = revenue, csak akkor ha van legalabb 1 nap adat
+  const heatmap = []; // [wd][hh] = ATLAGOS forgalom (nem osszeg!)
   for (let wd = 0; wd < 7; wd++) {
-    const hourly = [];
-    let total = 0, peak = 0;
+    const dates = datesByWd.get(wd);
+    const hourlyAvg = [], hourlyMedian = [];
+    let totalAvg = 0, peakAvg = 0;
     for (let h = 0; h < 24; h++) {
-      const v = hourlyMap.get(`${wd}-${h}`) || 0;
-      hourly.push(v);
-      total += v;
-      if (v > peak) peak = v;
+      const values = dates.map((d) => dateHourMap.get(`${d}-${h}`) || 0);
+      const avg = values.length ? Math.round(values.reduce((s, v) => s + v, 0) / values.length) : 0;
+      const med = median(values);
+      hourlyAvg.push(avg);
+      hourlyMedian.push(med);
+      totalAvg += avg;
+      if (avg > peakAvg) peakAvg = avg;
     }
-    heatmap.push(hourly);
+    heatmap.push(hourlyAvg);
 
     const open = openByWd.get(wd);
     let deadZoneStartHours = 0, deadZoneEndHours = 0, recommendation = null;
-    if (open && peak > 0) {
-      const threshold = peak * 0.08; // önkényes, de bevált küszöb: a csúcsóra 8%-a alatt "elhanyagolható" forgalom
+    if (open && peakAvg > 0) {
+      const threshold = peakAvg * 0.08; // önkényes, de bevált küszöb: a csúcsóra 8%-a alatt "elhanyagolható" forgalom
       const openH = Math.round(open.nyitasOra);
       const closeH = Math.round(open.zarasOra);
       for (let h = openH; h < closeH; h++) {
-        if (hourly[h] <= threshold) deadZoneStartHours++; else break;
+        if (hourlyAvg[h] <= threshold) deadZoneStartHours++; else break;
       }
       for (let h = closeH - 1; h >= openH; h--) {
-        if (hourly[h] <= threshold) deadZoneEndHours++; else break;
+        if (hourlyAvg[h] <= threshold) deadZoneEndHours++; else break;
       }
-      const lastHourShare = hourly[closeH - 1] ? Math.round((hourly[closeH - 1] / total) * 100) : 0;
+      const lastHourShare = hourlyAvg[closeH - 1] && totalAvg ? Math.round((hourlyAvg[closeH - 1] / totalAvg) * 100) : 0;
 
       const parts = [];
       if (deadZoneEndHours >= 1) {
-        parts.push(`A zárás előtti ${deadZoneEndHours} óra érdemi forgalom nélkül telik (a nyitvatartás vége: ${fmtHH(open.zarasOra)}) — érdemes lehet fontolóra venni a korábbi zárást.`);
+        parts.push(`A zárás előtti ${deadZoneEndHours} óra átlagosan érdemi forgalom nélkül telik (a nyitvatartás vége: ${fmtHH(open.zarasOra)}) — érdemes lehet fontolóra venni a korábbi zárást.`);
       }
       if (deadZoneStartHours >= 1) {
         parts.push(`A nyitás utáni ${deadZoneStartHours} óra is jellemzően forgalom nélkül telik (nyitás: ${fmtHH(open.nyitasOra)}) — később nyitva is elegendő lehet.`);
       }
       if (deadZoneEndHours === 0 && lastHourShare >= 10) {
-        parts.push(`A zárás előtti utolsó órában is jelentős (a napi forgalom ${lastHourShare}%-a) az eladás — érdemes megfontolni a nyitvatartás meghosszabbítását.`);
+        parts.push(`A zárás előtti utolsó órában is jelentős (az átlagos napi forgalom ${lastHourShare}%-a) az eladás — érdemes megfontolni a nyitvatartás meghosszabbítását.`);
       }
       if (!parts.length) {
         parts.push(`A nyitvatartás jól illeszkedik a tényleges forgalmi mintázathoz, nincs számottevő holt időszak.`);
@@ -1606,7 +1632,7 @@ route('GET', '/api/analysis/opening-hours', async (req, res, query) => {
       avgNyitas: open ? fmtHH(open.nyitasOra) : null,
       avgZaras: open ? fmtHH(open.zarasOra) : null,
       napok: open ? open.napok : 0,
-      hourly, totalRevenue: total, peakRevenue: peak,
+      hourlyAvg, hourlyMedian, totalAvgRevenue: totalAvg, peakAvgRevenue: peakAvg,
       deadZoneStartHours, deadZoneEndHours, recommendation,
     });
   }
