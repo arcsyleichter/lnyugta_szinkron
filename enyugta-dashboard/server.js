@@ -420,6 +420,8 @@ licenseDb.exec(`
     ceg_kulcs TEXT PRIMARY KEY,
     aktiv INTEGER NOT NULL DEFAULT 1,
     megjegyzes TEXT,
+    proba_vege TEXT,
+    proba_kezi INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
   );
 
@@ -445,6 +447,15 @@ licenseDb.exec(`
     PRIMARY KEY (package_id, feature_key)
   );
 `);
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(company_subscription)`).all();
+  if (!cols.some((c) => c.name === 'proba_vege')) {
+    licenseDb.exec(`ALTER TABLE company_subscription ADD COLUMN proba_vege TEXT`);
+  }
+  if (!cols.some((c) => c.name === 'proba_kezi')) {
+    licenseDb.exec(`ALTER TABLE company_subscription ADD COLUMN proba_kezi INTEGER NOT NULL DEFAULT 0`);
+  }
+}
 // A ténylegesen Androidban hardkódolt, VALÓS funkció-azonosítók listája —
 // ez az egyetlen forrás, amit két helyen is használunk: (1) vadonatúj,
 // üres telepítésnél automatikus kezdő feltöltéshez, (2) egy már futó,
@@ -1783,7 +1794,7 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       .map((r) => [r.ceg_kulcs, r.eszkoz_limit])
   );
   const subscriptionByCeg = new Map(
-    licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes FROM company_subscription').all()
+    licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes, proba_vege, proba_kezi FROM company_subscription').all()
       .map((r) => [r.ceg_kulcs, r])
   );
 
@@ -1805,6 +1816,11 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       eszkozLimit: deviceLimitByCeg.has(cegKulcs) ? deviceLimitByCeg.get(cegKulcs) : null,
       alapElofizetesAktiv: !sub || !!sub.aktiv,
       alapMegjegyzes: sub ? sub.megjegyzes : null,
+      probaKezi: !!(sub && sub.proba_kezi),
+      probaVege: sub && sub.proba_kezi ? sub.proba_vege : null,
+      probaNapokHatra: sub && sub.proba_kezi
+        ? (sub.proba_vege ? Math.max(0, Math.ceil((new Date(sub.proba_vege + 'T23:59:59') - new Date()) / 86400000)) : 0)
+        : null,
     };
   }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
 
@@ -1833,6 +1849,43 @@ route('POST', '/api/admin/license/subscription', async (req, res) => {
     detail: `Alap regisztráció ${cleanAktiv ? 'aktiválva' : 'szüneteltetve'}${cleanMegjegyzes ? ` — ${cleanMegjegyzes}` : ''}`,
   });
   sendJson(res, 200, { ok: true });
+});
+
+// Cégenkénti próbaidő KÉZI beállítása/felülbírálása — hány nap van hátra
+// a próbaidőből, MOSTANTÓL számítva. 0 = nincs próbaidő (azonnal a
+// tényleges funkció-kiosztás számít). Ha ezt egyszer beállítottad egy
+// cégre, onnantól ez felülírja az automatikus (első szinkrontól
+// számított) próbaidő-logikát — a "napok" mező üresen hagyásával/
+// törlésével visszaállítható az automatikus viselkedés.
+route('POST', '/api/admin/license/trial', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, napok } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite2 = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite2 && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+
+  if (napok === null || napok === '' || napok === undefined) {
+    // Visszaállítás az automatikus viselkedésre.
+    licenseDb.prepare(`
+      INSERT INTO company_subscription (ceg_kulcs, aktiv, proba_vege, proba_kezi, updated_at) VALUES (?, 1, NULL, 0, ?)
+      ON CONFLICT(ceg_kulcs) DO UPDATE SET proba_vege = NULL, proba_kezi = 0, updated_at = excluded.updated_at
+    `).run(cegKulcs, new Date().toISOString());
+    logActivity({ type: 'license_trial_set', ok: true, companyKey: cegKulcs, nev: anySite2?.nev || cegKulcs, detail: 'Próbaidő visszaállítva automatikusra.' });
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const cleanNapok = Math.max(0, parseInt(napok, 10) || 0);
+  const probaVege = cleanNapok > 0 ? addDaysISO(todayIsoServer(), cleanNapok) : null;
+  licenseDb.prepare(`
+    INSERT INTO company_subscription (ceg_kulcs, aktiv, proba_vege, proba_kezi, updated_at) VALUES (?, 1, ?, 1, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET proba_vege = excluded.proba_vege, proba_kezi = 1, updated_at = excluded.updated_at
+  `).run(cegKulcs, probaVege, new Date().toISOString());
+  logActivity({
+    type: 'license_trial_set', ok: true, companyKey: cegKulcs, nev: anySite2?.nev || cegKulcs,
+    detail: cleanNapok > 0 ? `Próbaidő kézzel beállítva: ${cleanNapok} nap (lejár: ${probaVege})` : 'Próbaidő kikapcsolva (0 nap).',
+  });
+  sendJson(res, 200, { ok: true, probaVege });
 });
 
 // Licenc kiosztása / módosítása egy cégnek egy adott funkcióra — upsert.
@@ -3327,6 +3380,14 @@ function companyFirstSeen(cegKulcs) {
   return sites.reduce((min, t) => (!min || t.letrehozva < min ? t.letrehozva : min), null);
 }
 function companyTrialEnd(cegKulcs) {
+  // Ha az admin KÉZZEL beállított próbaidőt ennél a cégnél (akár 0 napra,
+  // vagyis "nincs próbaidő"), az FELÜLÍRJA az automatikus számítást —
+  // ez a magasabb prioritású forrás. Ha soha nem nyúlt hozzá, marad a
+  // régi, automatikus (első szinkrontól számított) viselkedés.
+  const sub = licenseDb.prepare('SELECT proba_vege, proba_kezi FROM company_subscription WHERE ceg_kulcs = ?').get(cegKulcs);
+  if (sub && sub.proba_kezi) {
+    return sub.proba_vege ? new Date(sub.proba_vege + 'T23:59:59') : null;
+  }
   const firstSeen = companyFirstSeen(cegKulcs);
   if (!firstSeen) return null;
   return new Date(new Date(firstSeen).getTime() + LICENSE_TRIAL_DAYS * 86400000);
@@ -3387,34 +3448,32 @@ route('GET', '/api/license/status', async (req, res, query) => {
   const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
   const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
 
-  let features;
+  // Csak az ENGEDÉLYEZETT funkciók kulcsait listázzuk — ha egy kulcs
+  // NINCS benne, az pontosan azt jelenti, hogy nincs engedélyezve
+  // (ugyanaz, mint a false lenne) — nincs értelme kiírni.
+  let funkciok = [];
   if (!alapElofizetesAktiv) {
     // Az alap havidíj nincs fizetve — ETTŐL FÜGGETLENÜL, hogy egyébként
     // milyen funkció-kiosztásai vannak a cégnek, minden funkció le van
     // tiltva. Ez a legmagasabb prioritású, elsődleges kapcsoló.
-    features = catalog.map((f) => ({ key: f.key, engedelyezve: false, lejarat: null }));
+    funkciok = [];
   } else if (eszkozRegisztralva === false) {
     // Betelt az eszközkorlát, és ez egy még ismeretlen eszköz — nincs neki
     // hely, minden funkció letiltva, ugyanúgy, mint egy nem fizető cégnél.
-    features = catalog.map((f) => ({ key: f.key, engedelyezve: false, lejarat: null }));
+    funkciok = [];
   } else if (inTrial) {
-    const trialLejarat = trialEnd ? trialEnd.toISOString().slice(0, 10) : null;
-    features = catalog.map((f) => ({ key: f.key, engedelyezve: true, lejarat: trialLejarat }));
+    funkciok = catalog.map((f) => f.key);
   } else {
     const grants = new Map(
       licenseDb.prepare('SELECT * FROM company_licenses WHERE ceg_kulcs = ?').all(cegKulcs).map((r) => [r.feature_key, r])
     );
-    features = catalog.map((f) => {
+    funkciok = catalog.filter((f) => {
       const row = grants.get(f.key);
       const status = licenseRowStatus(row);
-      return {
-        key: f.key,
-        engedelyezve: !!row && !!row.aktiv && status.allapot !== 'expired',
-        lejarat: row ? row.lejarat : null,
-      };
-    });
+      return !!row && !!row.aktiv && status.allapot !== 'expired';
+    }).map((f) => f.key);
   }
-  const payload = { adoszam: query.adoszam || '', cegKulcs, alapElofizetesAktiv, features };
+  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv, funkciok };
   if (eszkoz) payload.eszkozRegisztralva = eszkozRegisztralva;
   sendJson(res, 200, payload);
 });

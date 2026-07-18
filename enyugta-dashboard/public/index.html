@@ -1232,6 +1232,17 @@
         <button class="btn-tiny" id="license-subscription-save">Mentés</button>
         <span id="license-subscription-msg" style="font-size:12px;margin-left:8px;"></span>
       </div>
+      <div id="license-trial-box" style="border:1.5px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+        <div style="font-weight:600;font-size:13.5px;margin-bottom:4px;">Próbaidőszak</div>
+        <p class="card-subtitle" style="margin-bottom:8px;" id="license-trial-current"></p>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="font-size:12.5px;">Hátralévő próbaidő (nap, 0 = nincs próbaidő):</label>
+          <input type="number" id="license-trial-napok" min="0" style="width:70px;padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;">
+          <button class="btn-tiny" id="license-trial-save">Mentés</button>
+          <button class="btn-tiny" id="license-trial-reset">Automatikusra állítás</button>
+        </div>
+        <span id="license-trial-msg" style="font-size:12px;"></span>
+      </div>
       <div id="license-device-box" style="border:1.5px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px;">
         <div style="font-weight:600;font-size:13.5px;margin-bottom:6px;">Eszközök</div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">

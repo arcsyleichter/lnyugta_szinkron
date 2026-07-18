@@ -421,6 +421,36 @@ function openLicenseGrantModal(c) {
       loadLicenseData();
     } catch (e) { alert('Nem sikerült: ' + e.message); }
   };
+  const trialCurrent = document.getElementById('license-trial-current');
+  const trialInput = document.getElementById('license-trial-napok');
+  const trialMsg = document.getElementById('license-trial-msg');
+  trialMsg.textContent = '';
+  if (c.probaKezi) {
+    trialCurrent.textContent = c.probaNapokHatra > 0
+      ? `Kézzel beállítva — jelenleg ${c.probaNapokHatra} nap van hátra (lejár: ${c.probaVege}).`
+      : 'Kézzel beállítva — nincs próbaidő (0 nap).';
+    trialInput.value = c.probaNapokHatra;
+  } else {
+    trialCurrent.textContent = 'Jelenleg az automatikus próbaidő-logika érvényes (az első szinkrontól számítva).';
+    trialInput.value = '';
+  }
+  document.getElementById('license-trial-save').onclick = async () => {
+    trialMsg.textContent = 'Mentés…'; trialMsg.style.color = 'var(--text-dim)';
+    try {
+      await api('/api/admin/license/trial', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, napok: trialInput.value }) });
+      trialMsg.textContent = '✓ Mentve'; trialMsg.style.color = 'var(--jade-deep)';
+      loadLicenseData();
+    } catch (e) { trialMsg.textContent = e.message; trialMsg.style.color = 'var(--brick)'; }
+  };
+  document.getElementById('license-trial-reset').onclick = async () => {
+    trialMsg.textContent = 'Visszaállítás…'; trialMsg.style.color = 'var(--text-dim)';
+    try {
+      await api('/api/admin/license/trial', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, napok: null }) });
+      trialMsg.textContent = '✓ Automatikusra állítva'; trialMsg.style.color = 'var(--jade-deep)';
+      loadLicenseData();
+    } catch (e) { trialMsg.textContent = e.message; trialMsg.style.color = 'var(--brick)'; }
+  };
+
   loadLicenseDeviceList(c.cegKulcs);
 
   const pkgSelect = document.getElementById('license-package-grant-select');
