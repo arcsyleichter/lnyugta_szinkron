@@ -35,6 +35,11 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 óra
 const MAX_OPEN_DB_CONNECTIONS = 40; // ennyi cég adatbázisát tartjuk egyszerre nyitva (LRU)
 
+// Sütik `Secure` jelzővel (csak HTTPS-en küldi el a böngésző). Alapból BE van
+// kapcsolva — csak akkor kapcsold ki (DISABLE_SECURE_COOKIES=1), ha helyi
+// fejlesztés közben sima HTTP-n (nem HTTPS-en) teszteled a bejelentkezést.
+const COOKIE_SECURE = process.env.DISABLE_SECURE_COOKIES !== '1';
+
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(COMPANIES_DIR)) fs.mkdirSync(COMPANIES_DIR, { recursive: true });
 
@@ -681,6 +686,111 @@ function sendJson(res, status, obj, extraHeaders = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...extraHeaders });
   res.end(body);
 }
+
+// ---------------------------------------------------------------------------
+// IT biztonsági segédfüggvények: valódi kliens-IP (reverse proxy mögött),
+// időzítés-biztos összehasonlítás, bejelentkezési rate-limit, biztonsági
+// HTTP-fejlécek.
+// ---------------------------------------------------------------------------
+
+// Az Apache reverse proxy mögött a req.socket.remoteAddress MINDIG a proxy
+// saját (loopback) címét adná vissza — ez a valódi kliens IP-jét olvassa ki
+// az X-Forwarded-For fejlécből (a lánc első, azaz legelső/eredeti címe).
+function getClientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+// Időzítés-biztos string-összehasonlítás (titkok/API-kulcsok/jelszavak
+// összevetésére) — eltérő hosszúságnál is kb. ugyanannyi ideig fut, hogy a
+// válaszidőből ne legyen kikövetkeztethető a helyes érték hossza/tartalma.
+function timingSafeStringEqual(a, b) {
+  const aBuf = Buffer.from(String(a == null ? '' : a), 'utf8');
+  const bBuf = Buffer.from(String(b == null ? '' : b), 'utf8');
+  if (aBuf.length !== bBuf.length) {
+    // Végzünk egy "álló" összehasonlítást is, hogy a hossz-eltérés se legyen
+    // gyorsabb/lassabb válaszidőből kitalálható, majd egyértelműen hamis.
+    crypto.timingSafeEqual(aBuf, aBuf);
+    return false;
+  }
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function verifySyncApiKey(apiKey) {
+  if (!apiKey) return false;
+  return timingSafeStringEqual(apiKey, SECRETS.syncApiKey);
+}
+
+// Bejelentkezési rate-limit: max 8 próbálkozás / 10 perc ablakonként,
+// utána 10 perces zárolás — IP + azonosító (email vagy 'admin') kulcs szerint.
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT_MAX_ATTEMPTS = 8;
+const RATE_LIMIT_LOCKOUT_MS = 10 * 60 * 1000;
+const loginAttempts = new Map(); // "ip::identifier" -> { count, windowStart, lockedUntil }
+
+function loginRateLimitKey(ip, identifier) {
+  return `${ip}::${String(identifier || '').toLowerCase()}`;
+}
+
+// Visszaadja, hogy szabad-e most próbálkozni; ha nem, meddig kell várni.
+function checkLoginRateLimit(ip, identifier) {
+  const key = loginRateLimitKey(ip, identifier);
+  const entry = loginAttempts.get(key);
+  const now = Date.now();
+  if (entry && entry.lockedUntil && now < entry.lockedUntil) {
+    return { allowed: false, retryAfterSeconds: Math.ceil((entry.lockedUntil - now) / 1000) };
+  }
+  return { allowed: true };
+}
+
+// Sikertelen/sikeres bejelentkezési kísérlet rögzítése. Siker esetén törli a
+// számlálót; sikertelen esetén növeli, és a küszöb elérésekor zárol.
+function recordLoginAttempt(ip, identifier, success) {
+  const key = loginRateLimitKey(ip, identifier);
+  const now = Date.now();
+  if (success) { loginAttempts.delete(key); return; }
+  let entry = loginAttempts.get(key);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { count: 0, windowStart: now, lockedUntil: 0 };
+  }
+  entry.count += 1;
+  if (entry.count >= RATE_LIMIT_MAX_ATTEMPTS) {
+    entry.lockedUntil = now + RATE_LIMIT_LOCKOUT_MS;
+  }
+  loginAttempts.set(key, entry);
+}
+
+// Óránkénti takarítás, hogy a memóriában ne gyűljenek a régen lejárt bejegyzések.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of loginAttempts.entries()) {
+    const windowExpired = now - entry.windowStart > RATE_LIMIT_WINDOW_MS;
+    const lockExpired = !entry.lockedUntil || now > entry.lockedUntil;
+    if (windowExpired && lockExpired) loginAttempts.delete(key);
+  }
+}, 60 * 60 * 1000).unref();
+
+function sendRateLimited(res, retryAfterSeconds) {
+  sendJson(res, 429, { error: 'Túl sok sikertelen bejelentkezési kísérlet. Próbáld újra később.', retryAfterSeconds }, { 'Retry-After': String(retryAfterSeconds) });
+}
+
+// Globális biztonsági HTTP-fejlécek — minden válaszra rákerülnek, mert a
+// kérés-kezelő legelején hívjuk meg (res.setHeader jelen esetben megelőzi és
+// összeolvad a későbbi res.writeHead / sendJson hívásokban átadott fejlécekkel).
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; " +
+    "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+  );
+  if (COOKIE_SECURE) res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+}
 function readBody(req, limitBytes = 25 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -772,7 +882,7 @@ function route(method, pattern, handler) { routes.push({ method, pattern, handle
 route('POST', '/api/auth/logout', async (req, res) => {
   const session = requireAuth(req);
   if (session) logActivity({ type: 'company_logout', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Kijelentkezés.' });
-  sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enysession=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enysession=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
 route('GET', '/api/me', async (req, res) => {
@@ -826,7 +936,7 @@ route('POST', '/api/telephely/select', async (req, res) => {
     exp: Date.now() + SESSION_MAX_AGE_MS,
   };
   const token = signSession(payload);
-  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
   logActivity({ type: 'telephely_select', ok: true, companyKey: siteKey, nev: payload.nev, detail: `Telephely kiválasztva: ${t.nev} (${kod})` });
   sendJson(res, 200, {
     ok: true,
@@ -962,14 +1072,18 @@ route('POST', '/api/invite/accept', async (req, res) => {
 // fiókkal jelentkezett be valaki.
 // ---------------------------------------------------------------------------
 route('POST', '/api/auth/user-login', async (req, res) => {
-  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const ip = getClientIp(req);
   const { email, password } = await readJsonBody(req);
   const clean = String(email || '').trim().toLowerCase();
+  const rl = checkLoginRateLimit(ip, clean);
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
   const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role IN ('owner','manager')`).get(clean);
   if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    recordLoginAttempt(ip, clean, false);
     logActivity({ type: 'company_login', ok: false, companyKey: u ? u.ceg_kulcs : null, nev: null, detail: `Hibás egyéni belépés: ${clean}`, ip });
     return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
   }
+  recordLoginAttempt(ip, clean, true);
 
   if (u.role === 'manager') {
     // Üzletvezető — mindig egy KONKRÉT, rögzített telephelyre szól a hozzáférése.
@@ -981,7 +1095,7 @@ route('POST', '/api/auth/user-login', async (req, res) => {
       nev: site ? site.nev : u.nev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
     };
     const token = signSession(payload);
-    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
     logActivity({ type: 'company_login', ok: true, companyKey: siteKey, nev: u.nev, detail: `Üzletvezetői belépés: ${clean}`, ip });
     return sendJson(res, 200, {
       ok: true, telephelyValasztva: true, vanAdat: !!site,
@@ -1004,7 +1118,7 @@ route('POST', '/api/auth/user-login', async (req, res) => {
       nev: site ? site.nev : displayNev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
     };
     const token = signSession(payload);
-    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
     return sendJson(res, 200, {
       ok: true, telephelyValasztva: true, vanAdat: !!site,
       company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
@@ -1013,7 +1127,7 @@ route('POST', '/api/auth/user-login', async (req, res) => {
 
   const payload = { companyKey: u.ceg_kulcs, cegKulcs: u.ceg_kulcs, telephelyKod: null, nev: displayNev, adoszam: u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
-  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
   sendJson(res, 200, { ok: true, telephelyValasztva: false, company: { nev: displayNev, adoszam: u.ceg_kulcs } }, { 'Set-Cookie': cookie });
 });
 
@@ -1022,23 +1136,27 @@ route('POST', '/api/auth/user-login', async (req, res) => {
 // nem keveredik a cégek/admin munkamenetével.
 // ---------------------------------------------------------------------------
 route('POST', '/api/auth/reseller-login', async (req, res) => {
-  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const ip = getClientIp(req);
   const { email, password } = await readJsonBody(req);
   const clean = String(email || '').trim().toLowerCase();
+  const rl = checkLoginRateLimit(ip, clean);
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
   const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role = 'reseller'`).get(clean);
   if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    recordLoginAttempt(ip, clean, false);
     logActivity({ type: 'reseller_login', ok: false, companyKey: null, nev: null, detail: `Hibás viszonteladói belépés: ${clean}`, ip });
     return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
   }
+  recordLoginAttempt(ip, clean, true);
   const payload = { isReseller: true, resellerId: u.id, nev: u.nev, email: u.email, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
-  const cookie = `enyreseller=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  const cookie = `enyreseller=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
   logActivity({ type: 'reseller_login', ok: true, companyKey: null, nev: u.nev, detail: clean, ip });
   sendJson(res, 200, { ok: true, nev: u.nev, email: u.email }, { 'Set-Cookie': cookie });
 });
 
 route('POST', '/api/auth/reseller-logout', async (req, res) => {
-  sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enyreseller=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyreseller=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
 // A viszonteladó KIZÁRÓLAG a saját ügyfeleit látja — más viszonteladók
@@ -2457,9 +2575,9 @@ route('GET', '/api/sync/status', async (req, res) => {
 // admin-beavatkozás nélkül, amíg mindegyik ismeri a közös x-api-key-t.
 // Kérés törzse: a teljes .db fájl nyers bájtjai (application/octet-stream).
 route('POST', '/api/sync/upload', async (req, res, query) => {
-  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const ip = getClientIp(req);
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey || apiKey !== SECRETS.syncApiKey) {
+  if (!verifySyncApiKey(apiKey)) {
     logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Érvénytelen vagy hiányzó x-api-key.', ip });
     return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
   }
@@ -2543,7 +2661,7 @@ route('POST', '/api/sync/upload', async (req, res, query) => {
 // kért érték), nincs szükség külön visszaigazoló hívásra.
 route('GET', '/api/sync/pending-changes', async (req, res, query) => {
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey || apiKey !== SECRETS.syncApiKey) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
   const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
   const cegKulcs = companyKeyFromAdoszam(adoszamRaw);
   if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter.' });
@@ -2612,7 +2730,7 @@ route('GET', '/api/auth/test-users-hint', async (req, res) => {
 
 route('GET', '/api/sync/companies', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey || apiKey !== SECRETS.syncApiKey) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
   const meta = readSyncMeta();
   const list = [...companyIndex.entries()].map(([key, entry]) => ({
     key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
@@ -2629,15 +2747,19 @@ route('GET', '/api/sync/companies', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 route('POST', '/api/admin/login', async (req, res) => {
-  const ip = (req.socket && req.socket.remoteAddress) || null;
+  const ip = getClientIp(req);
   const { password } = await readJsonBody(req);
-  if (!password || password !== SECRETS.adminPassword) {
+  const rl = checkLoginRateLimit(ip, 'admin');
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
+  if (!password || !timingSafeStringEqual(password, SECRETS.adminPassword)) {
+    recordLoginAttempt(ip, 'admin', false);
     logActivity({ type: 'admin_login', ok: false, companyKey: null, nev: null, detail: 'Hibás admin jelszó.', ip });
     return sendJson(res, 401, { error: 'Hibás admin jelszó.' });
   }
+  recordLoginAttempt(ip, 'admin', true);
   const payload = { isAdmin: true, exp: Date.now() + SESSION_MAX_AGE_MS };
   const token = signSession(payload);
-  const cookie = `enyadmin=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  const cookie = `enyadmin=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
   logActivity({ type: 'admin_login', ok: true, companyKey: null, nev: null, detail: 'Sikeres admin bejelentkezés.', ip });
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': cookie });
 });
@@ -2645,7 +2767,7 @@ route('POST', '/api/admin/login', async (req, res) => {
 route('POST', '/api/admin/logout', async (req, res) => {
   const admin = requireAdmin(req);
   if (admin) logActivity({ type: 'admin_logout', ok: true, companyKey: null, nev: null, detail: 'Admin kijelentkezett.' });
-  sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
 function computeNtakOverview() {
@@ -2849,7 +2971,7 @@ route('POST', '/api/admin/impersonate', async (req, res) => {
     cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS,
   };
   const token = signSession(payload);
-  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`;
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
   const telephelyInfo = listTelephelyek(entry.cegKulcs).find((t) => t.kod === entry.telephelyKod);
   logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a telephely nézetét.' });
   sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim, telephelyNev: telephelyInfo?.nev || entry.telephelyKod } }, { 'Set-Cookie': cookie });
@@ -2878,6 +3000,7 @@ function serveStatic(req, res, pathname) {
 // ---------------------------------------------------------------------------
 
 const server = http.createServer(async (req, res) => {
+  applySecurityHeaders(res);
   try {
     const u = new URL(req.url, `http://${req.headers.host}`);
     const query = Object.fromEntries(u.searchParams.entries());
@@ -2892,7 +3015,10 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     if (err && err.code === 'COMPANY_NOT_FOUND') return sendJson(res, 404, { error: 'A cég adatbázisa nem található.' });
     console.error(err);
-    sendJson(res, 500, { error: 'Szerverhiba', detail: String(err && err.message || err) });
+    // A részletes hibaüzenetet (pl. SQL/fájlrendszer belső infó) csak a szerver
+    // naplójába írjuk — a kliens felé kizárólag egy általános üzenet megy ki,
+    // hogy ne szivárogjon ki belső implementációs részlet.
+    sendJson(res, 500, { error: 'Szerverhiba történt. Próbáld újra, vagy jelezd az üzemeltetőnek.' });
   }
 });
 
