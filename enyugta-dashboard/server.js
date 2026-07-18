@@ -1590,6 +1590,30 @@ route('POST', '/api/admin/license/features/seed-real', async (req, res) => {
   sendJson(res, 200, { ok: true, added });
 });
 
+// A katalógusban lévő, de a valós 12 azonosító közé NEM tartozó ("kamu",
+// régi AI-tippre generált) bejegyzések eltávolítása — csak azokat törli,
+// amik SEHOL nincsenek kiosztva egyetlen cégnél sem (ugyanaz a védelem,
+// mint az egyenkénti törlésnél). Amit nem tud törölni, azt jelenti.
+route('POST', '/api/admin/license/features/remove-fake', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const realKeys = new Set(REAL_LICENSE_FEATURE_DEFAULTS.map((d) => d[0]));
+  const all = licenseDb.prepare('SELECT key, nev FROM license_features').all();
+  const removed = [];
+  const skipped = [];
+  for (const f of all) {
+    if (realKeys.has(f.key)) continue;
+    const inUse = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_licenses WHERE feature_key = ?').get(f.key).c;
+    if (inUse > 0) { skipped.push(`${f.nev} (${f.key}) — ${inUse} cégnél kiosztva`); continue; }
+    licenseDb.prepare('DELETE FROM license_features WHERE key = ?').run(f.key);
+    removed.push(f.key);
+  }
+  if (removed.length) {
+    logActivity({ type: 'license_feature_remove_fake', ok: true, companyKey: null, nev: 'admin', detail: `Kamu funkciók törölve: ${removed.join(', ')}` });
+  }
+  sendJson(res, 200, { ok: true, removed, skipped });
+});
+
 route('POST', '/api/admin/license/features/save', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });

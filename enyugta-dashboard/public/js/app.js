@@ -299,6 +299,22 @@ function openLicenseFeatureModal(f) {
   document.getElementById('license-feature-modal-backdrop').hidden = false;
 }
 document.getElementById('license-feature-new-btn').addEventListener('click', () => openLicenseFeatureModal(null));
+document.getElementById('license-feature-remove-fake-btn').addEventListener('click', async () => {
+  if (!confirm('Törlöd a katalógusból mindazt, ami nem a 12 valós Android-azonosító egyike? Csak azokat törli, amik SEHOL nincsenek kiosztva egyetlen cégnél sem.')) return;
+  const btn = document.getElementById('license-feature-remove-fake-btn');
+  btn.disabled = true; btn.textContent = 'Törlés…';
+  try {
+    const res = await api('/api/admin/license/features/remove-fake', { method: 'POST' });
+    let msg = res.removed.length ? `Törölve: ${res.removed.join(', ')}` : 'Nem volt mit törölni.';
+    if (res.skipped.length) msg += `\n\nKihagyva (mert kiosztva van):\n${res.skipped.join('\n')}`;
+    alert(msg);
+    loadLicenseFeatures();
+  } catch (e) {
+    alert('Nem sikerült: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Kamu funkciók törlése';
+  }
+});
 document.getElementById('license-feature-seed-real-btn').addEventListener('click', async () => {
   const btn = document.getElementById('license-feature-seed-real-btn');
   btn.disabled = true; btn.textContent = 'Pótlás…';
@@ -356,20 +372,27 @@ function renderLicenseCompanies() {
   if (!licenseCompaniesCache.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">Még nincs egyetlen ismert cég sem.</td></tr>'; return; }
   tbody.innerHTML = licenseCompaniesCache.map((c) => {
     const kiosztott = c.licenses.filter((l) => l.kiosztva);
-    const badges = kiosztott.length
-      ? kiosztott.map((l) => `<span class="licenc-badge licenc-badge--${l.allapot}" style="margin:2px 4px 2px 0;">${escapeHtml(l.nev)}</span>`).join('')
+    const osszesFunkcio = c.licenses.length;
+    const summary = kiosztott.length
+      ? `<span class="licenc-badge licenc-badge--ok">${kiosztott.length} / ${osszesFunkcio} funkció</span>`
       : '<span class="licenc-badge licenc-badge--none">nincs kiosztott funkció</span>';
-    const subBadge = c.alapElofizetesAktiv
-      ? ''
-      : '<span class="licenc-badge licenc-badge--expired" style="margin-right:6px;" title="Az alap havidíj nincs fizetve — minden funkció le van tiltva">⚠ alap regisztráció szünetel</span>';
-    const deviceText = c.eszkozLimit != null ? `${c.eszkozSzam} / ${c.eszkozLimit} eszköz` : `${c.eszkozSzam} eszköz (korlátlan)`;
-    const deviceFull = c.eszkozLimit != null && c.eszkozSzam >= c.eszkozLimit;
-    const deviceBadge = `<span class="licenc-badge licenc-badge--${deviceFull ? 'expired' : 'none'}" style="margin-right:6px;" title="Regisztrált eszközök / korlát">${deviceText}</span>`;
+    // Figyelmeztető jelvények CSAK akkor, ha tényleg van mire figyelni —
+    // ez tartja rövidnek a sort a legtöbb cégnél.
+    const warnings = [];
+    if (!c.alapElofizetesAktiv) {
+      warnings.push('<span class="licenc-badge licenc-badge--expired" title="Az alap havidíj nincs fizetve — minden funkció le van tiltva">⚠ regisztráció szünetel</span>');
+    }
+    if (c.eszkozLimit != null && c.eszkozSzam >= c.eszkozLimit) {
+      warnings.push(`<span class="licenc-badge licenc-badge--expired" title="Betelt az eszközkorlát">⚠ ${c.eszkozSzam}/${c.eszkozLimit} eszköz</span>`);
+    }
+    if (c.probaKezi) {
+      warnings.push(`<span class="licenc-badge licenc-badge--none" title="Kézzel beállított próbaidő">próba: ${c.probaNapokHatra} nap</span>`);
+    }
     return `
     <tr data-ceg="${escapeHtml(c.cegKulcs)}">
       <td>${escapeHtml(c.nev)}</td>
       <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-      <td>${subBadge}${deviceBadge}${badges}</td>
+      <td>${summary} ${warnings.join(' ')}</td>
       <td><button class="btn-tiny btn-license-manage">Kezelés</button></td>
     </tr>`;
   }).join('');
