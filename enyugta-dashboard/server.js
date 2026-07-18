@@ -2374,6 +2374,7 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
   } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `napzárás lekérdezés: ${e.message}`; }
 
   let submissionsByStatus = [], submissionsByType = [], recent = [];
+  let usedNyfejFallback = false;
   try {
     submissionsByStatus = all(k,
       `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
@@ -2390,9 +2391,37 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
        FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
       [from, to]
     );
-  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms lekérdezés: ${e.message}`; }
+  } catch (e) {
+    diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms lekérdezés: ${e.message}`;
+  }
 
-  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent, diag });
+  // Ha az ntakrms tábla nem létezik (régebbi androidos alkalmazás-verzió),
+  // vagy egyszerűen nincs benne adat a kiválasztott időszakra, a NYUGTÁK
+  // SAJÁT, beépített NTAK-küldési mezőiből (nyfej.kuldstat/ellenorzott)
+  // számoljuk ki ugyanezt — ez ugyanolyan valódi, megbízható forrás,
+  // csak nyugta-szinten, nem egy külön küldési naplóban van.
+  if (!submissionsByStatus.length && !recent.length) {
+    try {
+      submissionsByStatus = all(k,
+        `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ellenorzott IS NOT NULL GROUP BY ellenorzott ORDER BY cnt DESC`,
+        [from, to]
+      );
+      const nyfejTotal = get(k, `SELECT COUNT(*) AS cnt FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL`, [from, to]);
+      submissionsByType = nyfejTotal.cnt ? [{ url: 'nyugta-kuldes', cnt: nyfejTotal.cnt }] : [];
+      recent = all(k,
+        `SELECT 'nyugta-kuldes' AS url, bsz, keltdat AS kulddate, NULL AS elldate, ellenorzott, IFNULL(rmsfelduuid, uuid) AS uuid
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL ORDER BY keltdat DESC, id DESC LIMIT 100`,
+        [from, to]
+      );
+      usedNyfejFallback = submissionsByStatus.length > 0 || recent.length > 0;
+    } catch (e) {
+      diag.error = (diag.error ? diag.error + ' | ' : '') + `nyfej-alapú tartalék lekérdezés: ${e.message}`;
+    }
+  }
+
+  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent, usedNyfejFallback, diag });
+
 });
 
 route('GET', '/api/receipt', async (req, res, query) => {

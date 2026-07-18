@@ -1958,7 +1958,7 @@ const NTAK_STATUS_LABELS = {
   BEFOGADVA: { label: 'Befogadva', cls: 'pending' },
   ISMERETLEN: { label: 'Ismeretlen', cls: 'pending' },
 };
-const NTAK_TYPE_LABELS = { 'napi-zaras': 'Napi zárás', 'rendeles-osszesito': 'Rendelés összesítő' };
+const NTAK_TYPE_LABELS = { 'napi-zaras': 'Napi zárás', 'rendeles-osszesito': 'Rendelés összesítő', 'nyugta-kuldes': 'Nyugta-küldés' };
 
 function ntakStatusBadge(status) {
   const meta = NTAK_STATUS_LABELS[status] || { label: status, cls: 'pending' };
@@ -1972,7 +1972,7 @@ async function loadNtakView() {
   const diagCard = document.getElementById('ntak-diag-card');
   const diagContent = document.getElementById('ntak-diag-content');
   const noDataAtAll = !data.submissionsByStatus.length && !data.napzarasok.length && !data.recent.length;
-  if ((noDataAtAll || (data.diag && data.diag.error)) && data.diag) {
+  if (noDataAtAll && data.diag) {
     const d = data.diag;
     const rows = [];
     rows.push(`<b>nyfej</b> (nyugták) tábla: ${d.nyfej ? `${d.nyfej.total} sor, dátumtartomány ${d.nyfej.minDate || '—'} – ${d.nyfej.maxDate || '—'}, ebből ${d.nyfej.vanZarasid} sorban van kitöltve az "ntakzarasid", ${d.nyfej.vanEllenorzott} sorban az "ellenorzott" mező` : '(nem sikerült lekérdezni)'}`);
@@ -1991,6 +1991,11 @@ async function loadNtakView() {
   }
 
   const ntakrmsHiba = data.diag && data.diag.error && data.diag.error.includes('no such table: ntakrms');
+  const fallbackNote = document.getElementById('ntak-fallback-note');
+  fallbackNote.hidden = !data.usedNyfejFallback;
+  if (data.usedNyfejFallback) {
+    fallbackNote.textContent = 'Ez az androidos alkalmazás-verzió nem vezet külön küldési naplót — az alábbi adatok a nyugták saját, beépített NTAK-küldési mezőiből származnak, ami ugyanolyan megbízható forrás.';
+  }
   const statusBox = document.getElementById('ntak-status-summary');
   if (!data.submissionsByStatus.length) {
     statusBox.innerHTML = ntakrmsHiba
