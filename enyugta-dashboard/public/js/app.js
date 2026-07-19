@@ -75,8 +75,8 @@ async function apiSilent(path) {
    Állapot
    ============================================================ */
 const state = {
-  range: { from: isoDaysAgo(6), to: todayIso(), preset: '7' },
-  group: 'day',
+  range: { from: todayIso(), to: todayIso(), preset: 'today' },
+  group: 'hour',
   products: { offset: 0, limit: 50, q: '' },
   receipts: { offset: 0, limit: 25, q: '', fizmod: '', min: '', max: '' },
   pollTimer: null,
@@ -640,6 +640,8 @@ document.getElementById('license-grant-modal-backdrop').addEventListener('click'
    Admin — felhasználók listája, csoportosítás, szerkesztés, törlés
    ============================================================ */
 let adminUsersCache = [];
+let adminCompaniesCache = [];
+let adminResellersCache = [];
 let adminUsersGroupMode = 'szerepkor';
 
 async function loadAdminUsers() {
@@ -667,16 +669,9 @@ function renderAdminUserRow(u) {
     <tr data-id="${u.id}">
       <td>${escapeHtml(u.nev)}</td>
       <td>${escapeHtml(u.email)}</td>
-      <td>${escapeHtml(adminUserScopeLabel(u))}</td>
-      <td>${escapeHtml(u.invitedBy || '—')}</td>
+      <td>${escapeHtml(ADMIN_ROLE_LABELS[u.role] || u.role)}</td>
       <td><span class="licenc-badge licenc-badge--${u.status === 'active' ? 'ok' : u.status === 'pending' ? 'warn' : 'none'}">${ADMIN_STATUS_LABELS[u.status] || u.status}</span></td>
-      <td>${fmtDateTime(u.createdAt)}</td>
-      <td>
-        <button class="btn-tiny btn-admin-user-edit">Szerkesztés</button>
-        <button class="btn-tiny btn-admin-user-reset-link" title="Azonnali jelszó-visszaállító link generálása, pl. ha valaki elakadt a bejelentkezésnél">Belépés intézése</button>
-        <button class="btn-tiny btn-admin-user-clear-lockout" title="A bejelentkezési zárolás feloldása, ha valaki túl sokszor gépelte el a jelszavát">Zárolás feloldása</button>
-        <button class="btn-tiny btn-admin-user-delete">Törlés</button>
-      </td>
+      <td><button class="btn-tiny btn-admin-user-edit">Részletek</button></td>
     </tr>`;
 }
 
@@ -704,7 +699,7 @@ function renderAdminUsers() {
     <div class="admin-users-group">
       <div class="admin-users-group-title">${escapeHtml(g.cim)} <span class="profile-soon-badge">${g.users.length}</span></div>
       <table class="data-table">
-        <thead><tr><th>Név</th><th>Email</th><th>Hatókör</th><th>Meghívta</th><th>Állapot</th><th>Létrehozva</th><th></th></tr></thead>
+        <thead><tr><th>Név</th><th>Email</th><th>Szerepkör</th><th>Állapot</th><th></th></tr></thead>
         <tbody>${g.users.map(renderAdminUserRow).join('')}</tbody>
       </table>
     </div>`).join('');
@@ -724,47 +719,37 @@ function renderAdminUsers() {
       telephelyField.hidden = (u.role !== 'manager');
       document.getElementById('user-edit-adoszam').value = u.cegKulcs || '';
       document.getElementById('user-edit-telephely').value = u.telephelyKod || '';
+
+      document.querySelector('#user-edit-info-kv tbody').innerHTML = `
+        <tr><td>Hatókör</td><td>${escapeHtml(adminUserScopeLabel(u))}</td></tr>
+        <tr><td>Meghívta</td><td>${escapeHtml(u.invitedBy || '—')}</td></tr>
+        <tr><td>Létrehozva</td><td>${fmtDateTime(u.createdAt)}</td></tr>`;
+
+      document.getElementById('user-edit-reset-link-btn').onclick = async () => {
+        if (!confirm(`Generálunk egy azonnal használható, 2 óráig érvényes jelszó-visszaállító linket ${u.nev} (${u.email}) részére. Ezt neked kell eljuttatnod hozzá (pl. telefonon felolvasva, vagy másik csatornán elküldve). Folytatod?`)) return;
+        try {
+          const res = await api('/api/admin/users/reset-link', { method: 'POST', body: JSON.stringify({ id: u.id }) });
+          prompt('Másold ki és küldd el ezt a linket a felhasználónak (2 óráig érvényes):', res.link);
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      };
+      document.getElementById('user-edit-clear-lockout-btn').onclick = async () => {
+        try {
+          const res = await api('/api/admin/users/clear-lockout', { method: 'POST', body: JSON.stringify({ id: u.id }) });
+          alert(res.removed > 0
+            ? `Feloldva — ${u.nev} most már újra tud próbálkozni a bejelentkezéssel.`
+            : `${u.nev} jelenleg nem volt zárolva (lehet, hogy már magától lejárt, vagy más okból nem tud belépni).`);
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      };
+      document.getElementById('user-edit-delete-btn').onclick = async () => {
+        if (!confirm(`Biztosan törlöd ezt a felhasználót: ${u.nev} (${u.email})? Ez nem visszavonható.`)) return;
+        try {
+          await api('/api/admin/users/delete', { method: 'POST', body: JSON.stringify({ id: u.id }) });
+          document.getElementById('user-edit-modal-backdrop').hidden = true;
+          loadAdminUsers();
+        } catch (e) { alert('Nem sikerült törölni: ' + e.message); }
+      };
+
       document.getElementById('user-edit-modal-backdrop').hidden = false;
-    });
-  });
-  container.querySelectorAll('.btn-admin-user-reset-link').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = Number(btn.closest('tr').dataset.id);
-      const u = adminUsersCache.find((x) => x.id === id);
-      if (!confirm(`Generálunk egy azonnal használható, 2 óráig érvényes jelszó-visszaállító linket ${u.nev} (${u.email}) részére. Ezt neked kell eljuttatnod hozzá (pl. telefonon felolvasva, vagy másik csatornán elküldve). Folytatod?`)) return;
-      try {
-        const res = await api('/api/admin/users/reset-link', { method: 'POST', body: JSON.stringify({ id }) });
-        prompt('Másold ki és küldd el ezt a linket a felhasználónak (2 óráig érvényes):', res.link);
-      } catch (e) {
-        alert('Nem sikerült: ' + e.message);
-      }
-    });
-  });
-  container.querySelectorAll('.btn-admin-user-clear-lockout').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = Number(btn.closest('tr').dataset.id);
-      const u = adminUsersCache.find((x) => x.id === id);
-      try {
-        const res = await api('/api/admin/users/clear-lockout', { method: 'POST', body: JSON.stringify({ id }) });
-        alert(res.removed > 0
-          ? `Feloldva — ${u.nev} most már újra tud próbálkozni a bejelentkezéssel.`
-          : `${u.nev} jelenleg nem volt zárolva (lehet, hogy már magától lejárt, vagy más okból nem tud belépni).`);
-      } catch (e) {
-        alert('Nem sikerült: ' + e.message);
-      }
-    });
-  });
-  container.querySelectorAll('.btn-admin-user-delete').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = Number(btn.closest('tr').dataset.id);
-      const u = adminUsersCache.find((x) => x.id === id);
-      if (!confirm(`Biztosan törlöd ezt a felhasználót: ${u.nev} (${u.email})? Ez nem visszavonható.`)) return;
-      try {
-        await api('/api/admin/users/delete', { method: 'POST', body: JSON.stringify({ id }) });
-        loadAdminUsers();
-      } catch (e) {
-        alert('Nem sikerült törölni: ' + e.message);
-      }
     });
   });
 }
@@ -1214,15 +1199,43 @@ document.getElementById('admin-logout-btn').addEventListener('click', async () =
 
 const NTAK_ADMIN_STATUS_LABELS = { TELJESEN_HIBAS: 'Teljesen hibás', RESZBEN_SIKERES: 'Részben sikeres' };
 
+// Informatív, sok-mutatós áttekintő rács az admin kezdőoldalára — minden
+// kártya egy-egy önmagában értelmezhető, azonnal hasznos szám.
+function renderAdminStatsGrid(s) {
+  if (!s) return '';
+  const card = (label, value, warn) => `
+    <div class="compare-overview-card${warn ? ' is-focus' : ''}">
+      <div class="compare-overview-label">${label}</div>
+      <div class="compare-overview-value">${value}</div>
+    </div>`;
+  return [
+    card('Regisztrált cégek', s.totalCompanies),
+    card('Telephelyek összesen', s.totalSites),
+    card('Szinkronizált (24 órán belül)', s.syncedLast24h),
+    card('Szinkronizált (7 napon belül)', s.syncedLast7d),
+    card('Soha nem szinkronizált', s.neverSynced, s.neverSynced > 0),
+    card('Felhasználók összesen', s.totalUsers),
+    card('— ebből tulajdonos', s.usersByRole.owner || 0),
+    card('— ebből üzletvezető', s.usersByRole.manager || 0),
+    card('— ebből viszonteladó', s.usersByRole.reseller || 0),
+    card('Aktív előfizetés', s.activeSubscriptions),
+    card('Szüneteltetett előfizetés', s.pausedSubscriptions, s.pausedSubscriptions > 0),
+    card('Sikertelen szinkron (napló)', s.failedSyncCount, s.failedSyncCount > 0),
+    card('NTAK probléma', s.ntakProblems, s.ntakProblems > 0),
+    card('Fizetés e hónapban', `${s.paymentsThisMonthCount} db · ${fmtHuf(s.paymentsThisMonthTotal)}`),
+  ].join('');
+}
+
 async function loadAdminOverview() {
   const data = await api('/api/admin/overview');
 
-  document.getElementById('admin-kpi-companies').textContent = data.companies.length;
-  document.getElementById('admin-kpi-ntak-problems').textContent = data.ntak.reduce((s, n) => s + n.warn + n.error, 0);
+  document.getElementById('admin-stats-grid').innerHTML = renderAdminStatsGrid(data.stats);
 
   document.getElementById('admin-email-warning').hidden = !!data.emailReady;
 
   document.getElementById('admin-company-count').textContent = data.companies.length;
+  adminCompaniesCache = data.companies;
+  adminResellersCache = data.resellers;
   const compTbody = document.querySelector('#admin-companies-table tbody');
   compTbody.innerHTML = '';
   data.companies.forEach((c) => {
@@ -1231,127 +1244,13 @@ async function loadAdminOverview() {
       <td>${escapeHtml(c.nev)}</td>
       <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
       <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-      <td>${escapeHtml(c.varos || '—')}</td>
-      <td>
-        <span class="admin-code" data-key="${escapeHtml(c.key)}">${escapeHtml(c.code || '—')}</span>
-        <button class="btn-regen-code" data-key="${escapeHtml(c.key)}" title="Új kód generálása">⟳</button>
-      </td>
-      <td>
-        <div class="admin-email-cell">
-          <input type="email" class="admin-email-input" data-key="${escapeHtml(c.key)}" value="${escapeHtml(c.email || '')}" placeholder="cég@email.hu">
-          <button class="btn-send-code" data-key="${escapeHtml(c.key)}" ${data.emailReady ? '' : 'disabled'}>Küldés</button>
-        </div>
-        <div class="admin-email-status" id="admin-email-status-${escapeHtml(c.key)}"></div>
-      </td>
-      <td>
-        <select class="admin-reseller-select" data-ceg-kulcs="${escapeHtml(c.cegKulcs)}">
-          <option value="">— nincs —</option>
-          ${data.resellers.map((r) => `<option value="${r.id}" ${r.id === c.resellerId ? 'selected' : ''}>${escapeHtml(r.nev)}</option>`).join('')}
-        </select>
-      </td>
       <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
-      <td>${escapeHtml(c.source || '—')}</td>
-      <td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td>
-      <td><button class="btn-license-check" data-adoszam="${escapeHtml(c.adoszam)}" title="Adószám vágólapra másolása, majd az lszamla megnyitása">🔗 Licenc</button></td>
-      <td>
-        <button class="btn-open-company" data-key="${escapeHtml(c.key)}">Megnyitás</button>
-        <a class="btn-tiny" href="/api/admin/companies/download-db?key=${encodeURIComponent(c.key)}" title="Legutóbb szinkronizált .db fájl letöltése">⬇ DB</a>
-      </td>`;
+      <td><button class="btn-tiny btn-company-detail" data-key="${escapeHtml(c.key)}">Részletek</button></td>`;
     compTbody.appendChild(tr);
   });
-  compTbody.querySelectorAll('.btn-send-code').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const key = btn.dataset.key;
-      const emailInput = compTbody.querySelector(`.admin-email-input[data-key="${key}"]`);
-      const status = document.getElementById(`admin-email-status-${key}`);
-      const email = emailInput.value.trim();
-      if (!email || !email.includes('@')) { status.textContent = 'Adj meg érvényes email címet.'; status.className = 'admin-email-status error'; return; }
-      btn.disabled = true; btn.textContent = 'Küldés…';
-      status.textContent = ''; status.className = 'admin-email-status';
-      try {
-        await api('/api/admin/send-code', { method: 'POST', body: JSON.stringify({ companyKey: key, email }) });
-        status.textContent = '✓ Elküldve';
-        status.className = 'admin-email-status ok';
-      } catch (e) {
-        status.textContent = e.message;
-        status.className = 'admin-email-status error';
-      } finally {
-        btn.disabled = false; btn.textContent = 'Küldés';
-      }
-    });
+  compTbody.querySelectorAll('.btn-company-detail').forEach((btn) => {
+    btn.addEventListener('click', () => openCompanyDetailModal(btn.dataset.key));
   });
-  compTbody.querySelectorAll('.btn-regen-code').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Biztosan új kódot generálsz? A régi kód azonnal érvénytelenné válik.')) return;
-      btn.disabled = true;
-      try {
-        const res = await api('/api/admin/regenerate-code', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
-        // res.companyKey a puszta cégkulcs (a kód cég-szinten közös) — az
-        // ÖSSZES ehhez a céghez tartozó telephely-sor kódját frissítjük,
-        // mert mindegyik ugyanazt a kódot mutatja.
-        document.querySelectorAll('.admin-code').forEach((el) => {
-          if (el.dataset.key.split(':')[0] === res.companyKey) el.textContent = res.code;
-        });
-      } catch (e) {
-        alert('Nem sikerült új kódot generálni: ' + e.message);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  });
-  compTbody.querySelectorAll('.btn-open-company').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true; btn.textContent = 'Nyitás…';
-      try {
-        const data2 = await api('/api/admin/impersonate', { method: 'POST', body: JSON.stringify({ companyKey: btn.dataset.key }) });
-        document.getElementById('company-name').textContent = data2.company.nev;
-        updateTelephelyBadge(data2.company.telephelyNev);
-        loggedIn = true;
-        state.viaAdmin = true;
-        stockProductsLoaded = false;
-        showApp();
-        boot();
-      } catch (e) {
-        btn.disabled = false; btn.textContent = 'Megnyitás';
-        alert('Nem sikerült megnyitni: ' + e.message);
-      }
-    });
-  });
-
-  // "Licenc" átjáró-gomb — vágólapra másolja az adószámot, majd megnyitja az
-  // lszamla rendszert új fülön. Nincs jelszó-tárolás vagy automatikus
-  // lekérdezés: az admin a saját, már bejelentkezett munkamenetében nézi meg,
-  // csak be kell illesztenie az adószámot a "Név töredék" (vagy hasonló)
-  // keresőmezőbe — az lszamla oldal a szűrést POST-kéréssel végzi, ezért
-  // közvetlen, előre kitöltött link sajnos nem lehetséges.
-  compTbody.querySelectorAll('.btn-license-check').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(btn.dataset.adoszam);
-        btn.textContent = '✓ Másolva';
-        setTimeout(() => { btn.textContent = '🔗 Licenc'; }, 2000);
-      } catch (_) { /* ha a vágólap-hozzáférés nem engedélyezett, csendben folytatjuk */ }
-      window.open('https://leichter.hu/lszamla/index.php?p=reglistak', '_blank');
-    });
-  });
-
-  compTbody.querySelectorAll('.admin-reseller-select').forEach((select) => {
-    select.addEventListener('change', async () => {
-      select.disabled = true;
-      try {
-        await api('/api/admin/companies/assign-reseller', {
-          method: 'POST',
-          body: JSON.stringify({ cegKulcs: select.dataset.cegKulcs, resellerId: select.value ? Number(select.value) : null }),
-        });
-      } catch (e) {
-        alert('Nem sikerült menteni: ' + e.message);
-        loadAdminOverview(); // állítsuk vissza az eredeti értékre
-      } finally {
-        select.disabled = false;
-      }
-    });
-  });
-
   const ntakTbody = document.querySelector('#admin-ntak-table tbody');
   ntakTbody.innerHTML = '';
   if (!data.ntak.length) {
@@ -1373,6 +1272,62 @@ async function loadAdminOverview() {
     });
   }
 }
+
+async function adminOpenCompany(key) {
+  try {
+    const data2 = await api('/api/admin/impersonate', { method: 'POST', body: JSON.stringify({ companyKey: key }) });
+    document.getElementById('company-name').textContent = data2.company.nev;
+    updateTelephelyBadge(data2.company.telephelyNev);
+    loggedIn = true;
+    state.viaAdmin = true;
+    stockProductsLoaded = false;
+    showApp();
+    boot();
+  } catch (e) {
+    alert('Nem sikerült megnyitni: ' + e.message);
+  }
+}
+
+function openCompanyDetailModal(key) {
+  const c = adminCompaniesCache.find((x) => x.key === key);
+  if (!c) return;
+  document.getElementById('company-detail-title').textContent = c.nev;
+  document.getElementById('company-detail-subtitle').textContent = `${c.telephelyNev || c.telephelyKod || ''} · ${c.adoszam}`;
+  document.querySelector('#company-detail-kv tbody').innerHTML = `
+    <tr><td>Város</td><td>${escapeHtml(c.varos || '—')}</td></tr>
+    <tr><td>Utolsó szinkron</td><td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td></tr>
+    <tr><td>Forrás</td><td>${escapeHtml(c.source || '—')}</td></tr>
+    <tr><td>Méret</td><td>${c.bytes ? Math.round(c.bytes / 1024) + ' KB' : '—'}</td></tr>`;
+  const select = document.getElementById('company-detail-reseller');
+  select.innerHTML = `<option value="">— nincs —</option>` +
+    adminResellersCache.map((r) => `<option value="${r.id}" ${r.id === c.resellerId ? 'selected' : ''}>${escapeHtml(r.nev)}</option>`).join('');
+  select.onchange = async () => {
+    try {
+      await api('/api/admin/companies/assign-reseller', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, resellerId: select.value || null }) });
+    } catch (e) { alert('Nem sikerült menteni: ' + e.message); }
+  };
+  document.getElementById('company-detail-open-btn').onclick = () => {
+    document.getElementById('company-detail-modal-backdrop').hidden = true;
+    adminOpenCompany(key);
+  };
+  document.getElementById('company-detail-download-link').href = `/api/admin/companies/download-db?key=${encodeURIComponent(key)}`;
+  document.getElementById('company-detail-license-btn').onclick = async (e) => {
+    try {
+      await navigator.clipboard.writeText(c.adoszam);
+      const btn = e.currentTarget;
+      btn.textContent = '✓ Adószám másolva';
+      setTimeout(() => { btn.textContent = '🔗 Licenc (lszamla)'; }, 2000);
+    } catch (_) { /* ha a vágólap-hozzáférés nem engedélyezett, csendben folytatjuk */ }
+    window.open('https://leichter.hu/lszamla/index.php?p=reglistak', '_blank');
+  };
+  document.getElementById('company-detail-modal-backdrop').hidden = false;
+}
+document.getElementById('company-detail-modal-close').addEventListener('click', () => {
+  document.getElementById('company-detail-modal-backdrop').hidden = true;
+});
+document.getElementById('company-detail-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'company-detail-modal-backdrop') e.target.hidden = true;
+});
 
 /* ============================================================
    Tevékenység-napló (admin)
@@ -1410,7 +1365,6 @@ const activityFilter = { company: '', type: '' };
 
 async function loadAdminActivity() {
   const data = await api('/api/admin/activity');
-  document.getElementById('admin-kpi-failed').textContent = data.entries.filter((e) => e.type === 'sync_upload' && !e.ok).length;
 
   // --- cégenkénti összesítő mátrix ---
   const sumTbody = document.querySelector('#activity-summary-table tbody');

@@ -4309,7 +4309,52 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
     })
     .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
   const ntak = computeNtakOverview();
-  sendJson(res, 200, { companies, ntak, resellers: resellerRows, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL) });
+
+  // --- Bővebb, informatívabb statisztikák az Áttekintés oldalhoz ---
+  const now = Date.now();
+  const DAY_MS = 86400000;
+  const syncedLast24h = companies.filter((c) => c.lastSync && now - new Date(c.lastSync).getTime() < DAY_MS).length;
+  const syncedLast7d = companies.filter((c) => c.lastSync && now - new Date(c.lastSync).getTime() < 7 * DAY_MS).length;
+  const neverSynced = companies.filter((c) => !c.lastSync).length;
+
+  const userCounts = usersDb.prepare(`
+    SELECT role, status, COUNT(*) AS c FROM users GROUP BY role, status
+  `).all();
+  const usersByRole = { owner: 0, manager: 0, reseller: 0 };
+  const usersByStatus = { active: 0, pending: 0, disabled: 0 };
+  let totalUsers = 0;
+  userCounts.forEach((r) => {
+    usersByRole[r.role] = (usersByRole[r.role] || 0) + r.c;
+    usersByStatus[r.status] = (usersByStatus[r.status] || 0) + r.c;
+    totalUsers += r.c;
+  });
+
+  const uniqueCegKulcs = [...new Set(companies.map((c) => c.cegKulcs))];
+  const subRows = licenseDb.prepare('SELECT ceg_kulcs, aktiv FROM company_subscription').all();
+  const subByCeg = new Map(subRows.map((r) => [r.ceg_kulcs, r.aktiv]));
+  const pausedSubscriptions = uniqueCegKulcs.filter((ck) => subByCeg.has(ck) && !subByCeg.get(ck)).length;
+  const activeSubscriptions = uniqueCegKulcs.length - pausedSubscriptions;
+
+  const monthStart = todayIsoServer().slice(0, 7) + '-01';
+  const paymentRow = licenseDb.prepare(
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(osszeg),0) AS total FROM license_payments WHERE allapot = 'SIKERES' AND letrehozva >= ?`
+  ).get(monthStart);
+
+  const recentActivity = readActivityLog(500);
+  const failedSyncCount = recentActivity.filter((e) => e.type === 'sync_upload' && !e.ok).length;
+
+  const stats = {
+    totalCompanies: uniqueCegKulcs.length,
+    totalSites: companies.length,
+    syncedLast24h, syncedLast7d, neverSynced,
+    totalUsers, usersByRole, usersByStatus,
+    activeSubscriptions, pausedSubscriptions,
+    paymentsThisMonthCount: paymentRow.cnt, paymentsThisMonthTotal: paymentRow.total,
+    failedSyncCount,
+    ntakProblems: ntak.reduce((s, n) => s + n.warn + n.error, 0),
+  };
+
+  sendJson(res, 200, { companies, ntak, resellers: resellerRows, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL), stats });
 });
 
 // Cég hozzárendelése (vagy leválasztása) egy viszonteladóhoz — admin
@@ -4393,60 +4438,6 @@ route('GET', '/api/admin/activity', async (req, res, query) => {
 
 // Admin újrageneráltatja egy cég hozzáférési kódját (pl. ha az kiszivárgott).
 // A régi kód azonnal érvénytelenné válik.
-route('POST', '/api/admin/regenerate-code', async (req, res) => {
-  const admin = requireAdmin(req);
-  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const { companyKey } = await readJsonBody(req);
-  const cegKulcs = splitSiteKey(companyKey).cegKulcs; // elfogadja akár a puszta cégkulcsot, akár egy telephely-kulcsot is
-  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
-  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
-  const codes = readAccessCodes();
-  codes[cegKulcs] = { ...(codes[cegKulcs] || {}), code: generateAccessCode() };
-  writeAccessCodes(codes);
-  logActivity({ type: 'admin_regen_code', ok: true, companyKey: cegKulcs, nev: anySite?.nev, detail: 'Hozzáférési kód újragenerálva.' });
-  sendJson(res, 200, { ok: true, companyKey: cegKulcs, code: codes[cegKulcs].code });
-});
-
-// Admin kiküldi a cég hozzáférési kódját emailben, Brevón keresztül.
-route('POST', '/api/admin/send-code', async (req, res) => {
-  const admin = requireAdmin(req);
-  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const { companyKey, email } = await readJsonBody(req);
-  const cegKulcs = splitSiteKey(companyKey).cegKulcs;
-  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
-  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
-  const nevPlain = anySite?.nev || 'Ismeretlen cég';
-  const adoszamPlain = anySite?.adoszam || cegKulcs;
-  const cleanEmail = String(email || '').trim();
-  if (!cleanEmail || !cleanEmail.includes('@')) return sendJson(res, 400, { error: 'Érvénytelen email cím.' });
-
-  const codes = ensureAccessCodes();
-  const code = codes[cegKulcs]?.code;
-  const nev = escapeHtmlServer(nevPlain);
-  const html = `
-    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
-      <p>Kedves <strong>${nev}</strong>!</p>
-      <p>Az L-NYUGTA nézegetőbe való belépéshez az alábbi adatokat használd:</p>
-      <table style="margin:16px 0;border-collapse:collapse;">
-        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Adószám</td><td style="padding:4px 0;font-weight:600;">${escapeHtmlServer(adoszamPlain)}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;color:#6C8299;">Hozzáférési kód</td><td style="padding:4px 0;font-weight:700;font-size:20px;letter-spacing:3px;">${escapeHtmlServer(code)}</td></tr>
-      </table>
-      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt az emailt, kérjük hagyd figyelmen kívül.</p>
-    </div>`;
-
-  try {
-    await sendBrevoEmail({ toEmail: cleanEmail, toName: nevPlain, subject: 'L-NYUGTA — hozzáférési kódod', html });
-  } catch (e) {
-    logActivity({ type: 'admin_send_code', ok: false, companyKey: cegKulcs, nev: nevPlain, detail: `Sikertelen küldés (${cleanEmail}): ${e.message}` });
-    return sendJson(res, 502, { error: `Nem sikerült elküldeni: ${e.message}` });
-  }
-  logActivity({ type: 'admin_send_code', ok: true, companyKey: cegKulcs, nev: nevPlain, detail: `Kód kiküldve ide: ${cleanEmail}` });
-
-  codes[cegKulcs] = { ...(codes[cegKulcs] || {}), email: cleanEmail };
-  writeAccessCodes(codes);
-  console.log(`[email] kód elküldve: ${nevPlain} (${cegKulcs}) -> ${cleanEmail}`);
-  sendJson(res, 200, { ok: true });
-});
 
 // Admin "belép" egy adott cég nevében — utána a normál, cégenkénti
 // dashboard API-kat használja a böngésző, mintha az illető cég jelentkezett
