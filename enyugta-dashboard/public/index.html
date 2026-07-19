@@ -374,6 +374,8 @@
         <div class="compare-type-row group-toggle" id="analysis-type-row">
           <button class="chip is-active" data-analysis="period">Időszak-összehasonlítás</button>
           <button class="chip" data-analysis="hours">Nyitvatartás optimalizálása</button>
+          <button class="chip" data-analysis="products">Cikkenkénti elemzés</button>
+          <button class="chip" data-analysis="report">Áttekintő riport</button>
         </div>
       </div>
 
@@ -513,10 +515,13 @@
           </div>
 
           <div class="card">
-            <div class="card-title">Forgalom napszak és hét napja szerint</div>
-            <p class="card-subtitle" style="margin-bottom:12px;">
-              minden mező az ADOTT hét-nap ADOTT órájának ÁTLAGOS (nem összesített) forgalmát mutatja — pl. a "Szerda 17" mező azt jelzi, mennyi volt átlagosan a forgalom 17 és 18 óra között, a vizsgált időszak összes szerdáján. Minél sötétebb egy mező, annál nagyobb az átlagos forgalom. A nyitvatartáson kívüli órák halványítva. Kattints egy mezőre a pontos átlag és medián megtekintéséhez.
-            </p>
+            <div class="card-title" id="hours-heatmap-title">Forgalom napszak és hét napja szerint</div>
+            <div class="compare-type-row group-toggle" id="hours-metric-row" style="margin:8px 0 12px;">
+              <button class="chip is-active" data-metric="revenue">Forgalom</button>
+              <button class="chip" data-metric="nyugtaszam">Nyugtaszám</button>
+              <button class="chip" data-metric="kosarertek">Kosárérték</button>
+            </div>
+            <p class="card-subtitle" style="margin-bottom:12px;" id="hours-heatmap-sub"></p>
             <div id="hours-heatmap" class="hours-heatmap"></div>
             <p class="compare-analysis" id="hours-heatmap-tip" hidden></p>
           </div>
@@ -530,6 +535,92 @@
           </div>
         </div>
       </div>
+
+    <div id="analysis-products-panel" hidden>
+      <div class="card">
+        <div class="card-title">Vizsgált időszak</div>
+        <div class="compare-mode-controls" style="margin-top:0;">
+          <div class="stock-field">
+            <label for="products-an-from">Kezdete</label>
+            <input type="date" id="products-an-from">
+          </div>
+          <div class="stock-field">
+            <label for="products-an-to">Vége</label>
+            <input type="date" id="products-an-to">
+          </div>
+          <button class="btn-primary" id="products-an-run-btn">Elemzés indítása</button>
+        </div>
+        <div class="stock-form-msg" id="products-an-msg"></div>
+      </div>
+
+      <div id="products-an-results" hidden>
+        <div class="card">
+          <div class="card-title">Legjobban fogyó cikkek</div>
+          <p class="card-subtitle" style="margin-bottom:12px;">válassz egy cikket a részletes intenzitás-elemzéshez</p>
+          <div id="products-top-list"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" id="products-detail-title">Cikk-elemzés</div>
+          <div class="compare-type-row group-toggle" id="products-metric-row" style="margin:8px 0 12px;">
+            <button class="chip is-active" data-metric="mennyiseg">Mennyiség</button>
+            <button class="chip" data-metric="bevetel">Bevétel</button>
+          </div>
+          <p class="compare-analysis" id="products-global-analysis"></p>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Napszak és hét napja szerinti intenzitás</div>
+          <p class="card-subtitle" style="margin-bottom:12px;">minden mező az adott hét-nap adott órájának átlagos eladási intenzitását mutatja — minél sötétebb, annál nagyobb. Kattints egy mezőre a pontos értékért.</p>
+          <div id="products-heatmap" class="hours-heatmap"></div>
+          <p class="compare-analysis" id="products-heatmap-tip" hidden></p>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Napi részletek</div>
+          <p class="card-subtitle" id="products-day-sub" style="margin-bottom:12px;">válassz egy napot a részletes óránkénti bontáshoz</p>
+          <div class="compare-type-row group-toggle" id="products-day-picker"></div>
+          <div id="products-day-chart" class="chart-holder"></div>
+          <p class="compare-analysis" id="products-day-analysis"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="analysis-report-panel" hidden>
+      <div class="card">
+        <div class="card-title">Vizsgált időszak</div>
+        <div class="compare-mode-controls" style="margin-top:0;">
+          <div class="stock-field">
+            <label for="report-an-from">Kezdete</label>
+            <input type="date" id="report-an-from">
+          </div>
+          <div class="stock-field">
+            <label for="report-an-to">Vége</label>
+            <input type="date" id="report-an-to">
+          </div>
+          <button class="btn-primary" id="report-an-run-btn">Riport készítése</button>
+        </div>
+        <div class="stock-form-msg" id="report-an-msg"></div>
+      </div>
+
+      <div id="report-an-results" hidden>
+        <div class="card">
+          <div class="card-title">Összefoglaló</div>
+          <p class="compare-analysis" id="report-osszefoglalo"></p>
+          <div class="compare-overview-grid" id="report-kpi-grid" style="margin-top:14px;"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Forgalom a hét napjai szerint</div>
+          <div id="report-weekday-chart" class="chart-holder"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Top 5 legjobban fogyó cikk</div>
+          <div id="report-top-products"></div>
+        </div>
+      </div>
+    </div>
     </section>
 
     <!-- --- CIKK ELADÁSOK --- -->
@@ -905,14 +996,17 @@
         </p>
       </div>
 
-      <div class="card profile-soon-card">
-        <div class="card-title">Előfizetés <span class="profile-soon-badge">Hamarosan</span></div>
-        <p class="muted">
-          A nézegető jelenleg díjmentesen elérhető. A tervek szerint a jövőben
-          előfizetéses modellre áll át, szorosan összekapcsolva az androidos
-          L-NYUGTA GO app licencével — itt fogod tudni majd kezelni az
-          előfizetésed állapotát, számláit és a fizetési adataidat.
-        </p>
+      <div class="card">
+        <div class="card-title">Eszközök</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">a szinkronizáló eszközök (kasszák) listája — adj nekik egyedi nevet, hogy könnyebben megkülönböztesd őket (pl. "1-es kassza")</p>
+        <div id="profil-device-list"></div>
+      </div>
+
+      <div class="card" id="profil-fizetes-card">
+        <div class="card-title">Előfizetés</div>
+        <p class="card-subtitle" id="profil-fizetes-allapot" style="margin-bottom:14px;"></p>
+        <div id="profil-fizetes-box"></div>
+        <div id="profil-fizetes-tortenetet" style="margin-top:14px;"></div>
       </div>
     </section>
 
@@ -1095,6 +1189,17 @@
         <div class="table-scroll">
           <table class="data-table" id="admin-licenc-table">
           <thead><tr><th>Cégnév</th><th>Adószám</th><th>Kiosztott funkciók</th><th></th></tr></thead>
+          <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Fizetések</div>
+        <p class="card-subtitle" id="admin-payments-status" style="margin-bottom:14px;"></p>
+        <div class="table-scroll">
+          <table class="data-table" id="admin-payments-table">
+          <thead><tr><th>Dátum</th><th>Cég</th><th>Cél</th><th class="td-right">Összeg</th><th>Állapot</th><th>myPOS ref.</th></tr></thead>
           <tbody></tbody>
           </table>
         </div>

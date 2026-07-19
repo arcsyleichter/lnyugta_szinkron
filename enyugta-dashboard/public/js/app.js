@@ -144,7 +144,34 @@ let licenseCompaniesCache = [];
 let licensePackagesCache = [];
 
 async function loadLicenseData() {
-  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages()]);
+  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages(), loadAdminPayments()]);
+}
+
+async function loadAdminPayments() {
+  const statusBox = document.getElementById('admin-payments-status');
+  const tbody = document.querySelector('#admin-payments-table tbody');
+  try {
+    const data = await api('/api/admin/payments');
+    statusBox.textContent = data.myposConfigured
+      ? 'A myPOS bankkártyás fizetés be van állítva a szerveren.'
+      : 'A myPOS bankkártyás fizetés MÉG NINCS beállítva a szerveren — a "Fizetés indítása" gomb az ügyfeleknél egyelőre hibaüzenetet ad.';
+    if (!data.payments.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">Még nincs egyetlen fizetési kísérlet sem.</td></tr>'; return; }
+    tbody.innerHTML = data.payments.map((p) => {
+      const cegNev = (licenseCompaniesCache.find((c) => c.cegKulcs === p.cegKulcs) || {}).nev || p.cegKulcs;
+      const allapotClass = p.allapot === 'SIKERES' ? 'ok' : p.allapot === 'SIKERTELEN' ? 'expired' : 'none';
+      return `<tr>
+        <td>${fmtDateTime(p.letrehozva)}</td>
+        <td>${escapeHtml(cegNev)}</td>
+        <td>${escapeHtml(p.cel)}</td>
+        <td class="num">${fmtHuf(p.osszeg)}</td>
+        <td><span class="licenc-badge licenc-badge--${allapotClass}">${escapeHtml(PAYMENT_STATUS_LABELS[p.allapot] || p.allapot)}</span></td>
+        <td class="ntak-uuid">${escapeHtml(p.myposTrnref || '—')}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    statusBox.textContent = '';
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+  }
 }
 
 async function loadLicensePackages() {
@@ -413,11 +440,27 @@ async function loadLicenseDeviceList(cegKulcs) {
     const data = await api(`/api/admin/license/devices?cegKulcs=${encodeURIComponent(cegKulcs)}`);
     if (!data.devices.length) { box.innerHTML = '<span class="muted">Még nincs regisztrált eszköz.</span>'; return; }
     box.innerHTML = data.devices.map((d) => `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);">
-        <span title="első látott: ${escapeHtml(d.elsoLatott)} · utolsó: ${escapeHtml(d.utolsoLatott)}">${escapeHtml(d.eszkozAzonosito)}</span>
-        <button class="btn-tiny" data-id="${d.id}">Eltávolítás</button>
+      <div style="padding:7px 0;border-bottom:1px solid var(--line);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <input class="license-device-nev-input" data-id="${d.id}" value="${escapeHtml(d.nev || '')}" placeholder="egyedi név (pl. 1-es kassza)" style="flex:1 1 160px;padding:5px 8px;border:1.5px solid var(--line);border-radius:6px;font-size:12.5px;">
+          <button class="btn-tiny license-device-nev-save" data-id="${d.id}">Mentés</button>
+          <button class="btn-tiny license-device-remove" data-id="${d.id}">Eltávolítás</button>
+        </div>
+        <div class="card-subtitle" style="margin-top:4px;" title="első látott: ${escapeHtml(d.elsoLatott)} · utolsó: ${escapeHtml(d.utolsoLatott)}">
+          UUID: ${escapeHtml(d.eszkozAzonosito)}
+          ${d.telephelyKod ? ` · telephely: ${escapeHtml(d.telephelyKod)}` : ''}
+          ${d.progtip ? ` · ${escapeHtml(d.progtip)}` : ' · programtípus még ismeretlen'}${d.verzio ? ` (v${escapeHtml(d.verzio)})` : ''}
+        </div>
       </div>`).join('');
-    box.querySelectorAll('button[data-id]').forEach((btn) => {
+    box.querySelectorAll('.license-device-nev-save').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const input = box.querySelector(`.license-device-nev-input[data-id="${btn.dataset.id}"]`);
+        try {
+          await api('/api/admin/license/devices/rename', { method: 'POST', body: JSON.stringify({ id: Number(btn.dataset.id), nev: input.value }) });
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      });
+    });
+    box.querySelectorAll('.license-device-remove').forEach((btn) => {
       btn.addEventListener('click', async () => {
         if (!confirm('Eltávolítod ezt az eszközt a regisztráltak közül? A felszabaduló hely után az eszköz újra tudna regisztrálni (vagy egy másik).')) return;
         try {
@@ -1806,8 +1849,19 @@ document.getElementById('analysis-type-row').querySelectorAll('.chip').forEach((
     const type = chip.dataset.analysis;
     document.getElementById('analysis-period-panel').hidden = type !== 'period';
     document.getElementById('analysis-hours-panel').hidden = type !== 'hours';
+    document.getElementById('analysis-products-panel').hidden = type !== 'products';
+    document.getElementById('analysis-report-panel').hidden = type !== 'report';
   });
 });
+
+// Alapértelmezett vizsgált időszak a cikkenkénti elemzéshez is — ugyanaz
+// a 90 napos alapértelmezés, mint a nyitvatartás-elemzésnél.
+(function initProductsAnDefaultRange() {
+  const to = todayIso();
+  const from = new Date(Date.now() - 89 * 86400000).toISOString().slice(0, 10);
+  document.getElementById('products-an-to').value = to;
+  document.getElementById('products-an-from').value = from;
+})();
 
 // Alapértelmezett vizsgált időszak: utolsó 90 nap — elég hosszú ahhoz, hogy
 // minden hét napjából legyen több előfordulás, statisztikailag stabilabb
@@ -1840,9 +1894,32 @@ document.getElementById('hours-run-btn').addEventListener('click', async () => {
 
 let hoursAnalysisData = null;
 
+let hoursMetric = 'revenue';
+const HOURS_METRIC_META = {
+  revenue: { label: 'Forgalom', fmt: (v) => fmtHuf(v), title: 'Forgalom napszak és hét napja szerint' },
+  nyugtaszam: { label: 'Nyugtaszám', fmt: (v) => `${v} db`, title: 'Nyugtaszám napszak és hét napja szerint' },
+  kosarertek: { label: 'Kosárérték', fmt: (v) => fmtHuf(v), title: 'Átlagos kosárérték napszak és hét napja szerint' },
+};
+document.getElementById('hours-metric-row').querySelectorAll('.chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#hours-metric-row .chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    hoursMetric = chip.dataset.metric;
+    if (hoursAnalysisData) {
+      renderHoursResults(hoursAnalysisData);
+      const activeDayChip = document.querySelector('#hours-day-picker .chip.is-active');
+      if (activeDayChip) renderHoursDayDetail(Number(activeDayChip.dataset.wd));
+    }
+  });
+});
+
 function renderHoursResults(data) {
   hoursAnalysisData = data;
   document.getElementById('hours-global-analysis').textContent = data.globalRecommendation;
+  const meta = HOURS_METRIC_META[hoursMetric];
+  document.getElementById('hours-heatmap-title').textContent = meta.title;
+  document.getElementById('hours-heatmap-sub').innerHTML =
+    `minden mező az ADOTT hét-nap ADOTT órájának ÁTLAGOS (nem összesített) <b>${meta.label.toLowerCase()}</b> mutatóját jelzi. Minél sötétebb egy mező, annál nagyobb az érték. A nyitvatartáson kívüli órák halványítva. Kattints egy mezőre a pontos átlag és medián megtekintéséhez.`;
 
   // A hőtérkép csak azt az óra-tartományt mutatja, ami ténylegesen releváns
   // (a legkorábbi nyitástól a legkésőbbi zárásig, egy kis ráhagyással) —
@@ -1857,7 +1934,7 @@ function renderHoursResults(data) {
   });
   if (!activeDays.length) { minH = 8; maxH = 20; }
 
-  const globalMax = Math.max(...data.heatmap.flat(), 1);
+  const globalMax = Math.max(...data.heatmap[hoursMetric].flat(), 1);
   const order = [1, 2, 3, 4, 5, 6, 0];
   let html = '<table><thead><tr><th></th>';
   for (let h = minH; h <= maxH; h++) html += `<th>${h}</th>`;
@@ -1868,8 +1945,7 @@ function renderHoursResults(data) {
     const ch = w.avgZaras ? parseInt(w.avgZaras.slice(0, 2), 10) : null;
     html += `<tr><th class="hh-wd-label">${w.label}</th>`;
     for (let h = minH; h <= maxH; h++) {
-      const avg = w.hourlyAvg[h] || 0;
-      const med = w.hourlyMedian[h] || 0;
+      const avg = w.hourly[hoursMetric].avg[h] || 0;
       const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
       const alpha = Math.min(1, avg / globalMax);
       const bg = isOpen ? `rgba(61,113,168,${(0.08 + alpha * 0.85).toFixed(2)})` : 'transparent';
@@ -1886,8 +1962,8 @@ function renderHoursResults(data) {
     cell.addEventListener('click', () => {
       const wd = Number(cell.dataset.wd), h = Number(cell.dataset.hh);
       const w = data.weekdays[wd];
-      const avg = w.hourlyAvg[h] || 0, med = w.hourlyMedian[h] || 0;
-      heatmapTip.innerHTML = `<b>${w.label} ${h}:00–${h + 1}:00</b> — átlag: ${fmtHuf(avg)}, medián: ${fmtHuf(med)} (${w.napok} ${w.label.toLowerCase()} alapján)`;
+      const avg = w.hourly[hoursMetric].avg[h] || 0, med = w.hourly[hoursMetric].median[h] || 0;
+      heatmapTip.innerHTML = `<b>${w.label} ${h}:00–${h + 1}:00</b> — ${meta.label.toLowerCase()} átlag: ${meta.fmt(avg)}, medián: ${meta.fmt(med)} (${w.napok} ${w.label.toLowerCase()} alapján)`;
       heatmapTip.hidden = false;
     });
   });
@@ -1909,9 +1985,10 @@ function renderHoursResults(data) {
 
 function renderHoursDayDetail(wd) {
   const w = hoursAnalysisData.weekdays[wd];
+  const meta = HOURS_METRIC_META[hoursMetric];
   document.getElementById('hours-day-analysis').textContent = w.recommendation || 'Nincs elegendő adat ehhez a naphoz.';
   document.getElementById('hours-day-sub').textContent =
-    `Az oszlopok az ÁTLAGOS óránkénti forgalmat mutatják, ${w.napok} db ${w.label.toLowerCase()} alapján; a pont a MEDIÁNT jelzi. Kattints egy oszlopra a pontos értékekért.`;
+    `Az oszlopok az ÁTLAGOS óránkénti ${meta.label.toLowerCase()}ot mutatják, ${w.napok} db ${w.label.toLowerCase()} alapján; a pont a MEDIÁNT jelzi. Kattints egy oszlopra a pontos értékekért.`;
 
   const container = document.getElementById('hours-day-chart');
   container.innerHTML = '';
@@ -1922,15 +1999,17 @@ function renderHoursDayDetail(wd) {
   const hours = [];
   for (let h = minH; h <= maxH; h++) hours.push(h);
 
+  const hourlyAvg = w.hourly[hoursMetric].avg;
+  const hourlyMedian = w.hourly[hoursMetric].median;
   const W = container.clientWidth || 560, H = 240;
   const padL = 58, padR = 16, padT = 20, padB = 32;
-  const max = Math.max(...hours.map((h) => Math.max(w.hourlyAvg[h] || 0, w.hourlyMedian[h] || 0)), 1);
+  const max = Math.max(...hours.map((h) => Math.max(hourlyAvg[h] || 0, hourlyMedian[h] || 0)), 1);
   const groupW = (W - padL - padR) / hours.length;
   const barW = groupW * 0.6;
   let bars = '', labels = '', dots = '';
   hours.forEach((h, i) => {
-    const avg = w.hourlyAvg[h] || 0;
-    const med = w.hourlyMedian[h] || 0;
+    const avg = hourlyAvg[h] || 0;
+    const med = hourlyMedian[h] || 0;
     const isOpen = oh !== null && ch !== null && h >= oh && h < ch;
     const barH = (H - padT - padB) * (avg / max);
     const gx = padL + i * groupW;
@@ -1945,9 +2024,9 @@ function renderHoursDayDetail(wd) {
     const gy = padT + ((H - padT - padB) / 3) * g;
     const val = Math.round(max * (1 - g / 3));
     gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
-    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${hoursMetric === 'nyugtaszam' ? val : formatShort(val)}</text>`;
   }
-  const axisLabel = `<text x="${-(H / 2)}" y="14" font-size="10.5" fill="#6C8299" text-anchor="middle" font-family="Inter" transform="rotate(-90)">Átlagos forgalom (Ft)</text>`;
+  const axisLabel = `<text x="${-(H / 2)}" y="14" font-size="10.5" fill="#6C8299" text-anchor="middle" font-family="Inter" transform="rotate(-90)">${meta.label}${hoursMetric !== 'nyugtaszam' ? ' (Ft)' : ''}</text>`;
   container.innerHTML = `
     <div class="chart-tooltip" id="hours-day-tooltip" hidden></div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
@@ -1963,8 +2042,8 @@ function renderHoursDayDetail(wd) {
   container.querySelectorAll('.hours-bar').forEach((bar) => {
     bar.addEventListener('click', () => {
       const h = Number(bar.dataset.h);
-      const avg = w.hourlyAvg[h] || 0, med = w.hourlyMedian[h] || 0;
-      tooltip.innerHTML = `<strong>${h}:00–${h + 1}:00</strong><br>Átlag: ${fmtHuf(avg)}<br>Medián: ${fmtHuf(med)}<br>${w.napok} nap alapján`;
+      const avg = hourlyAvg[h] || 0, med = hourlyMedian[h] || 0;
+      tooltip.innerHTML = `<strong>${h}:00–${h + 1}:00</strong><br>Átlag: ${meta.fmt(avg)}<br>Medián: ${meta.fmt(med)}<br>${w.napok} nap alapján`;
       const bx = Number(bar.getAttribute('x')) + Number(bar.getAttribute('width')) / 2;
       const by = Number(bar.getAttribute('y'));
       tooltip.style.left = `${(bx / W) * 100}%`;
@@ -1975,7 +2054,274 @@ function renderHoursDayDetail(wd) {
   container.addEventListener('click', (e) => { if (!e.target.classList.contains('hours-bar')) tooltip.hidden = true; });
 }
 
+document.getElementById('products-an-run-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('products-an-run-btn');
+  const msg = document.getElementById('products-an-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Számolás…';
+  try {
+    const from = document.getElementById('products-an-from').value;
+    const to = document.getElementById('products-an-to').value;
+    if (!from || !to) throw new Error('Add meg a vizsgált időszakot.');
+    const data = await api(`/api/analysis/products/top?from=${from}&to=${to}&limit=15`);
+    renderProductsTopList(data);
+    document.getElementById('products-an-results').hidden = false;
+  } catch (e) {
+    msg.textContent = e.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Elemzés indítása';
+  }
+});
+
+let productsAnData = null;
+let productsAnMetric = 'mennyiseg';
+const PRODUCTS_METRIC_META = {
+  mennyiseg: { label: 'Mennyiség', fmt: (v) => `${v} db` },
+  bevetel: { label: 'Bevétel', fmt: (v) => fmtHuf(v) },
+};
+
+function renderProductsTopList(data) {
+  const box = document.getElementById('products-top-list');
+  if (!data.products.length) { box.innerHTML = '<span class="muted">Nincs eladási adat a kiválasztott időszakban.</span>'; return; }
+  box.innerHTML = data.products.map((p, i) => `
+    <div class="compare-mover-row">
+      <span class="compare-mover-name">${i + 1}. ${escapeHtml(p.nev)}</span>
+      <span style="display:flex;gap:10px;align-items:center;">
+        <span class="card-subtitle" style="margin:0;">${p.mennyiseg} db · ${fmtHuf(p.bevetel)}</span>
+        <button class="btn-tiny products-select-btn" data-cikk="${escapeHtml(p.nev)}">Elemzés</button>
+      </span>
+    </div>`).join('');
+  box.querySelectorAll('.products-select-btn').forEach((btn) => {
+    btn.addEventListener('click', () => loadProductDetail(btn.dataset.cikk, document.getElementById('products-an-from').value, document.getElementById('products-an-to').value));
+  });
+  // Automatikusan mutassuk az elsőt (legjobban fogyó cikket), hogy azonnal
+  // legyen mit látni, ne kelljen külön rákattintani.
+  if (data.products.length) loadProductDetail(data.products[0].nev, data.from, data.to);
+}
+
+async function loadProductDetail(cikk, from, to) {
+  document.getElementById('products-detail-title').textContent = `Cikk-elemzés — ${cikk}`;
+  try {
+    const data = await api(`/api/analysis/products/detail?from=${from}&to=${to}&cikk=${encodeURIComponent(cikk)}`);
+    productsAnData = data;
+    renderProductsResults(data);
+  } catch (e) {
+    document.getElementById('products-global-analysis').textContent = e.message;
+  }
+}
+
+document.getElementById('products-metric-row').querySelectorAll('.chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#products-metric-row .chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    productsAnMetric = chip.dataset.metric;
+    if (productsAnData) {
+      renderProductsResults(productsAnData);
+      const activeDayChip = document.querySelector('#products-day-picker .chip.is-active');
+      if (activeDayChip) renderProductsDayDetail(Number(activeDayChip.dataset.wd));
+    }
+  });
+});
+
+function renderProductsResults(data) {
+  document.getElementById('products-global-analysis').textContent = data.globalRecommendation;
+  const meta = PRODUCTS_METRIC_META[productsAnMetric];
+
+  const activeDays = data.weekdays.filter((w) => w.napok > 0);
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  const globalMax = Math.max(...data.heatmap[productsAnMetric].flat(), 1);
+  let html = '<table><thead><tr><th></th>';
+  for (let h = 0; h < 24; h++) html += `<th>${h}</th>`;
+  html += '</tr></thead><tbody>';
+  order.forEach((wd) => {
+    const w = data.weekdays[wd];
+    html += `<tr><th class="hh-wd-label">${w.label}</th>`;
+    for (let h = 0; h < 24; h++) {
+      const avg = w.hourly[productsAnMetric].avg[h] || 0;
+      const alpha = Math.min(1, avg / globalMax);
+      const bg = w.napok > 0 ? `rgba(61,113,168,${(0.08 + alpha * 0.85).toFixed(2)})` : 'transparent';
+      html += `<td><div class="hh-cell${w.napok === 0 ? ' hh-closed' : ''}" data-wd="${wd}" data-hh="${h}" style="background:${bg}"></div></td>`;
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('products-heatmap').innerHTML = html;
+
+  const heatmapTip = document.getElementById('products-heatmap-tip');
+  document.querySelectorAll('#products-heatmap .hh-cell').forEach((cell) => {
+    cell.addEventListener('click', () => {
+      const wd = Number(cell.dataset.wd), h = Number(cell.dataset.hh);
+      const w = data.weekdays[wd];
+      const avg = w.hourly[productsAnMetric].avg[h] || 0, med = w.hourly[productsAnMetric].median[h] || 0;
+      heatmapTip.innerHTML = `<b>${w.label} ${h}:00–${h + 1}:00</b> — ${meta.label.toLowerCase()} átlag: ${meta.fmt(avg)}, medián: ${meta.fmt(med)} (${w.napok} nap alapján)`;
+      heatmapTip.hidden = false;
+    });
+  });
+
+  const picker = document.getElementById('products-day-picker');
+  picker.innerHTML = order.filter((wd) => data.weekdays[wd].napok > 0)
+    .map((wd, i) => `<button class="chip${i === 0 ? ' is-active' : ''}" data-wd="${wd}">${data.weekdays[wd].label}</button>`).join('');
+  picker.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      picker.querySelectorAll('.chip').forEach((c) => c.classList.remove('is-active'));
+      chip.classList.add('is-active');
+      renderProductsDayDetail(Number(chip.dataset.wd));
+    });
+  });
+  const firstWd = order.find((wd) => data.weekdays[wd].napok > 0);
+  if (firstWd !== undefined) renderProductsDayDetail(firstWd);
+  else { document.getElementById('products-day-chart').innerHTML = '<div class="empty-state">Nincs adat.</div>'; document.getElementById('products-day-analysis').textContent = ''; }
+}
+
+function renderProductsDayDetail(wd) {
+  const w = productsAnData.weekdays[wd];
+  const meta = PRODUCTS_METRIC_META[productsAnMetric];
+  document.getElementById('products-day-analysis').textContent = w.recommendation || 'Nincs elegendő adat ehhez a naphoz.';
+  document.getElementById('products-day-sub').textContent =
+    `Az oszlopok az ÁTLAGOS óránkénti ${meta.label.toLowerCase()}et mutatják, ${w.napok} db ${w.label.toLowerCase()} alapján; a pont a MEDIÁNT jelzi.`;
+
+  const container = document.getElementById('products-day-chart');
+  container.innerHTML = '';
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const hourlyAvg = w.hourly[productsAnMetric].avg;
+  const hourlyMedian = w.hourly[productsAnMetric].median;
+  const W = container.clientWidth || 560, H = 240;
+  const padL = 58, padR = 16, padT = 20, padB = 32;
+  const max = Math.max(...hours.map((h) => Math.max(hourlyAvg[h] || 0, hourlyMedian[h] || 0)), 1);
+  const groupW = (W - padL - padR) / hours.length;
+  const barW = groupW * 0.6;
+  let bars = '', labels = '', dots = '';
+  hours.forEach((h, i) => {
+    const avg = hourlyAvg[h] || 0;
+    const med = hourlyMedian[h] || 0;
+    const barH = (H - padT - padB) * (avg / max);
+    const gx = padL + i * groupW;
+    const cx = gx + groupW / 2;
+    bars += `<rect class="products-bar" data-h="${h}" x="${(cx - barW / 2).toFixed(1)}" y="${(H - padB - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(barH, 1).toFixed(1)}" fill="#3D71A8" rx="3" style="cursor:pointer;"/>`;
+    const medY = H - padB - (H - padT - padB) * (med / max);
+    dots += `<circle cx="${cx.toFixed(1)}" cy="${medY.toFixed(1)}" r="3.5" fill="#F0A93E" stroke="#fff" stroke-width="1.2"/>`;
+    if (h % 2 === 0) labels += `<text x="${cx.toFixed(1)}" y="${H - 12}" font-size="10" fill="#6C8299" text-anchor="middle" font-family="IBM Plex Mono">${h}</text>`;
+  });
+  let gridSvg = '';
+  for (let g = 0; g <= 3; g++) {
+    const gy = padT + ((H - padT - padB) / 3) * g;
+    const val = Math.round(max * (1 - g / 3) * 10) / 10;
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${productsAnMetric === 'mennyiseg' ? val : formatShort(val)}</text>`;
+  }
+  container.innerHTML = `
+    <div class="chart-tooltip" id="products-day-tooltip" hidden></div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      ${gridSvg}${bars}${dots}${labels}
+    </svg>
+    <div class="chart-legend">
+      <span><i style="background:#3D71A8;"></i>Átlag</span>
+      <span><i style="background:#F0A93E;border-radius:50%;height:8px;width:8px;"></i>Medián</span>
+    </div>`;
+
+  const tooltip = document.getElementById('products-day-tooltip');
+  container.querySelectorAll('.products-bar').forEach((bar) => {
+    bar.addEventListener('click', () => {
+      const h = Number(bar.dataset.h);
+      const avg = hourlyAvg[h] || 0, med = hourlyMedian[h] || 0;
+      tooltip.innerHTML = `<strong>${h}:00–${h + 1}:00</strong><br>Átlag: ${meta.fmt(avg)}<br>Medián: ${meta.fmt(med)}<br>${w.napok} nap alapján`;
+      const bx = Number(bar.getAttribute('x')) + Number(bar.getAttribute('width')) / 2;
+      const by = Number(bar.getAttribute('y'));
+      tooltip.style.left = `${(bx / W) * 100}%`;
+      tooltip.style.top = `${by}px`;
+      tooltip.hidden = false;
+    });
+  });
+  container.addEventListener('click', (e) => { if (!e.target.classList.contains('products-bar')) tooltip.hidden = true; });
+}
+
+// Alapértelmezett vizsgált időszak a riporthoz — 30 nap, ez egy
+// gyors, "egy pillantás alatt átlátható" összefoglalóhoz elég.
+(function initReportDefaultRange() {
+  const to = todayIso();
+  const from = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  document.getElementById('report-an-to').value = to;
+  document.getElementById('report-an-from').value = from;
+})();
+
+document.getElementById('report-an-run-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('report-an-run-btn');
+  const msg = document.getElementById('report-an-msg');
+  msg.textContent = ''; msg.className = 'stock-form-msg';
+  btn.disabled = true; btn.textContent = 'Számolás…';
+  try {
+    const from = document.getElementById('report-an-from').value;
+    const to = document.getElementById('report-an-to').value;
+    if (!from || !to) throw new Error('Add meg a vizsgált időszakot.');
+    const data = await api(`/api/analysis/report?from=${from}&to=${to}`);
+    renderReport(data);
+    document.getElementById('report-an-results').hidden = false;
+  } catch (e) {
+    msg.textContent = e.message; msg.className = 'stock-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Riport készítése';
+  }
+});
+
+function renderReport(data) {
+  document.getElementById('report-osszefoglalo').textContent = data.osszefoglalo;
+  document.getElementById('report-kpi-grid').innerHTML = `
+    <div class="compare-overview-card is-focus">
+      <div class="compare-overview-label">Összforgalom</div>
+      <div class="compare-overview-value">${fmtHuf(data.revenue)}</div>
+    </div>
+    <div class="compare-overview-card">
+      <div class="compare-overview-label">Nyugtaszám</div>
+      <div class="compare-overview-value">${data.receiptCount} db</div>
+    </div>
+    <div class="compare-overview-card">
+      <div class="compare-overview-label">Átlagos kosárérték</div>
+      <div class="compare-overview-value">${fmtHuf(data.avgBasket)}</div>
+    </div>`;
+
+  renderReportWeekdayChart(document.getElementById('report-weekday-chart'), data.weekday);
+
+  const topBox = document.getElementById('report-top-products');
+  topBox.innerHTML = data.topProducts.length
+    ? data.topProducts.map((p, i) => `
+        <div class="compare-mover-row">
+          <span class="compare-mover-name">${i + 1}. ${escapeHtml(p.nev)}</span>
+          <span class="card-subtitle" style="margin:0;">${p.mennyiseg} db · ${fmtHuf(p.bevetel)}</span>
+        </div>`).join('')
+    : '<div class="empty-state">Nincs eladási adat.</div>';
+}
+
+/* Egyszerű, egy-sorozatos oszlopdiagram a hét napjai szerint — a
+   riporthoz, ahol nincs A/B összehasonlítás, csak egy önmagában
+   értelmezhető heti mintázat. */
+function renderReportWeekdayChart(container, weekday) {
+  container.innerHTML = '';
+  const W = container.clientWidth || 560, H = 200;
+  const padL = 54, padR = 16, padT = 16, padB = 30;
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  const max = Math.max(...weekday.map((w) => w.avgRevenue), 1);
+  const groupW = (W - padL - padR) / 7;
+  const barW = groupW * 0.5;
+  let bars = '', labels = '';
+  order.forEach((wd, gi) => {
+    const w = weekday[wd];
+    const gx = padL + gi * groupW;
+    const barH = (H - padT - padB) * (w.avgRevenue / max);
+    bars += `<rect x="${(gx + groupW / 2 - barW / 2).toFixed(1)}" y="${(H - padB - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(barH, 1).toFixed(1)}" fill="#3D71A8" rx="3"/>`;
+    labels += `<text x="${(gx + groupW / 2).toFixed(1)}" y="${H - 10}" font-size="10.5" fill="#6C8299" text-anchor="middle" font-family="Inter">${w.label.slice(0, 3)}</text>`;
+  });
+  let gridSvg = '';
+  for (let g = 0; g <= 3; g++) {
+    const gy = padT + ((H - padT - padB) / 3) * g;
+    const val = Math.round(max * (1 - g / 3));
+    gridSvg += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#EDF2F8" stroke-width="1"/>`;
+    gridSvg += `<text x="${padL - 8}" y="${gy + 4}" font-size="10" fill="#6C8299" text-anchor="end" font-family="IBM Plex Mono">${formatShort(val)}</text>`;
+  }
+  container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg">${gridSvg}${bars}${labels}</svg>`;
+}
+
 let compareState = { mode: 'years' };
+
 
 function initCompareYearSelects() {
   const thisYear = new Date().getFullYear();
@@ -2906,8 +3252,113 @@ async function loadProfilView() {
       const select = document.getElementById('profil-invite-manager-telephely');
       select.innerHTML = data.telephelyek.map((t) => `<option value="${escapeHtml(t.kod)}">${escapeHtml(t.nev)} (${escapeHtml(t.kod)})</option>`).join('');
     }
+    loadProfilDeviceList();
+    loadProfilSubscription();
   } catch (e) {
     alert('Nem sikerült betölteni a profilt: ' + e.message);
+  }
+}
+
+const PAYMENT_STATUS_LABELS = { FUGGOBEN: 'függőben', SIKERES: 'sikeres', SIKERTELEN: 'sikertelen' };
+
+async function loadProfilSubscription() {
+  const allapotBox = document.getElementById('profil-fizetes-allapot');
+  const box = document.getElementById('profil-fizetes-box');
+  const historyBox = document.getElementById('profil-fizetes-tortenetet');
+  try {
+    const data = await api('/api/profile/subscription');
+    allapotBox.innerHTML = data.alapElofizetesAktiv
+      ? '<span class="licenc-badge licenc-badge--ok">Aktív előfizetés</span>'
+      : `<span class="licenc-badge licenc-badge--expired">Az előfizetés szünetel</span>${data.megjegyzes ? ` · ${escapeHtml(data.megjegyzes)}` : ''}`;
+
+    if (!data.myposElerheto) {
+      box.innerHTML = '<p class="muted">A bankkártyás fizetés jelenleg nincs beállítva — keresd az üzemeltetőt, ha előfizetnél.</p>';
+    } else {
+      let html = '';
+      if (data.alapElofizetesAra) {
+        html += `<button class="btn-primary profil-fizetes-btn" data-cel="alap_elofizetes" style="margin-bottom:10px;">Alap előfizetés fizetése — ${fmtHuf(data.alapElofizetesAra)}</button><br>`;
+      }
+      html += data.csomagok.map((c) => `
+        <button class="btn-secondary profil-fizetes-btn" data-cel="csomag:${c.id}" style="margin:4px 6px 4px 0;">${escapeHtml(c.nev)} — ${fmtHuf(c.ar)}</button>
+      `).join('');
+      box.innerHTML = html || '<p class="muted">Jelenleg nincs elérhető, önállóan megvásárolható csomag.</p>';
+      box.querySelectorAll('.profil-fizetes-btn').forEach((btn) => {
+        btn.addEventListener('click', () => startPayment(btn.dataset.cel, btn));
+      });
+    }
+
+    historyBox.innerHTML = data.fizetesek.length
+      ? `<div class="card-subtitle" style="margin-bottom:6px;">Korábbi fizetések</div>` +
+        data.fizetesek.map((p) => `
+          <div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;font-size:12.5px;border-bottom:1px solid var(--line);">
+            <span>${fmtDate(p.letrehozva.slice(0, 10))} · ${escapeHtml(p.cel)}</span>
+            <span>${fmtHuf(p.osszeg)} · ${PAYMENT_STATUS_LABELS[p.allapot] || p.allapot}</span>
+          </div>`).join('')
+      : '';
+  } catch (e) {
+    box.innerHTML = `<span class="muted">${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function startPayment(cel, btn) {
+  btn.disabled = true;
+  try {
+    const data = await api('/api/payment/start', { method: 'POST', body: JSON.stringify({ cel }) });
+    // Automatikusan elküldött, rejtett HTML-űrlap — így irányítjuk át a
+    // vásárlót a myPOS hosted fizetési oldalára, pontosan úgy, ahogy a
+    // myPOS Checkout API dokumentációja előírja.
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = data.checkoutUrl;
+    Object.entries(data.fields).forEach(([k, v]) => {
+      const input = document.createElement('input');
+      input.type = 'hidden'; input.name = k; input.value = v;
+      form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  } catch (e) {
+    alert('Nem sikerült elindítani a fizetést: ' + e.message);
+    btn.disabled = false;
+  }
+}
+
+async function loadProfilDeviceList() {
+  const box = document.getElementById('profil-device-list');
+  box.innerHTML = 'Betöltés…';
+  try {
+    const data = await api('/api/profile/devices');
+    if (!data.devices.length) { box.innerHTML = '<span class="muted">Még nincs olyan eszköz, ami ezt a funkciót támogatná a szinkronban.</span>'; return; }
+    box.innerHTML = data.devices.map((d) => `
+      <div style="padding:8px 0;border-bottom:1px solid var(--line);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <input class="profil-device-nev-input" data-id="${d.id}" value="${escapeHtml(d.nev || '')}" placeholder="egyedi név (pl. 1-es kassza)" style="flex:1 1 160px;padding:7px 9px;border:1.5px solid var(--line);border-radius:6px;font-size:13px;">
+          <button class="btn-tiny profil-device-nev-save" data-id="${d.id}">Mentés</button>
+          <button class="btn-tiny profil-device-remove" data-id="${d.id}">Eltávolítás</button>
+        </div>
+        <div class="card-subtitle" style="margin-top:4px;" title="első látott: ${escapeHtml(d.elsoLatott)} · utolsó: ${escapeHtml(d.utolsoLatott)}">
+          ${d.telephelyKod ? `Telephely: ${escapeHtml(d.telephelyKod)} · ` : ''}${d.progtip ? escapeHtml(d.progtip) : 'programtípus ismeretlen'}${d.verzio ? ` (v${escapeHtml(d.verzio)})` : ''}
+        </div>
+      </div>`).join('');
+    box.querySelectorAll('.profil-device-nev-save').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const input = box.querySelector(`.profil-device-nev-input[data-id="${btn.dataset.id}"]`);
+        try {
+          await api('/api/profile/devices/rename', { method: 'POST', body: JSON.stringify({ id: Number(btn.dataset.id), nev: input.value }) });
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      });
+    });
+    box.querySelectorAll('.profil-device-remove').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Eltávolítod ezt az eszközt a listából?')) return;
+        try {
+          await api('/api/profile/devices/remove', { method: 'POST', body: JSON.stringify({ id: Number(btn.dataset.id) }) });
+          loadProfilDeviceList();
+        } catch (e) { alert('Nem sikerült: ' + e.message); }
+      });
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="muted">${escapeHtml(e.message)}</span>`;
   }
 }
 
