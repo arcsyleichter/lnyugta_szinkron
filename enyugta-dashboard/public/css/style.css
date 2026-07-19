@@ -514,19 +514,56 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .login-toggle-row a:hover{ text-decoration:underline; }
 
 /* ============================================================
-   Kezdőoldal — 2 csempe (ügyfél / viszonteladó)
+   Kezdőoldal — gazdag, kétpaneles bejelentkező (ügyfél-belépés
+   közvetlenül, választás nélkül)
    ============================================================ */
-.landing-card{ max-width:520px; }
-.landing-tiles{ display:flex; flex-direction:column; gap:14px; margin-top:24px; }
-.landing-tile{
-  display:flex; flex-direction:column; align-items:flex-start; gap:4px;
-  width:100%; padding:20px 22px; border:1.5px solid var(--line); border-radius:12px;
-  background:#fff; cursor:pointer; text-align:left;
-  transition:border-color .15s, background .15s, transform .1s;
+.login-hero-screen{ padding:0; align-items:stretch; }
+.login-hero-wrap{
+  display:flex; width:100%; max-width:980px; margin:auto; min-height:min(640px, 92vh);
+  border-radius:20px; overflow:hidden; box-shadow:0 40px 100px -40px rgba(0,0,0,0.55);
 }
-.landing-tile:hover{ border-color:var(--jade); background:var(--paper-dim); transform:translateY(-1px); }
-.landing-tile-title{ font-family:var(--font-display); font-weight:700; font-size:16px; color:var(--text); }
-.landing-tile-sub{ font-size:12.5px; color:var(--text-dim); }
+.login-hero-panel{
+  flex:1 1 46%; display:flex; flex-direction:column; justify-content:center;
+  padding:48px 44px; color:#fff;
+  background:
+    radial-gradient(700px 420px at 10% -10%, rgba(255,255,255,0.20), transparent),
+    radial-gradient(650px 500px at 110% 115%, rgba(255,255,255,0.14), transparent),
+    linear-gradient(160deg, var(--ink) 0%, var(--ink-soft) 100%);
+}
+.login-hero-logo{ width:52px; height:52px; border-radius:12px; object-fit:cover; border:1px solid rgba(255,255,255,0.35); background:#fff; margin-bottom:18px; }
+.login-hero-title{ font-family:var(--font-display); font-weight:700; font-size:32px; letter-spacing:0.2px; margin-bottom:10px; }
+.login-hero-tagline{ font-size:14.5px; line-height:1.55; color:rgba(255,255,255,0.82); max-width:360px; margin-bottom:30px; }
+.login-hero-features{ display:flex; flex-direction:column; gap:14px; }
+.login-hero-feature{ display:flex; align-items:center; gap:12px; font-size:13.5px; font-weight:600; color:rgba(255,255,255,0.92); }
+.login-hero-feature-icon{ font-size:18px; flex:none; }
+.login-form-panel{
+  flex:1 1 54%; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  background:var(--paper); padding:44px 32px;
+}
+.login-card--rich{ box-shadow:none; padding:0; max-width:360px; width:100%; }
+.login-secondary-links{ margin-top:22px; text-align:center; font-size:12.5px; }
+.login-secondary-links a{ color:var(--text-dim); text-decoration:underline; }
+.login-secondary-sep{ color:var(--line); margin:0 8px; }
+@media (max-width:760px){
+  .login-hero-wrap{ flex-direction:column; border-radius:14px; min-height:0; max-width:440px; }
+  .login-hero-panel{ padding:30px 26px 24px; }
+  .login-hero-title{ font-size:24px; }
+  .login-hero-tagline{ max-width:none; margin-bottom:20px; }
+  .login-hero-features{ display:none; }
+  .login-form-panel{ padding:30px 26px 34px; }
+}
+
+/* Jelszó megjelenítése/elrejtése gomb */
+.password-field{ position:relative; }
+.password-field input{ padding-right:44px !important; }
+.password-toggle-btn{
+  position:absolute; right:4px; top:50%; transform:translateY(-9px);
+  width:34px; height:34px; border:none; background:transparent; cursor:pointer;
+  font-size:16px; display:flex; align-items:center; justify-content:center; border-radius:6px;
+  color:var(--text-dim);
+}
+.password-toggle-btn:hover{ background:var(--paper-dim); }
+
 .admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
 .admin-entry a:hover{ color:rgba(250,249,245,0.8); }
 

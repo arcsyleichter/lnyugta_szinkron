@@ -12,62 +12,58 @@
 <body>
 
 <!-- ===================== KEZDŐOLDAL — 2 CSEMPE ===================== -->
-<section id="landing-screen" class="login-screen">
-  <div class="login-card landing-card">
-    <div class="ticket-notch"></div>
-    <div class="brand" style="justify-content:center; text-align:center; flex-direction:column;">
-      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó" style="margin:0 auto 10px;">
-      <div class="brand-name">L-NYUGTA</div>
-      <div class="brand-sub">élő értékesítési adatok, egy helyen</div>
-    </div>
-    <div class="landing-tiles">
-      <button type="button" class="landing-tile" id="landing-tile-ugyfel">
-        <span class="landing-tile-title">Ügyfél bejelentkezés</span>
-        <span class="landing-tile-sub">cégtulajdonosoknak és üzletvezetőknek</span>
-      </button>
-      <button type="button" class="landing-tile" id="landing-tile-viszontelado">
-        <span class="landing-tile-title">Viszonteladó bejelentkezés</span>
-        <span class="landing-tile-sub">saját ügyfeleid kezeléséhez</span>
-      </button>
-    </div>
-  </div>
-  <div class="admin-entry"><a href="#" id="show-admin-login">Admin belépés</a></div>
-</section>
-
-<!-- ===================== ÜGYFÉL (CÉG) BEJELENTKEZÉS ===================== -->
-<section id="login-screen" class="login-screen" hidden>
-  <div class="login-card">
-    <div class="ticket-notch"></div>
-    <div class="brand">
-      <img class="brand-mark" src="/img/logo.svg" alt="L-NYUGTA logó">
-      <div>
-        <div class="brand-name">L-NYUGTA nézegető</div>
-        <div class="brand-sub">ügyfél bejelentkezés</div>
+<section id="landing-screen" class="login-screen login-hero-screen">
+  <div class="login-hero-wrap">
+    <div class="login-hero-panel">
+      <img class="login-hero-logo" src="/img/logo.svg" alt="L-NYUGTA logó">
+      <div class="login-hero-title">L-NYUGTA</div>
+      <div class="login-hero-tagline">Élő értékesítési adatok, egy helyen — nyugtaszám, forgalom és kosárérték, akár óránkénti bontásban.</div>
+      <div class="login-hero-features">
+        <div class="login-hero-feature"><span class="login-hero-feature-icon">📊</span>Valós idejű forgalom-áttekintés</div>
+        <div class="login-hero-feature"><span class="login-hero-feature-icon">🧾</span>Nyugtánkénti, tételes részletek</div>
+        <div class="login-hero-feature"><span class="login-hero-feature-icon">🔥</span>Hőtérképes intenzitás-elemzés</div>
+        <div class="login-hero-feature"><span class="login-hero-feature-icon">📦</span>Készlet és cikktörzs kezelése</div>
       </div>
     </div>
-    <form id="user-login-form" autocomplete="on">
-      <label for="user-email-input">Email cím</label>
-      <input id="user-email-input" name="email" type="email" autocomplete="username" required>
-      <label for="user-password-input">Jelszó</label>
-      <input id="user-password-input" name="password" type="password" autocomplete="current-password" required>
-      <button type="submit" id="user-login-btn">Belépés</button>
-      <div class="login-error" id="user-login-error" hidden></div>
-      <p class="login-footnote"><a href="#" id="user-forgot-password-link">Elfelejtetted a jelszavad?</a></p>
-    </form>
-    <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
-         JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
-         mert bárkinek megmutatja a teszt-fiókok jelszavát. -->
-    <div class="login-hint" id="login-hint" hidden>
-      <div class="login-hint-title">Ideiglenes — teszt bejelentkezések</div>
-      <ul class="login-hint-list" id="login-hint-list"></ul>
+    <div class="login-form-panel">
+      <div class="login-card login-card--rich">
+        <div class="ticket-notch"></div>
+        <div class="brand" style="justify-content:center;text-align:center;flex-direction:column;">
+          <div class="brand-name">Bejelentkezés</div>
+          <div class="brand-sub">cégtulajdonosoknak és üzletvezetőknek</div>
+        </div>
+        <form id="user-login-form" autocomplete="on">
+          <label for="user-email-input">Email cím</label>
+          <input id="user-email-input" name="email" type="email" autocomplete="username" required>
+          <label for="user-password-input">Jelszó</label>
+          <div class="password-field">
+            <input id="user-password-input" name="password" type="password" autocomplete="current-password" required>
+            <button type="button" class="password-toggle-btn" data-target="user-password-input" aria-label="Jelszó megjelenítése">👁</button>
+          </div>
+          <button type="submit" id="user-login-btn">Belépés</button>
+          <div class="login-error" id="user-login-error" hidden></div>
+          <p class="login-footnote"><a href="#" id="user-forgot-password-link">Elfelejtetted a jelszavad?</a></p>
+        </form>
+        <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
+             JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
+             mert bárkinek megmutatja a teszt-fiókok jelszavát. -->
+        <div class="login-hint" id="login-hint" hidden>
+          <div class="login-hint-title">Ideiglenes — teszt bejelentkezések</div>
+          <ul class="login-hint-list" id="login-hint-list"></ul>
+        </div>
+      </div>
+      <div class="login-secondary-links">
+        <a href="#" id="show-reseller-login-link">Viszonteladó vagy? Lépj be itt</a>
+        <span class="login-secondary-sep">·</span>
+        <a href="#" id="show-admin-login">Admin belépés</a>
+      </div>
     </div>
   </div>
-  <div class="login-footnote">A hozzáférés egyéni, email+jelszó alapú fiókhoz kötött.</div>
-  <div class="admin-entry"><a href="#" id="back-to-landing-1">‹ Vissza</a></div>
 </section>
 
 <!-- ===================== TELEPHELY-VÁLASZTÓ ===================== -->
 <section id="telephely-screen" class="login-screen" hidden>
+
   <div class="login-card telephely-card">
     <div class="ticket-notch"></div>
     <div class="brand">
@@ -161,7 +157,10 @@
       <label for="reseller-email-input">Email cím</label>
       <input type="email" id="reseller-email-input" name="email" autocomplete="username" required>
       <label for="reseller-password-input" style="margin-top:10px;">Jelszó</label>
-      <input type="password" id="reseller-password-input" name="password" autocomplete="current-password" required>
+      <div class="password-field">
+        <input type="password" id="reseller-password-input" name="password" autocomplete="current-password" required>
+        <button type="button" class="password-toggle-btn" data-target="reseller-password-input" aria-label="Jelszó megjelenítése">👁</button>
+      </div>
       <button type="submit" class="btn-primary" id="reseller-login-btn" style="width:100%;margin-top:16px;">Belépés</button>
       <div class="login-error" id="reseller-login-error" hidden></div>
       <p class="login-footnote"><a href="#" id="reseller-forgot-password-link">Elfelejtetted a jelszavad?</a></p>
@@ -184,7 +183,10 @@
     <p class="login-lede">Ez a bejelentkezés minden regisztrált cég szinkron-naplóját és NTAK-állapotát megmutatja — csak arra használd, aki erre jogosult.</p>
     <form id="admin-login-form" autocomplete="on">
       <label for="admin-password-input">Admin jelszó</label>
-      <input id="admin-password-input" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
+      <div class="password-field">
+        <input id="admin-password-input" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
+        <button type="button" class="password-toggle-btn" data-target="admin-password-input" aria-label="Jelszó megjelenítése">👁</button>
+      </div>
       <button type="submit" id="admin-login-btn">Belépés</button>
       <div class="login-error" id="admin-login-error" hidden></div>
     </form>

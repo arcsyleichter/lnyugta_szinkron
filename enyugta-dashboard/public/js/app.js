@@ -86,7 +86,7 @@ const state = {
    Bejelentkezés
    ============================================================ */
 const landingScreen = document.getElementById('landing-screen');
-const loginScreen = document.getElementById('login-screen');
+const loginScreen = landingScreen; // a kezdőképernyő és az ügyfél-bejelentkezés most már ugyanaz az elem
 const telephelyScreen = document.getElementById('telephely-screen');
 const telephelyWaitingScreen = document.getElementById('telephely-waiting-screen');
 const resellerScreen = document.getElementById('reseller-screen');
@@ -94,9 +94,20 @@ const appScreen = document.getElementById('app-screen');
 const adminLoginScreen = document.getElementById('admin-login-screen');
 const adminScreen = document.getElementById('admin-screen');
 
+// Jelszó megjelenítése/elrejtése gomb — minden .password-toggle-btn
+// elemre egységesen vonatkozik, akárhány bejelentkező űrlapon szerepel.
+document.querySelectorAll('.password-toggle-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.target);
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? '👁' : '🙈';
+    btn.setAttribute('aria-label', showing ? 'Jelszó megjelenítése' : 'Jelszó elrejtése');
+  });
+});
+
 function hideAllScreens() {
   landingScreen.hidden = true;
-  loginScreen.hidden = true;
   telephelyScreen.hidden = true;
   telephelyWaitingScreen.hidden = true;
   resellerScreen.hidden = true;
@@ -866,9 +877,7 @@ document.getElementById('show-admin-login').addEventListener('click', (e) => { e
    Kezdőoldal — 2 csempe
    ============================================================ */
 function showLandingScreen() { hideAllScreens(); landingScreen.hidden = false; }
-document.getElementById('landing-tile-ugyfel').addEventListener('click', () => showLogin());
-document.getElementById('landing-tile-viszontelado').addEventListener('click', () => showResellerLogin());
-document.getElementById('back-to-landing-1').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
+document.getElementById('show-reseller-login-link').addEventListener('click', (e) => { e.preventDefault(); showResellerLogin(); });
 
 document.getElementById('user-login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
