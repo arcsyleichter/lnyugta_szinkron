@@ -557,10 +557,10 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .password-field{ position:relative; }
 .password-field input{ padding-right:44px !important; }
 .password-toggle-btn{
-  position:absolute; right:4px; top:50%; transform:translateY(-9px);
+  position:absolute; right:4px; top:50%; transform:translateY(-50%);
   width:34px; height:34px; border:none; background:transparent; cursor:pointer;
   font-size:16px; display:flex; align-items:center; justify-content:center; border-radius:6px;
-  color:var(--text-dim);
+  color:var(--text-dim); margin-bottom:0 !important;
 }
 .password-toggle-btn:hover{ background:var(--paper-dim); }
 

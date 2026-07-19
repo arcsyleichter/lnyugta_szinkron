@@ -3967,39 +3967,20 @@ route('POST', '/api/sync/request', async (req, res) => {
 // bárki lekérdezheti, mert a bejelentkező oldal (session nélkül) hívja meg.
 // ⚠️ FONTOS: ez a végpont a hozzáférési KÓDOKAT IS kiadja nyíltan — ez pont
 // azt a védelmet üresíti ki, amit a kód bevezetése adott. Éles/nyilvános
-// üzemeltetés előtt FELTÉTLENÜL távolítsd el EZT és a hozzá tartozó
-// login-screen kártyát (public/index.html + app.js), különben bárki, aki
-// megnyitja az oldalt, bejelentkezés nélkül megkapja az összes cég kódját.
 // ---------------------------------------------------------------------------
+// A korábbi, kizárólag teszteléshez létrehozott fix teszt-fiókokat innentől
+// NEM hozzuk létre többé, és — mivel korábbi induláskor esetleg már
+// létrejöttek egy élő adatbázisban — induláskor EGYSZERI, önműködő
+// takarítással el is távolítjuk őket, ha még ott lennének. Az
+// "invited_by = 'teszt-seed'" jelző pontosan ezeket azonosítja.
 // ---------------------------------------------------------------------------
-// KÉT TESZT-FELHASZNÁLÓ automatikus létrehozása induláskor — kizárólag a
-// tesztelési időszak megkönnyítésére. TÖRÖLD ezt a függvényt és a hívását,
-// mielőtt nyilvánosan éles használatba kerül a rendszer, mert fix, ismert
-// jelszavú fiókokat hoz létre.
-// ---------------------------------------------------------------------------
-const TEST_USERS = [
-  { email: 'teszt.tulajdonos1@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Tulajdonos 1', role: 'owner', cegKulcs: '18774455' },
-  { email: 'teszt.tulajdonos2@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Tulajdonos 2', role: 'owner', cegKulcs: '27129430' },
-  { email: 'teszt.uzletvezeto1@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Üzletvezető 1', role: 'manager', cegKulcs: '18774455', telephelyKod: '01' },
-  { email: 'teszt.uzletvezeto2@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Üzletvezető 2', role: 'manager', cegKulcs: '24681357', telephelyKod: '01' },
-  { email: 'teszt.viszontelado1@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Viszonteladó 1', role: 'reseller' },
-  { email: 'teszt.viszontelado2@lnyugta.hu', password: 'TesztJelszo2026', nev: 'Teszt Viszonteladó 2', role: 'reseller' },
-];
-function ensureTestUsers() {
-  for (const t of TEST_USERS) {
-    const existing = usersDb.prepare('SELECT id FROM users WHERE email = ?').get(t.email);
-    if (existing) continue;
-    usersDb.prepare(
-      `INSERT INTO users (email, password_hash, role, ceg_kulcs, telephely_kod, reseller_id, nev, invited_by, status, created_at)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, 'teszt-seed', 'active', ?)`
-    ).run(t.email, hashPassword(t.password), t.role, t.cegKulcs || null, t.telephelyKod || null, t.nev, new Date().toISOString());
+function removeLegacyTestUsers() {
+  const removed = usersDb.prepare(`DELETE FROM users WHERE invited_by = 'teszt-seed'`).run();
+  if (removed.changes > 0) {
+    console.log(`[info] ${removed.changes} korábbi teszt-fiók eltávolítva az adatbázisból.`);
   }
 }
-ensureTestUsers();
-
-route('GET', '/api/auth/test-users-hint', async (req, res) => {
-  sendJson(res, 200, { users: TEST_USERS.map((t) => ({ email: t.email, password: t.password, role: t.role })) });
-});
+removeLegacyTestUsers();
 
 route('GET', '/api/sync/companies', async (req, res) => {
   const apiKey = req.headers['x-api-key'];

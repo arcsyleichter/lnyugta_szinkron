@@ -1456,38 +1456,6 @@ document.getElementById('activity-company-select').addEventListener('change', (e
    fiókokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,
    mielőtt nyilvánosan élesítesz (lásd megjegyzés az index.html-ben és a
    server.js /api/auth/test-users-hint végpontjánál is). */
-async function renderLoginHint() {
-  const box = document.getElementById('login-hint');
-  const list = document.getElementById('login-hint-list');
-  try {
-    const data = await apiSilent('/api/auth/test-users-hint');
-    if (!data.users || !data.users.length) return;
-    list.innerHTML = '';
-    data.users.forEach((u) => {
-      const li = document.createElement('li');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'login-hint-item';
-      const roleLabel = { reseller: 'viszonteladó', owner: 'cégtulajdonos', manager: 'üzletvezető' }[u.role] || u.role;
-      btn.innerHTML = `<span class="login-hint-nev">${u.email}</span><span class="login-hint-ado">${roleLabel} · jelszó: ${u.password}</span>`;
-      btn.addEventListener('click', () => {
-        if (u.role === 'reseller') {
-          showResellerLogin();
-          document.getElementById('reseller-email-input').value = u.email;
-          document.getElementById('reseller-password-input').value = u.password;
-        } else {
-          showLogin();
-          document.getElementById('user-email-input').value = u.email;
-          document.getElementById('user-password-input').value = u.password;
-        }
-      });
-      li.appendChild(btn);
-      list.appendChild(li);
-    });
-    box.hidden = false;
-  } catch (_) { /* csendben elnyeljük — ez csak egy kényelmi teszt-segédlet */ }
-}
-renderLoginHint();
 
 /* induláskor: mindig a bejelentkező képernyő jelenjen meg, még akkor is, ha
    a böngészőben van érvényes session-cookie egy korábbi belépésből. A link
@@ -1715,8 +1683,10 @@ async function loadOverview() {
   renderTrend('kpi-revenue-trend', summary.revenue, summary.prev.revenue);
   renderTrend('kpi-count-trend', summary.receiptCount, summary.prev.receiptCount);
 
-  const series = await api(`/api/revenue-series?from=${from}&to=${to}&group=day`);
+  const series = await api(`/api/revenue-series?from=${from}&to=${to}&group=${state.group}`);
   renderLineChart(document.getElementById('overview-chart'), series.points);
+  const chartTitles = { hour: 'Óránkénti forgalom', day: 'Napi forgalom', week: 'Heti forgalom', month: 'Havi forgalom' };
+  document.getElementById('overview-chart-title').textContent = chartTitles[state.group] || 'Forgalom alakulása';
 
   renderFizmodList(document.getElementById('fizmod-list'), summary.byFizmod, summary.revenue);
 

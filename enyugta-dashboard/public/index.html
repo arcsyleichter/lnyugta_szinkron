@@ -27,7 +27,6 @@
     </div>
     <div class="login-form-panel">
       <div class="login-card login-card--rich">
-        <div class="ticket-notch"></div>
         <div class="brand" style="justify-content:center;text-align:center;flex-direction:column;">
           <div class="brand-name">Bejelentkezés</div>
           <div class="brand-sub">cégtulajdonosoknak és üzletvezetőknek</div>
@@ -44,13 +43,6 @@
           <div class="login-error" id="user-login-error" hidden></div>
           <p class="login-footnote"><a href="#" id="user-forgot-password-link">Elfelejtetted a jelszavad?</a></p>
         </form>
-        <!-- IDEIGLENES, TESZT CÉLÚ PANEL — töröld ezt a blokkot és a hozzá tartozó
-             JS-t (renderLoginHint az app.js-ben), mielőtt nyilvánosan élesítesz,
-             mert bárkinek megmutatja a teszt-fiókok jelszavát. -->
-        <div class="login-hint" id="login-hint" hidden>
-          <div class="login-hint-title">Ideiglenes — teszt bejelentkezések</div>
-          <ul class="login-hint-list" id="login-hint-list"></ul>
-        </div>
       </div>
       <div class="login-secondary-links">
         <a href="#" id="show-reseller-login-link">Viszonteladó vagy? Lépj be itt</a>
@@ -266,8 +258,8 @@
       <div class="date-range" id="date-range-control">
         <select id="range-select" class="range-select">
           <optgroup label="Gyors">
-            <option value="today">Ma</option>
-            <option value="7" selected>7 nap</option>
+            <option value="today" selected>Ma</option>
+            <option value="7">7 nap</option>
             <option value="30">30 nap</option>
             <option value="90">90 nap</option>
           </optgroup>
@@ -333,7 +325,7 @@
 
       <div class="grid-2">
         <div class="card">
-          <div class="card-title">Napi forgalom</div>
+          <div class="card-title" id="overview-chart-title">Napi forgalom</div>
           <div id="overview-chart" class="chart-holder"></div>
         </div>
         <div class="card">
