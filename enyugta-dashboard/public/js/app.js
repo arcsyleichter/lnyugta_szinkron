@@ -47,9 +47,15 @@ function resolvePreset(key) {
   }
 }
 
+// A bejelentkező végpontok saját maguk kezelik a hibás jelszó (401) esetét —
+// ott NEM szabad automatikusan a kezdőképernyőre visszaugrani, mert éppen
+// AZON a képernyőn állunk, és a hibaüzenetet kellene megmutatnunk, nem
+// eltüntetni a képernyőt alóla. A blanket-redirect csak az UTÁN hasznos,
+// ha valaki már be volt jelentkezve, és a munkamenete időközben lejárt.
+const LOGIN_ENDPOINTS = ['/api/auth/user-login', '/api/auth/reseller-login', '/api/admin/login'];
 async function api(path, opts = {}) {
   const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (res.status === 401) { showLandingScreen(); throw new Error('NOT_AUTHENTICATED'); }
+  if (res.status === 401 && !LOGIN_ENDPOINTS.includes(path)) { showLandingScreen(); throw new Error('NOT_AUTHENTICATED'); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Ismeretlen hiba');
   return data;
@@ -667,6 +673,8 @@ function renderAdminUserRow(u) {
       <td>${fmtDateTime(u.createdAt)}</td>
       <td>
         <button class="btn-tiny btn-admin-user-edit">Szerkesztés</button>
+        <button class="btn-tiny btn-admin-user-reset-link" title="Azonnali jelszó-visszaállító link generálása, pl. ha valaki elakadt a bejelentkezésnél">Belépés intézése</button>
+        <button class="btn-tiny btn-admin-user-clear-lockout" title="A bejelentkezési zárolás feloldása, ha valaki túl sokszor gépelte el a jelszavát">Zárolás feloldása</button>
         <button class="btn-tiny btn-admin-user-delete">Törlés</button>
       </td>
     </tr>`;
@@ -717,6 +725,33 @@ function renderAdminUsers() {
       document.getElementById('user-edit-adoszam').value = u.cegKulcs || '';
       document.getElementById('user-edit-telephely').value = u.telephelyKod || '';
       document.getElementById('user-edit-modal-backdrop').hidden = false;
+    });
+  });
+  container.querySelectorAll('.btn-admin-user-reset-link').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.closest('tr').dataset.id);
+      const u = adminUsersCache.find((x) => x.id === id);
+      if (!confirm(`Generálunk egy azonnal használható, 2 óráig érvényes jelszó-visszaállító linket ${u.nev} (${u.email}) részére. Ezt neked kell eljuttatnod hozzá (pl. telefonon felolvasva, vagy másik csatornán elküldve). Folytatod?`)) return;
+      try {
+        const res = await api('/api/admin/users/reset-link', { method: 'POST', body: JSON.stringify({ id }) });
+        prompt('Másold ki és küldd el ezt a linket a felhasználónak (2 óráig érvényes):', res.link);
+      } catch (e) {
+        alert('Nem sikerült: ' + e.message);
+      }
+    });
+  });
+  container.querySelectorAll('.btn-admin-user-clear-lockout').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.closest('tr').dataset.id);
+      const u = adminUsersCache.find((x) => x.id === id);
+      try {
+        const res = await api('/api/admin/users/clear-lockout', { method: 'POST', body: JSON.stringify({ id }) });
+        alert(res.removed > 0
+          ? `Feloldva — ${u.nev} most már újra tud próbálkozni a bejelentkezéssel.`
+          : `${u.nev} jelenleg nem volt zárolva (lehet, hogy már magától lejárt, vagy más okból nem tud belépni).`);
+      } catch (e) {
+        alert('Nem sikerült: ' + e.message);
+      }
     });
   });
   container.querySelectorAll('.btn-admin-user-delete').forEach((btn) => {

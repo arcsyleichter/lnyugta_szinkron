@@ -1730,6 +1730,48 @@ route('POST', '/api/admin/users/delete', async (req, res) => {
   sendJson(res, 200, { ok: true });
 });
 
+// Admin által kezdeményezett jelszó-visszaállítás — pl. ha egy felhasználó
+// telefonon elakadt (rossz jelszó, zárolás), az admin KÖZVETLENÜL tud neki
+// egy friss, azonnal használható linket adni, anélkül hogy a felhasználónak
+// magának kellene végigmennie az "elfelejtett jelszó" e-mailes folyamaton.
+// (Az admin már hitelesített/megbízható, ezért itt — a nyilvános
+// "elfelejtett jelszó" végponttól eltérően — biztonságosan visszaadható a
+// link közvetlenül a válaszban.)
+route('POST', '/api/admin/users/reset-link', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev, role, status FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  if (u.status === 'disabled') return sendJson(res, 400, { error: 'Ez a felhasználó le van tiltva — előbb aktiváld, ha jelszót akarsz neki adni.' });
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  usersDb.prepare(`UPDATE users SET invite_token = ?, invite_expires = ?, status = 'active' WHERE id = ?`).run(token, expires, id);
+  const link = `${(req.headers['x-forwarded-proto'] || 'http')}://${req.headers.host}/?jelszo-visszaallitas=${token}`;
+  logActivity({ type: 'password_reset_admin', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `Admin jelszó-visszaállító linket generált: ${u.email} részére` });
+  sendJson(res, 200, { ok: true, link });
+});
+
+// Bejelentkezési zárolás feloldása egy adott felhasználóra — az EMAIL
+// CÍMÉHEZ tartozó összes zárolást töröljük, függetlenül attól, melyik
+// IP-címről érkeztek a sikertelen próbálkozások (a felhasználó telefonja
+// gyakran más IP-t kap Wifi és mobilnet között váltva, ezért nem elég
+// csak egyetlen konkrét IP-t feloldani).
+route('POST', '/api/admin/users/clear-lockout', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  const emailLower = u.email.toLowerCase();
+  let removed = 0;
+  for (const key of [...loginAttempts.keys()]) {
+    if (key.endsWith(`::${emailLower}`)) { loginAttempts.delete(key); removed++; }
+  }
+  logActivity({ type: 'login_lockout_cleared', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `Bejelentkezési zárolás feloldva: ${u.email} (${removed} bejegyzés törölve)` });
+  sendJson(res, 200, { ok: true, removed });
+});
+
 // ---------------------------------------------------------------------------
 // Admin — Licenc-kezelés
 // ---------------------------------------------------------------------------
