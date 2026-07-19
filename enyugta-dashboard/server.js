@@ -1290,6 +1290,77 @@ route('POST', '/api/invite/accept', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Elfelejtett jelszó — cégtulajdonos, üzletvezető és viszonteladó fiókokra
+// egyaránt (az admin jelszava egy külön, megosztott jelszó, nincs hozzá
+// email-fiók, arra ez nem vonatkozik). UGYANAZT a token-mechanizmust
+// használja, mint a meghívó-elfogadás (invite_token/invite_expires), hogy
+// ne kelljen külön táblát/logikát fenntartani.
+// ---------------------------------------------------------------------------
+async function sendPasswordResetEmail(link, { email, nev }) {
+  const nevSafe = escapeHtmlServer(nev);
+  const html = `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
+      <p>Kedves ${nevSafe}!</p>
+      <p>Jelszó-visszaállítást kértél az L-NYUGTA rendszerben.</p>
+      <p>Az új jelszavad beállításához kattints az alábbi linkre (2 óráig érvényes):</p>
+      <p style="margin:20px 0;"><a href="${link}" style="background:#5A93C9;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Új jelszó beállítása</a></p>
+      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted, nyugodtan hagyd figyelmen kívül ezt az e-mailt — a jelszavad nem változik, amíg nem kattintasz a linkre.</p>
+    </div>`;
+  await sendBrevoEmail({ toEmail: email, toName: nev, subject: 'L-NYUGTA — jelszó visszaállítása', html });
+}
+
+// A válasz SZÁNDÉKOSAN mindig ugyanaz, függetlenül attól, hogy létezik-e a
+// megadott email cím — enélkül a végpont felhasználható lenne annak
+// kitalálására, mely email címekhez tartozik fiók.
+route('POST', '/api/auth/forgot-password', async (req, res) => {
+  const { email } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const GENERIC_MSG = 'Ha ehhez az email címhez tartozik aktív fiók, hamarosan kapsz egy levelet a jelszó-visszaállításhoz.';
+  if (!clean) return sendJson(res, 200, { ok: true, message: GENERIC_MSG });
+
+  const u = usersDb.prepare(`SELECT id, email, nev, role, status FROM users WHERE email = ? AND role IN ('owner','manager','reseller')`).get(clean);
+  if (u && u.status === 'active') {
+    const token = crypto.randomBytes(24).toString('hex');
+    const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(); // 2 óra
+    usersDb.prepare(`UPDATE users SET invite_token = ?, invite_expires = ? WHERE id = ?`).run(token, expires, u.id);
+    const link = `${(req.headers['x-forwarded-proto'] || 'http')}://${req.headers.host}/?jelszo-visszaallitas=${token}`;
+    try {
+      await sendPasswordResetEmail(link, { email: u.email, nev: u.nev });
+      logActivity({ type: 'password_reset_requested', ok: true, companyKey: null, nev: u.nev, detail: `Jelszó-visszaállító email elküldve: ${u.email}` });
+    } catch (e) {
+      // Ha nincs beállítva Brevo (vagy hibázik a küldés), a linket SOHA nem
+      // adjuk vissza közvetlenül a kérelmezőnek (ez lehetővé tenné, hogy
+      // valaki más fiókját vegye át) — csak a szerver naplójába/tevékenység-
+      // naplóba kerül, hogy az admin manuálisan tudja továbbítani, ha kell.
+      console.warn(`[jelszó-visszaállítás] Email küldés sikertelen (${u.email}) — a link: ${link}`);
+      logActivity({ type: 'password_reset_requested', ok: false, companyKey: null, nev: u.nev, detail: `Email küldés sikertelen ${u.email} részére — a link a szerver naplójában.` });
+    }
+  }
+  sendJson(res, 200, { ok: true, message: GENERIC_MSG });
+});
+
+route('GET', '/api/auth/reset-password/check', async (req, res, query) => {
+  const token = String(query.token || '');
+  const u = usersDb.prepare(`SELECT nev, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u || u.status === 'disabled') return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált link.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a link lejárt — kérj egy újat.' });
+  sendJson(res, 200, { ok: true, nev: u.nev });
+});
+
+route('POST', '/api/auth/reset-password', async (req, res) => {
+  const { token, password } = await readJsonBody(req);
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó token.' });
+  if (!password || String(password).length < 8) return sendJson(res, 400, { error: 'A jelszónak legalább 8 karakter hosszúnak kell lennie.' });
+  const u = usersDb.prepare(`SELECT id, email, nev, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u || u.status === 'disabled') return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált link.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a link lejárt — kérj egy újat.' });
+  usersDb.prepare(`UPDATE users SET password_hash = ?, invite_token = NULL, invite_expires = NULL WHERE id = ?`)
+    .run(hashPassword(String(password)), u.id);
+  logActivity({ type: 'password_reset_completed', ok: true, companyKey: null, nev: u.nev, detail: `${u.email} jelszava sikeresen megváltozott.` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Egyéni fiókos bejelentkezés — cégtulajdonos és üzletvezető.
 // A munkamenet UGYANOLYAN alakú, mint az adószám+kód bejelentkezésnél —
 // ez szándékos: minden meglévő végpont (requireAuth/requireCegAuth) így

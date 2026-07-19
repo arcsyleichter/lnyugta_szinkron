@@ -1,5 +1,12 @@
 'use strict';
 
+// Globális állapot-változók a fájl LEGELEJÉN — szándékosan itt, nem a
+// felhasználási helyük közelében, hogy semmilyen jövőbeli szerkesztés
+// se tudja véletlenül a deklaráció elé csúsztatni a felhasználást
+// (ami "Cannot access before initialization" hibát okozna).
+let stockProductsLoaded = false;
+const stockFilter = { q: '', csoport: '' };
+
 /* ============================================================
    Segédfüggvények
    ============================================================ */
@@ -975,6 +982,77 @@ async function checkInviteLink() {
 
 document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
 
+function openForgotPasswordModal() {
+  document.getElementById('forgot-password-email').value = '';
+  document.getElementById('forgot-password-msg').textContent = '';
+  document.getElementById('forgot-password-modal-backdrop').hidden = false;
+}
+document.getElementById('user-forgot-password-link').addEventListener('click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
+document.getElementById('reseller-forgot-password-link').addEventListener('click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
+document.getElementById('forgot-password-modal-close').addEventListener('click', () => {
+  document.getElementById('forgot-password-modal-backdrop').hidden = true;
+});
+document.getElementById('forgot-password-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'forgot-password-modal-backdrop') e.target.hidden = true;
+});
+document.getElementById('forgot-password-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('forgot-password-msg');
+  const email = document.getElementById('forgot-password-email').value.trim();
+  msg.textContent = 'Küldés…';
+  try {
+    const res = await api('/api/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) });
+    msg.textContent = res.message;
+    document.getElementById('forgot-password-form').querySelector('button[type="submit"]').disabled = true;
+  } catch (e2) {
+    msg.textContent = e2.message;
+  }
+});
+
+/* ============================================================
+   Jelszó visszaállítása (?jelszo-visszaallitas=TOKEN a URL-ben) —
+   ugyanazt a képernyőt/űrlapot használja, mint a meghívó-elfogadás,
+   csak más végpontokkal és feliratokkal.
+   ============================================================ */
+async function checkResetPasswordLink() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('jelszo-visszaallitas');
+  if (!token) return false;
+  hideAllScreens();
+  document.getElementById('invite-accept-screen').hidden = false;
+  document.getElementById('invite-accept-title').textContent = 'Jelszó visszaállítása';
+  document.getElementById('invite-accept-btn').textContent = 'Új jelszó mentése';
+  const sub = document.getElementById('invite-accept-sub');
+  try {
+    const info = await api(`/api/auth/reset-password/check?token=${encodeURIComponent(token)}`);
+    sub.textContent = `Szia, ${info.nev}! Add meg az új jelszavad.`;
+  } catch (e) {
+    sub.textContent = e.message;
+    document.getElementById('invite-accept-form').hidden = true;
+    return true;
+  }
+  document.getElementById('invite-accept-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('invite-accept-error');
+    err.hidden = true;
+    const p1 = document.getElementById('invite-password-input').value;
+    const p2 = document.getElementById('invite-password-input2').value;
+    if (p1 !== p2) { err.textContent = 'A két jelszó nem egyezik.'; err.hidden = false; return; }
+    const btn = document.getElementById('invite-accept-btn');
+    btn.disabled = true; btn.textContent = 'Mentés…';
+    try {
+      await api('/api/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password: p1 }) });
+      document.getElementById('invite-accept-form').hidden = true;
+      document.getElementById('invite-accept-success').hidden = false;
+      document.getElementById('invite-accept-success').innerHTML = '✓ A jelszavad sikeresen megváltozott. <a href="/">Jelentkezz be itt.</a>';
+    } catch (e2) {
+      err.textContent = e2.message; err.hidden = false;
+      btn.disabled = false; btn.textContent = 'Új jelszó mentése';
+    }
+  }, { once: true });
+  return true;
+}
+
 /* ============================================================
    Telephely-választó és -karbantartó
    ============================================================ */
@@ -1418,7 +1496,10 @@ renderLoginHint();
    megnyitásakor tehát sosem ugrunk automatikusan a dashboardra — csak a
    ténylegesen beküldött belépési űrlap után. */
 let loggedIn = false;
-checkInviteLink().then((wasInvite) => { if (!wasInvite) showLandingScreen(); });
+checkInviteLink().then((wasInvite) => {
+  if (wasInvite) return;
+  checkResetPasswordLink().then((wasReset) => { if (!wasReset) showLandingScreen(); });
+});
 
 /* ============================================================
    Mobil hamburger-menü
@@ -2826,9 +2907,6 @@ async function loadNtakView() {
 /* ============================================================
    Készlet nézet
    ============================================================ */
-let stockProductsLoaded = false;
-const stockFilter = { q: '', csoport: '' };
-
 async function loadStockProductList() {
   if (stockProductsLoaded) return;
   try {
