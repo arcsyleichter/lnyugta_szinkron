@@ -4389,41 +4389,21 @@ function registerOrCheckDevice(cegKulcs, eszkozAzonosito) {
 // session). Ez váltja ki a korábbi lszamla-alapú licenc-lekérdezést: az
 // app mostantól a saját szerverünktől kérdezi le, melyik funkciókhoz fér
 // hozzá az adott cég, és meddig érvényesen.
-route('GET', '/api/license/status', async (req, res, query) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
-  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
-  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
-
-  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
-  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
-  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
-  // mező a válaszban).
-  const eszkoz = String(query.eszkoz || '').trim();
+// A ténylegesen érvényes (effektív) funkció-lista kiszámítása egy cégre —
+// EZ a közös, egyetlen forrás, amit MIND az androidos /api/license/status,
+// MIND az admin felület "tényleges állapot" lekérdezése használ, hogy a
+// kettő SOHA ne térhessen el egymástól.
+function computeEffectiveLicense(cegKulcs, eszkoz) {
   const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
-
-  // ALAP REGISZTRÁLTSÁG — ez egy, a funkció-kapcsolóktól teljesen külön,
-  // elsődleges kérdés: fizeti-e a cég az alap havidíjat? Ha nem, az APP
-  // ebből egyértelműen, azonnal látja, hogy ez az ok — nem kell
-  // funkciónként találgatnia, miért van minden letiltva.
   const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
-
   const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
   const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
   const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
 
-  // Csak az ENGEDÉLYEZETT funkciók kulcsait listázzuk — ha egy kulcs
-  // NINCS benne, az pontosan azt jelenti, hogy nincs engedélyezve
-  // (ugyanaz, mint a false lenne) — nincs értelme kiírni.
   let funkciok = [];
   if (!alapElofizetesAktiv) {
-    // Az alap havidíj nincs fizetve — ETTŐL FÜGGETLENÜL, hogy egyébként
-    // milyen funkció-kiosztásai vannak a cégnek, minden funkció le van
-    // tiltva. Ez a legmagasabb prioritású, elsődleges kapcsoló.
     funkciok = [];
   } else if (eszkozRegisztralva === false) {
-    // Betelt az eszközkorlát, és ez egy még ismeretlen eszköz — nincs neki
-    // hely, minden funkció letiltva, ugyanúgy, mint egy nem fizető cégnél.
     funkciok = [];
   } else if (inTrial) {
     funkciok = catalog.map((f) => f.key);
@@ -4437,9 +4417,45 @@ route('GET', '/api/license/status', async (req, res, query) => {
       return !!row && !!row.aktiv && status.allapot !== 'expired';
     }).map((f) => f.key);
   }
-  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv, funkciok };
-  if (eszkoz) payload.eszkozRegisztralva = eszkozRegisztralva;
+  return { alapElofizetesAktiv, funkciok, eszkozRegisztralva, inTrial };
+}
+
+route('GET', '/api/license/status', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+
+  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
+  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
+  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
+  // mező a válaszban).
+  const eszkoz = String(query.eszkoz || '').trim();
+  const effective = computeEffectiveLicense(cegKulcs, eszkoz);
+  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv: effective.alapElofizetesAktiv, funkciok: effective.funkciok };
+  if (eszkoz) payload.eszkozRegisztralva = effective.eszkozRegisztralva;
   sendJson(res, 200, payload);
+});
+
+// Admin-oldali lekérdezés: mit látna PONTOSAN az androidos app, ha MOST
+// kérdezné le a licenc-állapotot ehhez a céghez? Eddig az admin felület
+// csak a kiosztott (grant) rekordokat mutatta — ez viszont eltérhet a
+// TÉNYLEGES állapottól (pl. próbaidőszakban minden funkció engedélyezett,
+// kiosztástól függetlenül). Ez a végpont pontosan ugyanazt a logikát
+// futtatja le, mint az androidos végpont — csak admin-hitelesítéssel, nem
+// a szinkron API-kulccsal.
+route('GET', '/api/admin/license/effective', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const cegKulcs = String(query.cegKulcs || '').trim();
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const effective = computeEffectiveLicense(cegKulcs, null);
+  sendJson(res, 200, {
+    cegKulcs,
+    alapElofizetesAktiv: effective.alapElofizetesAktiv,
+    inTrial: effective.inTrial,
+    funkciok: effective.funkciok,
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -500,7 +500,31 @@ async function loadLicenseDeviceList(cegKulcs) {
   }
 }
 
+async function loadLicenseEffectiveStatus(cegKulcs) {
+  const box = document.getElementById('license-effective-content');
+  box.textContent = 'Betöltés…';
+  box.className = 'muted';
+  try {
+    const data = await api(`/api/admin/license/effective?cegKulcs=${encodeURIComponent(cegKulcs)}`);
+    if (!data.alapElofizetesAktiv) {
+      box.innerHTML = '<span class="licenc-badge licenc-badge--expired">⚠ Alap regisztráció szünetel — az app MINDEN funkciót letiltva lát, függetlenül a kiosztástól.</span>';
+      return;
+    }
+    const trialNote = data.inTrial ? ' <span class="licenc-badge licenc-badge--none">próbaidőszak — emiatt lát mindent</span>' : '';
+    if (!data.funkciok.length) {
+      box.innerHTML = `Nincs egyetlen engedélyezett funkció sem ennél a cégnél.${trialNote}`;
+      return;
+    }
+    box.innerHTML = `${data.funkciok.map((k) => `<span class="licenc-badge licenc-badge--ok" style="margin:2px 4px 2px 0;font-family:var(--font-mono);">${escapeHtml(k)}</span>`).join('')}${trialNote}`;
+  } catch (e) {
+    box.textContent = 'Nem sikerült betölteni: ' + e.message;
+  }
+}
+
 function openLicenseGrantModal(c) {
+  loadLicenseEffectiveStatus(c.cegKulcs);
+  document.getElementById('license-effective-refresh-btn').onclick = () => loadLicenseEffectiveStatus(c.cegKulcs);
+
   document.getElementById('license-device-limit').value = c.eszkozLimit != null ? c.eszkozLimit : '';
   document.getElementById('license-device-limit-save').onclick = async () => {
     try {
