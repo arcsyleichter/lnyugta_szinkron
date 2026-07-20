@@ -1,0 +1,4806 @@
+// L-NYUGTA élő értékesítési nézegető — önálló Node.js szerver
+// Nincs npm függőség: csak a Node beépített moduljait használja,
+// beleértve a Node 22.5+ -ban elérhető node:sqlite-ot.
+// Indítás: node server.js   (lásd README.md)
+//
+// TÖBB CÉG EGYSZERRE ("multi-tenant")
+// ------------------------------------------------------------------
+// Minden cégnek saját SQLite fájlja van a data/companies/ mappában,
+// az adószám első 8 számjegyével elnevezve (pl. data/companies/18774455.db).
+// A szerver induláskor beolvassa az összes ilyen fájl "szallitot" tábláját,
+// és egy memóriában tartott indexet épít belőle (cégnév, adószám, cím stb.),
+// hogy bejelentkezéskor ne kelljen minden fájlt megnyitni. Az androidos app
+// folyamatosan, akár több száz különböző cég nevében szinkronizálhat — minden
+// feltöltés a saját adószámának megfelelő .db fájlt cseréli le, a többi cég
+// adatait nem érinti.
+
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { DatabaseSync } = require('node:sqlite');
+
+// ---------------------------------------------------------------------------
+// Konfiguráció
+// ---------------------------------------------------------------------------
+
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const DATA_DIR = path.join(__dirname, 'data');
+const COMPANIES_DIR = path.join(DATA_DIR, 'companies');
+const SYNC_META_PATH = path.join(DATA_DIR, 'sync-meta.json');
+const SECRETS_PATH = path.join(DATA_DIR, '.secrets.json');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 óra
+const MAX_OPEN_DB_CONNECTIONS = 40; // ennyi cég adatbázisát tartjuk egyszerre nyitva (LRU)
+
+// Sütik `Secure` jelzővel (csak HTTPS-en küldi el a böngésző). Alapból BE van
+// kapcsolva — csak akkor kapcsold ki (DISABLE_SECURE_COOKIES=1), ha helyi
+// fejlesztés közben sima HTTP-n (nem HTTPS-en) teszteled a bejelentkezést.
+const COOKIE_SECURE = process.env.DISABLE_SECURE_COOKIES !== '1';
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(COMPANIES_DIR)) fs.mkdirSync(COMPANIES_DIR, { recursive: true });
+
+// Első indításkor generálunk egy munkamenet-titkot és egy szinkron API kulcsot,
+// ha még nincs beállítva környezeti változóban. Éles üzemben mindkettő
+// SESSION_SECRET / SYNC_API_KEY env változóból jön (lásd README.md).
+function loadOrCreateSecrets() {
+  let stored = {};
+  if (fs.existsSync(SECRETS_PATH)) {
+    try { stored = JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8')); } catch (_) { stored = {}; }
+  }
+  const sessionSecret = process.env.SESSION_SECRET || stored.sessionSecret || crypto.randomBytes(32).toString('hex');
+  const syncApiKey = process.env.SYNC_API_KEY || stored.syncApiKey || crypto.randomBytes(24).toString('hex');
+  const adminPassword = process.env.ADMIN_PASSWORD || stored.adminPassword || crypto.randomBytes(9).toString('base64url');
+  const next = { sessionSecret, syncApiKey, adminPassword };
+  if (JSON.stringify(next) !== JSON.stringify(stored)) {
+    fs.writeFileSync(SECRETS_PATH, JSON.stringify(next, null, 2));
+  }
+  return next;
+}
+const SECRETS = loadOrCreateSecrets();
+
+if (!process.env.SYNC_API_KEY) {
+  console.log('\n[info] Nincs SYNC_API_KEY env változó beállítva — generált kulcs a data/.secrets.json fájlban.');
+  console.log(`[info] Az androidos szinkronhoz ezt a kulcsot kell majd megadni: ${SECRETS.syncApiKey}\n`);
+}
+if (!process.env.ADMIN_PASSWORD) {
+  console.log('[info] Nincs ADMIN_PASSWORD env változó beállítva — generált jelszó a data/.secrets.json fájlban.');
+  console.log(`[info] Admin belépéshez ezt a jelszót kell majd megadni: ${SECRETS.adminPassword}\n`);
+}
+
+function normalizeAdoszam(s) {
+  return String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+}
+// A cég "kulcsa" mindenhol az adószám első 8 számjegye.
+function companyKeyFromAdoszam(adoszam) {
+  return normalizeAdoszam(adoszam).slice(0, 8);
+}
+// A telephely-kód szabad, rövid azonosító (pl. "01", "BUDA") — csak
+// alfanumerikus, hogy biztonságosan része lehessen fájlnévnek/kulcsnak.
+function normalizeTelephelyKod(s) {
+  const norm = String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 12);
+  return norm || '01';
+}
+// ÖSSZETETT KULCS: "cégkulcs:telephelykód" (pl. "18774455:01") — ez az,
+// amit a rendszer mindenhol egyetlen átlátszó "key" stringként kezel
+// (session.companyKey, stock.db/product-changes.db company_key oszlopa
+// stb.) — így a meglévő kód nagy része VÁLTOZATLANUL működik, csak most
+// már telephely-szinten különül el, nem csak cég-szinten.
+function makeSiteKey(cegKulcs, telephelyKod) {
+  return `${cegKulcs}:${normalizeTelephelyKod(telephelyKod)}`;
+}
+function splitSiteKey(siteKey) {
+  const idx = siteKey.indexOf(':');
+  if (idx === -1) return { cegKulcs: siteKey, telephelyKod: null };
+  return { cegKulcs: siteKey.slice(0, idx), telephelyKod: siteKey.slice(idx + 1) };
+}
+function dbFileForKey(siteKey) {
+  const { cegKulcs, telephelyKod } = splitSiteKey(siteKey);
+  return path.join(COMPANIES_DIR, cegKulcs, `${telephelyKod}.db`);
+}
+
+// ---------------------------------------------------------------------------
+// Telephelyek nyilvántartása — cégenként, adminisztratív módon kezelve
+// (nem csak a ténylegesen szinkronizált .db fájlokból derül ki, hanem egy
+// telephely már a szinkron ELŐTT is felvehető a karbantartóban).
+// data/telephelyek.json: { "<cégkulcs>": [ { kod, nev, cim, letrehozva } ] }
+// ---------------------------------------------------------------------------
+const TELEPHELYEK_PATH = path.join(DATA_DIR, 'telephelyek.json');
+
+function readTelephelyek() {
+  try { return JSON.parse(fs.readFileSync(TELEPHELYEK_PATH, 'utf8')); }
+  catch (_) { return {}; }
+}
+function writeTelephelyek(data) {
+  fs.writeFileSync(TELEPHELYEK_PATH, JSON.stringify(data, null, 2));
+}
+function listTelephelyek(cegKulcs) {
+  return readTelephelyek()[cegKulcs] || [];
+}
+function ensureTelephely(cegKulcs, kod, nev) {
+  const data = readTelephelyek();
+  if (!data[cegKulcs]) data[cegKulcs] = [];
+  kod = normalizeTelephelyKod(kod);
+  if (!data[cegKulcs].some((t) => t.kod === kod)) {
+    // A "01" mindig az alapértelmezett/első telephely — akkor is "Fő
+    // telephely" legyen a neve, ha a telephelyek.json valamiért elveszett
+    // és újra kell generálni (pl. tárhely-visszaállítás után), ne csak az
+    // első, ténylegesen migrált alkalommal.
+    const fallbackNev = kod === '01' ? 'Fő telephely' : `Telephely ${kod}`;
+    data[cegKulcs].push({ kod, nev: nev || fallbackNev, cim: '', letrehozva: new Date().toISOString() });
+    writeTelephelyek(data);
+    return true; // új volt
+  }
+  return false; // már létezett
+}
+
+// ---------------------------------------------------------------------------
+// Cégindex — memóriában tartott lista arról, milyen TELEPHELYEK (.db fájlok)
+// érhetők el, és mi az adataik (cégnév, adószám, város, cím). A tényleges
+// forgalmi adatokat NEM tartalmazza — azokat lekérdezéskor olvassuk ki
+// a megfelelő adatbázisból.
+// ---------------------------------------------------------------------------
+
+const companyIndex = new Map(); // siteKey ("cégkulcs:telephelykód") -> { cegid, nev, adoszam, varos, cim, dbFile, cegKulcs, telephelyKod }
+
+function readCompanyIdentity(dbFile) {
+  const tmp = new DatabaseSync(dbFile, { readOnly: true });
+  try {
+    return tmp.prepare('SELECT cegid, nev, adoszam, varos, cim FROM szallitot LIMIT 1').get() || null;
+  } finally {
+    tmp.close();
+  }
+}
+
+// Egyszeri migráció: a korábbi, lapos "data/companies/<cégkulcs>.db"
+// elrendezést átalakítja "data/companies/<cégkulcs>/01.db"-re, és
+// regisztrálja az "01" ("Fő telephely") telephelyet — hogy a régebbi,
+// egytelephelyes cégek adatai ne vesszenek el ennél a szerkezetváltásnál.
+function migrateFlatCompanyFiles() {
+  const entries = fs.readdirSync(COMPANIES_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.db')) {
+      const cegKulcs = entry.name.replace(/\.db$/, '');
+      const oldPath = path.join(COMPANIES_DIR, entry.name);
+      const newDir = path.join(COMPANIES_DIR, cegKulcs);
+      const newPath = path.join(newDir, '01.db');
+      fs.mkdirSync(newDir, { recursive: true });
+      if (!fs.existsSync(newPath)) {
+        fs.renameSync(oldPath, newPath);
+        console.log(`[migráció] ${entry.name} -> ${cegKulcs}/01.db (Fő telephely)`);
+      }
+      ensureTelephely(cegKulcs, '01', 'Fő telephely');
+    }
+  }
+}
+
+function scanCompanies() {
+  migrateFlatCompanyFiles();
+  companyIndex.clear();
+  const cegDirs = fs.readdirSync(COMPANIES_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
+  for (const cegDir of cegDirs) {
+    const cegKulcs = cegDir.name;
+    const cegPath = path.join(COMPANIES_DIR, cegKulcs);
+    const files = fs.readdirSync(cegPath).filter((f) => f.endsWith('.db'));
+    for (const f of files) {
+      const telephelyKod = f.replace(/\.db$/, '');
+      const dbFile = path.join(cegPath, f);
+      const siteKey = makeSiteKey(cegKulcs, telephelyKod);
+      try {
+        const identity = readCompanyIdentity(dbFile);
+        if (identity) {
+          companyIndex.set(siteKey, { ...identity, dbFile, cegKulcs, telephelyKod });
+          ensureTelephely(cegKulcs, telephelyKod, null); // ha admin még nem nevezte el, kapjon alap nevet
+        } else {
+          console.warn(`[warn] ${cegKulcs}/${f}: nincs szallitot sor, kihagyva.`);
+        }
+      } catch (e) {
+        console.error(`[warn] nem sikerült beolvasni: ${cegKulcs}/${f} — ${e.message}`);
+      }
+    }
+  }
+  console.log(`[info] ${companyIndex.size} telephely betöltve a data/companies/ mappából.`);
+}
+scanCompanies();
+
+// ---------------------------------------------------------------------------
+// Kapcsolat-gyorsítótár — cégenként lusta betöltés, LRU kiürítéssel, hogy
+// több száz cég esetén se maradjon nyitva korlátlan sok fájl egyszerre.
+// ---------------------------------------------------------------------------
+
+const dbCache = new Map(); // key -> { db, lastUsed }
+
+function getDb(key) {
+  const cached = dbCache.get(key);
+  if (cached) { cached.lastUsed = Date.now(); return cached.db; }
+  const entry = companyIndex.get(key);
+  if (!entry) { const e = new Error('COMPANY_NOT_FOUND'); e.code = 'COMPANY_NOT_FOUND'; throw e; }
+  const db = new DatabaseSync(entry.dbFile, { readOnly: false });
+  dbCache.set(key, { db, lastUsed: Date.now() });
+  evictIfNeeded();
+  return db;
+}
+function evictConnection(key) {
+  const cached = dbCache.get(key);
+  if (cached) { try { cached.db.close(); } catch (_) {} dbCache.delete(key); }
+}
+function evictIfNeeded() {
+  if (dbCache.size <= MAX_OPEN_DB_CONNECTIONS) return;
+  let oldestKey = null, oldestTime = Infinity;
+  for (const [k, v] of dbCache) { if (v.lastUsed < oldestTime) { oldestTime = v.lastUsed; oldestKey = k; } }
+  if (oldestKey) evictConnection(oldestKey);
+}
+
+function all(key, sql, params = []) { return getDb(key).prepare(sql).all(...params); }
+function get(key, sql, params = []) { return getDb(key).prepare(sql).get(...params); }
+
+// ---------------------------------------------------------------------------
+// Készlet — bevételezések tárolása. SZÁNDÉKOSAN KÜLÖN fájlban (data/stock.db),
+// NEM a cégek szinkronizált .db fájljában, mert azt az androidos app
+// időnként teljes egészében felülírja egy friss szinkronnal — ha ide
+// mentenénk a bevételezéseket, minden feltöltéskor elvesznének. Ez a fájl
+// sosem érintkezik az android-szinkronnal, csak a webes admin/cég felület
+// írja/olvassa. Egyetlen közös fájl, company_key oszloppal elkülönítve
+// (nem kell cégenként külön fájlt nyitogatni, a várható adatmennyiség kicsi).
+// ---------------------------------------------------------------------------
+const STOCK_DB_PATH = path.join(DATA_DIR, 'stock.db');
+const stockDb = new DatabaseSync(STOCK_DB_PATH, { readOnly: false });
+stockDb.exec(`
+  CREATE TABLE IF NOT EXISTS bevetelezesek (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_key TEXT NOT NULL,
+    datum TEXT NOT NULL,
+    cikk_nev TEXT NOT NULL,
+    me TEXT,
+    mennyiseg NUMERIC NOT NULL,
+    beszerzesi_ar NUMERIC,
+    szallito TEXT,
+    megjegyzes TEXT,
+    szamla_fajl TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bevetelezesek_company ON bevetelezesek(company_key);
+  CREATE INDEX IF NOT EXISTS idx_bevetelezesek_cikk ON bevetelezesek(company_key, cikk_nev);
+
+  CREATE TABLE IF NOT EXISTS keszlet_riasztas (
+    company_key TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('cikk','csoport')),
+    nev TEXT NOT NULL,
+    kuszob NUMERIC NOT NULL,
+    PRIMARY KEY (company_key, scope, nev)
+  );
+`);
+{
+  const cols = stockDb.prepare(`PRAGMA table_info(bevetelezesek)`).all();
+  if (!cols.some((c) => c.name === 'szamla_fajl')) {
+    stockDb.exec(`ALTER TABLE bevetelezesek ADD COLUMN szamla_fajl TEXT`);
+  }
+}
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// Cikktörzs kétirányú szinkron — a webes felület (egyenként, tömegesen vagy
+// CSV/Excel importtal) tud terméktörzs-módosítást kezdeményezni, de ezt NEM
+// írja bele közvetlenül a cég szinkronizált .db fájljába — azt úgyis
+// felülírná a következő androidos szinkron feltöltés. Helyette egy külön
+// "függő módosítás" sorba kerül (data/product-changes.db), amit az androidos
+// alkalmazásnak kell lekérdeznie (GET /api/sync/pending-changes) és
+// alkalmaznia — lásd README. A módosítás automatikusan "leszinkronizálva"
+// állapotba kerül, amint a következő valódi szinkron feltöltésben megjelenik
+// a kívánt érték (lásd reconcileProductChanges, hívva /api/sync/upload-ból).
+// ---------------------------------------------------------------------------
+const PRODUCT_CHANGES_DB_PATH = path.join(DATA_DIR, 'product-changes.db');
+const productChangesDb = new DatabaseSync(PRODUCT_CHANGES_DB_PATH, { readOnly: false });
+productChangesDb.exec(`
+  CREATE TABLE IF NOT EXISTS product_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_key TEXT NOT NULL,
+    change_type TEXT NOT NULL CHECK(change_type IN ('cikk_upsert','csoport_upsert')),
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered')),
+    source TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_product_changes_company ON product_changes(company_key, status);
+`);
+// Könnyű migráció: a "meta" oszlop (csak weben megjelenített, kiegészítő
+// adat — pl. tervezett termékcsoport neve — ami TILOS, hogy bekerüljön az
+// androidnak küldött "payload" mezőbe, mert az androidos alkalmazás
+// szigorúan, mezőnév=oszlopnév alapon generikusan illeszti a payload MINDEN
+// kulcsát a cikkt táblára, és bármilyen ismeretlen mezőnév esetén elutasítja
+// az egész szinkront) — ha egy régebbi telepítésben még nincs meg, pótoljuk.
+{
+  const cols = productChangesDb.prepare(`PRAGMA table_info(product_changes)`).all();
+  if (!cols.some((c) => c.name === 'meta')) {
+    productChangesDb.exec(`ALTER TABLE product_changes ADD COLUMN meta TEXT`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Felhasználói fiókok — viszonteladó, cégtulajdonos, üzletvezető.
+// Az admin NEM itt van (az a meglévő ADMIN_PASSWORD env-változós, önálló
+// mechanizmus marad, változatlanul).
+// ---------------------------------------------------------------------------
+const USERS_DB_PATH = path.join(DATA_DIR, 'users.db');
+const usersDb = new DatabaseSync(USERS_DB_PATH, { readOnly: false });
+usersDb.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    role TEXT NOT NULL CHECK(role IN ('reseller','owner','manager')),
+    reseller_id INTEGER,
+    ceg_kulcs TEXT,
+    telephely_kod TEXT,
+    nev TEXT NOT NULL,
+    invited_by TEXT,
+    invite_token TEXT,
+    invite_expires TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','disabled')),
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+  CREATE INDEX IF NOT EXISTS idx_users_invite_token ON users(invite_token);
+  CREATE INDEX IF NOT EXISTS idx_users_ceg ON users(ceg_kulcs);
+  CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
+`);
+
+// ---------------------------------------------------------------------------
+// Licenc-kezelés — az androidos L-NYUGTA GO app licencét ezután a mi
+// szerverünk tartja nyilván és szolgálja ki (nem az lszamla rendszer).
+// Az lszamla modell mintájára (progtip_tul) a licenc FUNKCIÓNKÉNT (opción-
+// ként) engedélyezett, mindegyik saját árral — nem csak egyetlen céges
+// szintű lejárati dátum. Két tábla:
+//   - license_features: a funkció-KATALÓGUS (mit lehet egyáltalán árulni),
+//     admin szerkeszti (hozzáad/átnevez/áraz/kivezet) — data/license.db
+//   - company_licenses: melyik CÉG melyik funkcióhoz fér hozzá, milyen
+//     áron, meddig érvényesen (lejarat lehet NULL = nincs lejárat/örökös)
+// ---------------------------------------------------------------------------
+const LICENSE_DB_PATH = path.join(DATA_DIR, 'license.db');
+const licenseDb = new DatabaseSync(LICENSE_DB_PATH, { readOnly: false });
+licenseDb.exec(`
+  CREATE TABLE IF NOT EXISTS license_features (
+    key TEXT PRIMARY KEY,
+    nev TEXT NOT NULL,
+    leiras TEXT,
+    alap_ar INTEGER NOT NULL DEFAULT 0,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    sorrend INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS company_licenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ceg_kulcs TEXT NOT NULL,
+    feature_key TEXT NOT NULL,
+    ar INTEGER NOT NULL DEFAULT 0,
+    lejarat TEXT,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    jovahagyta TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ceg_kulcs, feature_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_company_licenses_ceg ON company_licenses(ceg_kulcs);
+
+  -- Cégenkénti eszközkorlát (hány androidos eszköz futtathatja egyszerre a
+  -- licencet) — ha egy cégre nincs sor, nincs korlát (a jelenlegi, korlát
+  -- nélküli állapot marad, amíg admin explicit be nem állítja).
+  CREATE TABLE IF NOT EXISTS company_device_limits (
+    ceg_kulcs TEXT PRIMARY KEY,
+    eszkoz_limit INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- Melyik cégnél melyik eszköz már regisztrált — ez foglalja el a fenti
+  -- korlát egy-egy "helyét". Az eszköz_azonosító magától az androidos
+  -- appból jön (amit ő már úgyis ismer/küld), nincs hozzá semmi extra
+  -- admin-adminisztráció, magától töltődik fel lekérdezéskor.
+  CREATE TABLE IF NOT EXISTS company_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ceg_kulcs TEXT NOT NULL,
+    eszkoz_azonosito TEXT NOT NULL,
+    telephely_kod TEXT,
+    nev TEXT,
+    progtip TEXT,
+    verzio TEXT,
+    elso_latott TEXT NOT NULL,
+    utolso_latott TEXT NOT NULL,
+    UNIQUE(ceg_kulcs, eszkoz_azonosito)
+  );
+  CREATE INDEX IF NOT EXISTS idx_company_devices_ceg ON company_devices(ceg_kulcs);
+
+  -- Programtípus-katalógus — melyik androidos app-változat (ENYUGTA_GO,
+  -- ENYUGTA_WS, stb.) szinkronizált már valaha. Automatikusan bővül, ha
+  -- egy szinkron olyan típust küld, amit még nem ismerünk — nem kell
+  -- előre felvinni, csak akkor kerül be, ha ténylegesen látjuk.
+  CREATE TABLE IF NOT EXISTS program_tipusok (
+    kulcs TEXT PRIMARY KEY,
+    nev TEXT,
+    elso_latott TEXT NOT NULL
+  );
+
+  -- Bankkártyás fizetések (myPOS Checkout API) — minden fizetési
+  -- KÍSÉRLETET rögzítünk, nem csak a sikereseket, hogy legyen teljes
+  -- nyoma annak is, ha valaki elindított, de nem fejezett be egy
+  -- fizetést. A "cel" mondja meg, mire vonatkozik (alap előfizetés,
+  -- egy konkrét csomag, vagy egy önálló funkció).
+  CREATE TABLE IF NOT EXISTS license_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT UNIQUE NOT NULL,
+    ceg_kulcs TEXT NOT NULL,
+    cel TEXT NOT NULL,
+    osszeg NUMERIC NOT NULL,
+    penznem TEXT NOT NULL DEFAULT 'HUF',
+    allapot TEXT NOT NULL DEFAULT 'FUGGOBEN',
+    mypos_trnref TEXT,
+    letrehozva TEXT NOT NULL,
+    lezarva TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_license_payments_ceg ON license_payments(ceg_kulcs);
+
+  -- Regisztrációk — a régi LSZAMLA rendszerből átvett, cégenkénti eszköz-
+  -- nyilvántartás (programtípus, verzió, reg./lejárat dátum, kapcsolattartó).
+  -- Mivel a forrásadatban nincs explicit "telephely" fogalom, a "reg_sites"
+  -- a cím alapján csoportosít — ez egy legjobb-tudás szerinti közelítés,
+  -- amit az admin utólag át tud nevezni.
+  CREATE TABLE IF NOT EXISTS reg_companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    adoszam TEXT NOT NULL UNIQUE,
+    nev TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS reg_sites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    nev TEXT,
+    varos TEXT,
+    cim TEXT
+  );
+  CREATE TABLE IF NOT EXISTS reg_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL,
+    uuid TEXT,
+    progtip TEXT,
+    verzio TEXT,
+    regdat TEXT,
+    ervdat TEXT,
+    email TEXT,
+    telefon TEXT,
+    kapcsnev TEXT,
+    regmodel TEXT,
+    regmanufacturer TEXT,
+    statusz TEXT,
+    szszelotag TEXT,
+    legacy_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reg_sites_company ON reg_sites(company_id);
+  CREATE INDEX IF NOT EXISTS idx_reg_devices_site ON reg_devices(site_id);
+
+  -- ALAP REGISZTRÁLTSÁG — külön, önálló fogalom a funkciónkénti
+  -- kapcsolóktól. Ez azt válaszolja meg: fizeti-e a cég egyáltalán az
+  -- alap havidíjat? Ha nincs sor egy cégre, ALAPÉRTELMEZETTEN AKTÍV
+  -- (egyetlen meglévő cég se essen ki emiatt visszamenőleg) — az admin
+  -- explicit kapcsolja ki, ha egy cég nem fizet. Szándékosan NINCS
+  -- benne külön "hamarosan lejár" mező vagy késleltetett kikapcsolás —
+  -- egyetlen aktív/inaktív kapcsoló, ahogy a fejlesztő kérte (KISS).
+  CREATE TABLE IF NOT EXISTS company_subscription (
+    ceg_kulcs TEXT PRIMARY KEY,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    megjegyzes TEXT,
+    proba_vege TEXT,
+    proba_kezi INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+
+  -- CSOMAGOK — egyes funkciók egy néven, egy áron, egyszerre adhatók ki
+  -- ("csomagba kerülnek"), míg mások önállóan, külön fizetősek maradnak.
+  -- Egy csomag csak egy KÉNYELMI GYŰJTŐNÉV — a tényleges hozzáférés
+  -- továbbra is a meglévő company_licenses táblában, funkciónként dől el;
+  -- a "csomag kiosztása" csak egyszerre állítja be a benne lévő összes
+  -- funkciót ugyanazzal a lejárattal. Ez szándékosan egyszerű (KISS): nincs
+  -- külön csomag-szintű előfizetés-nyilvántartás vagy állapotgép.
+  CREATE TABLE IF NOT EXISTS license_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nev TEXT NOT NULL,
+    leiras TEXT,
+    ar INTEGER NOT NULL DEFAULT 0,
+    aktiv INTEGER NOT NULL DEFAULT 1,
+    sorrend INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS license_package_features (
+    package_id INTEGER NOT NULL,
+    feature_key TEXT NOT NULL,
+    PRIMARY KEY (package_id, feature_key)
+  );
+`);
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(company_subscription)`).all();
+  if (!cols.some((c) => c.name === 'proba_vege')) {
+    licenseDb.exec(`ALTER TABLE company_subscription ADD COLUMN proba_vege TEXT`);
+  }
+  if (!cols.some((c) => c.name === 'proba_kezi')) {
+    licenseDb.exec(`ALTER TABLE company_subscription ADD COLUMN proba_kezi INTEGER NOT NULL DEFAULT 0`);
+  }
+}
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(company_devices)`).all();
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['nev', 'TEXT'], ['progtip', 'TEXT'], ['verzio', 'TEXT']]) {
+    if (!cols.some((c) => c.name === name)) {
+      licenseDb.exec(`ALTER TABLE company_devices ADD COLUMN ${name} ${def}`);
+    }
+  }
+}
+// A régi LSZAMLA rendszerből átvett regisztrációs adatok EGYSZERI importja
+// — csak akkor fut le, ha a reg_companies tábla még üres (első indításkor,
+// vagy ha valaki szándékosan törölte az összeset). Ha az admin utólag
+// szerkeszt/töröl egy bejegyzést, ez az import SOHA nem írja felül —
+// nem fut le újra, amint egyszer megtörtént.
+{
+  const already = licenseDb.prepare('SELECT COUNT(*) AS c FROM reg_companies').get().c;
+  const seedPath = path.join(__dirname, 'data-seed', 'registrations.json');
+  if (already === 0 && fs.existsSync(seedPath)) {
+    const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+    const now = new Date().toISOString();
+    const insertCompany = licenseDb.prepare('INSERT INTO reg_companies (adoszam, nev, created_at) VALUES (?, ?, ?)');
+    const insertSite = licenseDb.prepare('INSERT INTO reg_sites (company_id, nev, varos, cim) VALUES (?, ?, ?, ?)');
+    const insertDevice = licenseDb.prepare(`
+      INSERT INTO reg_devices (site_id, uuid, progtip, verzio, regdat, ervdat, email, telefon, kapcsnev, regmodel, regmanufacturer, statusz, szszelotag, legacy_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    let companyCount = 0, deviceCount = 0;
+    licenseDb.exec('BEGIN');
+    try {
+      for (const c of seed) {
+        const companyResult = insertCompany.run(c.adoszam, c.nev, now);
+        const companyId = Number(companyResult.lastInsertRowid);
+        companyCount++;
+        c.sites.forEach((s, idx) => {
+          const siteNev = c.sites.length > 1 ? (s.varos || s.cim || `Telephely ${idx + 1}`) : 'Fő telephely';
+          const siteResult = insertSite.run(companyId, siteNev, s.varos || null, s.cim || null);
+          const siteId = Number(siteResult.lastInsertRowid);
+          for (const d of s.devices) {
+            insertDevice.run(
+              siteId, d.uuid || null, d.progtip || null, d.verzio || null, d.regdat || null, d.ervdat || null,
+              d.email || null, d.telefon || null, d.kapcsnev || null, d.regmodel || null, d.regmanufacturer || null,
+              d.statusz || null, d.szszelotag || null, d.legacyId || null, now
+            );
+            deviceCount++;
+          }
+        });
+      }
+      licenseDb.exec('COMMIT');
+    } catch (e) {
+      licenseDb.exec('ROLLBACK');
+      throw e;
+    }
+    console.log(`[info] Regisztrációk importálva a régi LSZAMLA rendszerből: ${companyCount} cég, ${deviceCount} eszköz.`);
+  }
+}
+// A ténylegesen Androidban hardkódolt, VALÓS funkció-azonosítók listája —
+// ez az egyetlen forrás, amit két helyen is használunk: (1) vadonatúj,
+// üres telepítésnél automatikus kezdő feltöltéshez, (2) egy már futó,
+// meglévő katalógusnál a hiányzó elemek biztonságos, admin által
+// kezdeményezett pótlásához (lásd /api/admin/license/features/seed-real).
+const REAL_LICENSE_FEATURE_DEFAULTS = [
+  ['SZAMLSZEM', 'Számla személyre szabása', '', 0, 0],
+  ['NTAK', 'NTAK', '', 0, 1],
+  ['EXTNYOMT', 'Konyhai nyomtató', '', 0, 2],
+  ['VIRTUO', 'Virtuo fizetés', '', 0, 3],
+  ['VISSZAJAROKEZELES', 'Visszajáró kezelése', '', 0, 4],
+  ['REPOHAR', 'Repohár', '', 0, 5],
+  ['KEPESTERM', 'Képes termék', '', 0, 6],
+  ['MERLEGELES', 'Mérlegelés', '', 0, 7],
+  ['VONALKOD', 'Vonalkód generálás', '', 0, 8],
+  ['PINTEGRACIO', 'PIN integráció', '', 0, 9],
+  ['WEBTERMEK', 'Webes termékkezelés', 'Db szinkronizáció.', 0, 10],
+  ['WEBTERMARCSI', 'Webes termék fel/letöltés', 'A honlapodra fel/letöltést engedélyezi.', 0, 11],
+];
+// Első indításkor feltöltjük egy induló katalógussal — ezt az admin
+// utólag szabadon szerkesztheti (átnevezheti, árazhatja, kivezetheti,
+// újat vehet fel). A kulcsok a ténylegesen Androidban hardkódolt,
+// valós azonosítók (nem AI-tipp).
+{
+  const count = licenseDb.prepare('SELECT COUNT(*) AS c FROM license_features').get().c;
+  if (count === 0) {
+    const now = new Date().toISOString();
+    for (const [key, nev, leiras, alapAr, sorrend] of REAL_LICENSE_FEATURE_DEFAULTS) {
+      licenseDb.prepare(
+        `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)`
+      ).run(key, nev, leiras, alapAr, sorrend, now);
+    }
+  }
+
+}
+
+// Egyszerű, ékezet- és írásjel-mentes "slug" egy funkció-kulcshoz, a
+// megadott névből — csak akkor kell, ha az admin nem ad meg sajátot.
+function slugifyFeatureKey(nev) {
+  const noAccent = String(nev || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return noAccent.slice(0, 40) || `funkcio_${Date.now()}`;
+}
+
+// Egy company_licenses sor "állapotát" (badge) számolja ki.
+// EGYSZERŰSÍTVE (az androidos fejlesztő KISS-visszajelzése alapján): csak
+// KÉT érdemi állapot van — lejárt vagy érvényes. A korábbi, külön
+// "hamarosan lejár (7 napon belül)" köztes állapotot szándékosan
+// eltávolítottuk — a lejárat dátuma már önmagában megmutatja ezt, egy
+// külön kiszámolt jelző csak felesleges redundancia.
+function licenseRowStatus(row) {
+  if (!row) return { allapot: 'none', allapotSzoveg: 'nincs regisztráció' };
+  if (!row.aktiv) return { allapot: 'expired', allapotSzoveg: 'letiltva' };
+  if (row.lejarat) {
+    const days = Math.floor((new Date(row.lejarat + 'T00:00:00Z') - new Date(todayIsoServer() + 'T00:00:00Z')) / 86400000);
+    if (days < 0) return { allapot: 'expired', allapotSzoveg: 'lejárt' };
+  }
+  return { allapot: 'ok', allapotSzoveg: 'érvényes' };
+}
+
+// Alap regisztráltság lekérdezése — ha nincs sor, alapból AKTÍV (lásd a
+// fenti tábla-megjegyzést). Egyszerű, egyetlen igaz/hamis kapcsoló.
+function isBaseSubscriptionActive(cegKulcs) {
+  const row = licenseDb.prepare('SELECT aktiv FROM company_subscription WHERE ceg_kulcs = ?').get(cegKulcs);
+  return !row || !!row.aktiv;
+}
+
+function addProductChange(companyKey, changeType, payload, source, meta) {
+  // Ha ugyanerre a cikkre/csoportra már van egy még FÜGGŐBEN lévő korábbi
+  // módosítás, azt előbb töröljük — különben soha nem tudna teljesülni
+  // (hiszen a cikk ára/adatai a most beérkező, újabb szándék szerint fognak
+  // majd módosulni, nem a réginek megfelelően), és örökre "függőben" ragadna.
+  // A már LESZINKRONIZÁLT (történeti) bejegyzéseket ez nem érinti.
+  const target = payload.megnevezes;
+  productChangesDb.prepare(
+    `DELETE FROM product_changes WHERE company_key = ? AND change_type = ? AND status = 'pending'
+     AND json_extract(payload, '$.megnevezes') = ?`
+  ).run(companyKey, changeType, target);
+  productChangesDb.prepare(
+    `INSERT INTO product_changes (company_key, change_type, payload, status, source, created_at, meta)
+     VALUES (?, ?, ?, 'pending', ?, ?, ?)`
+  ).run(companyKey, changeType, JSON.stringify(payload), source, new Date().toISOString(), meta ? JSON.stringify(meta) : null);
+}
+
+// Minden valódi androidos szinkron feltöltés után lefut: megnézi, hogy a
+// frissen beérkezett cikktörzsben már megjelent-e a kért érték — ha igen,
+// a függő módosítást "leszinkronizálva" állapotba teszi. Így nincs szükség
+// külön visszaigazoló hívásra az androidos oldalról.
+function reconcileProductChanges(companyKey) {
+  let pending;
+  try {
+    pending = productChangesDb.prepare(
+      `SELECT id, change_type, payload FROM product_changes WHERE company_key = ? AND status = 'pending'`
+    ).all(companyKey);
+  } catch (_) { return; }
+  if (!pending.length) return;
+  for (const row of pending) {
+    let payload;
+    try { payload = JSON.parse(row.payload); } catch (_) { continue; }
+    let matches = false;
+    try {
+      if (row.change_type === 'cikk_upsert') {
+        const current = get(companyKey, `SELECT bruttoar, afakod, afakodelv FROM cikkt WHERE megnevezes = ?`, [payload.megnevezes]);
+        matches = !!current
+          && Number(current.bruttoar) === Number(payload.bruttoar)
+          && String(current.afakod) === String(payload.afakod)
+          && (!payload.afakodelv || String(current.afakodelv) === String(payload.afakodelv));
+      } else if (row.change_type === 'csoport_upsert') {
+        matches = !!get(companyKey, `SELECT azon FROM cikkcsop WHERE megnevezes = ?`, [payload.megnevezes]);
+      }
+    } catch (_) { matches = false; }
+    if (matches) {
+      productChangesDb.prepare(`UPDATE product_changes SET status='delivered', delivered_at=? WHERE id=?`).run(new Date().toISOString(), row.id);
+    }
+  }
+}
+
+// --- Apró CSV segédfüggvények (Excel natívan megnyitja/menti) ---
+function csvEscape(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCsv(rows, headers) {
+  const lines = [headers.join(',')];
+  for (const r of rows) lines.push(headers.map((h) => csvEscape(r[h])).join(','));
+  return '\uFEFF' + lines.join('\r\n') + '\r\n'; // UTF-8 BOM, hogy Excelben jók legyenek az ékezetek
+}
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\r') { /* skip */ }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((f) => f !== ''));
+}
+
+// ---------------------------------------------------------------------------
+// Szinkron-metaadat — cégenkénti utolsó szinkronizáció ideje/mérete,
+// data/sync-meta.json-ban tárolva: { "<key>": { lastSync, source, bytes } }
+// ---------------------------------------------------------------------------
+
+function readSyncMeta() {
+  try { return JSON.parse(fs.readFileSync(SYNC_META_PATH, 'utf8')); }
+  catch (_) { return {}; }
+}
+function writeSyncMeta(meta) {
+  fs.writeFileSync(SYNC_META_PATH, JSON.stringify(meta, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// Tevékenység-napló — MINDEN releváns esemény ide kerül, cégenként és
+// típusonként megkülönböztetve, sikeres és sikertelen próbálkozás is:
+// céges bejelentkezés, admin bejelentkezés, admin műveletek (cég megnyitása,
+// kód újragenerálás/kiküldés), szinkron feltöltés, bevételezés rögzítése/
+// törlése. JSONL formátum (soronként egy JSON objektum), data/activity-log.jsonl.
+// Egyszerű rotáció: ha 8000 sor fölé nő, az utolsó 3000-re vágjuk vissza.
+// ---------------------------------------------------------------------------
+const ACTIVITY_LOG_PATH = path.join(DATA_DIR, 'activity-log.jsonl');
+const ACTIVITY_LOG_MAX_LINES = 8000;
+const ACTIVITY_LOG_TRIM_TO = 3000;
+
+// Típuscímkék — csak dokumentációs célból itt, a tényleges magyar feliratozás
+// a felületen (app.js ACTIVITY_TYPE_LABELS) történik.
+// 'company_login' | 'admin_login' | 'admin_impersonate' | 'admin_regen_code' |
+// 'admin_send_code' | 'sync_upload' | 'stock_receipt_add' | 'stock_receipt_delete'
+
+function logActivity(entry) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
+  try {
+    fs.appendFileSync(ACTIVITY_LOG_PATH, line + '\n');
+    maybeTrimActivityLog();
+  } catch (e) {
+    console.error('[hiba] tevékenység-napló írása sikertelen:', e.message);
+  }
+}
+function maybeTrimActivityLog() {
+  let stat;
+  try { stat = fs.statSync(ACTIVITY_LOG_PATH); } catch (_) { return; }
+  if (stat.size < 512 * 1024) return; // ne olvassuk feleslegesen minden íráskor, csak ha már számottevő a fájl
+  const lines = fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8').split('\n').filter(Boolean);
+  if (lines.length > ACTIVITY_LOG_MAX_LINES) {
+    fs.writeFileSync(ACTIVITY_LOG_PATH, lines.slice(-ACTIVITY_LOG_TRIM_TO).join('\n') + '\n');
+  }
+}
+function readActivityLog(limit) {
+  let lines;
+  try { lines = fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8').split('\n').filter(Boolean); }
+  catch (_) { return []; }
+  return lines.slice(-limit).reverse().map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Hozzáférési kódok — az adószám ÖNMAGÁBAN NEM titok (Magyarországon bárki
+// lekérdezheti egy cég adószámát), ezért a bejelentkezéshez egy második,
+// tényleg titkos kódot is meg kell adni. Cégenként tárolva,
+// data/access-codes.json-ban: { "<companyKey>": { code, email } }.
+// Az "email" a legutóbb megadott/elmentett cím, amire a kódot kiküldtük —
+// csak kényelmi célból tárolt, hogy az admin panelen ne kelljen újra beírni.
+// Minden cég automatikusan kap egy kódot, amint először megjelenik az
+// indexben (induláskor a meglévőknek, első szinkronkor az újaknak) — ezt
+// az admin panelen lehet visszanézni / újragenerálni / kiküldeni.
+// ---------------------------------------------------------------------------
+const ACCESS_CODES_PATH = path.join(DATA_DIR, 'access-codes.json');
+
+function readAccessCodes() {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(ACCESS_CODES_PATH, 'utf8')); }
+  catch (_) { return {}; }
+  // migráció: korábbi verzióban codes[key] sima string volt (csak a kód)
+  for (const k of Object.keys(raw)) {
+    if (typeof raw[k] === 'string') raw[k] = { code: raw[k], email: '' };
+  }
+  return raw;
+}
+function writeAccessCodes(codes) {
+  fs.writeFileSync(ACCESS_CODES_PATH, JSON.stringify(codes, null, 2));
+}
+function generateAccessCode() {
+  // 6 jegyű, könnyen diktálható/begépelhető kód (nem base64 zagyvaság)
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+
+// ---------------------------------------------------------------------------
+// Jelszó-kezelés (felhasználói szintek: viszonteladó, cégtulajdonos,
+// üzletvezető) — scrypt-alapú, sózott hash, csak beépített node:crypto-val,
+// nincs hozzá külön npm-függőség.
+// ---------------------------------------------------------------------------
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const hashBuffer = Buffer.from(hash, 'hex');
+  const testHash = crypto.scryptSync(password, salt, 64);
+  return hashBuffer.length === testHash.length && crypto.timingSafeEqual(hashBuffer, testHash);
+}
+function generateInviteToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+const INVITE_VALID_MS = 48 * 60 * 60 * 1000; // 48 óra
+// Biztosítja, hogy MINDEN, az indexben szereplő cégnek legyen kódja —
+// hiányzóknak generál egyet, és elmenti. Induláskor és minden új
+// cég-regisztrációkor hívjuk.
+function ensureAccessCodes() {
+  const codes = readAccessCodes();
+  let changed = false;
+  const cegKulcsok = new Set([...companyIndex.values()].map((e) => e.cegKulcs));
+  for (const cegKulcs of cegKulcsok) {
+    if (!codes[cegKulcs]) { codes[cegKulcs] = { code: generateAccessCode(), email: '' }; changed = true; }
+  }
+  if (changed) writeAccessCodes(codes);
+  return codes;
+}
+ensureAccessCodes();
+
+// ---------------------------------------------------------------------------
+// Email küldés Brevón keresztül — a hozzáférési kód kiküldéséhez az admin
+// panelről. Nincs npm-függőség: a Node beépített fetch()-ét használja.
+// Konfiguráció (Render Environment fülön / .secrets.json-ban NEM tárolt,
+// mert nincs értelmes véletlen alapérték — ezt neked kell megadnod):
+//   BREVO_API_KEY      — a Brevo fiókod API-kulcsa
+//   BREVO_SENDER_EMAIL — a Brevo-ban ELLENŐRZÖTT feladó email cím
+//   BREVO_SENDER_NAME  — feladó neve (opcionális, van alapértelmezés)
+// ---------------------------------------------------------------------------
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || '';
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || 'L-NYUGTA rendszer';
+
+if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
+  console.log('[info] Nincs BREVO_API_KEY / BREVO_SENDER_EMAIL beállítva — az admin panel email-küldés funkciója nem fog működni, amíg ezeket meg nem adod (lásd README).');
+}
+
+function escapeHtmlServer(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function sendBrevoEmail({ toEmail, toName, subject, html }) {
+  if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
+    throw new Error('Nincs beállítva a Brevo email küldés (BREVO_API_KEY / BREVO_SENDER_EMAIL hiányzik).');
+  }
+  const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({
+      sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
+      to: [{ email: toEmail, name: toName || undefined }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+  if (!resp.ok) {
+    let detail = await resp.text();
+    try { detail = JSON.parse(detail).message || detail; } catch (_) {}
+    throw new Error(`Brevo hiba (${resp.status}): ${detail}`);
+  }
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Felhasználói meghívók — viszonteladó, cégtulajdonos, üzletvezető.
+// A meghívott egy kattintható linket kap emailben, amire saját maga állítja
+// be a jelszavát — SENKI MÁS (még a meghívó sem) nem ismeri/kezeli a
+// jelszót, ez szándékos biztonsági döntés.
+// ---------------------------------------------------------------------------
+const ROLE_LABELS = { reseller: 'viszonteladói', owner: 'cégtulajdonosi', manager: 'üzletvezetői' };
+
+function createInvite({ email, nev, role, cegKulcs, telephelyKod, resellerId, invitedBy }) {
+  email = String(email || '').trim().toLowerCase();
+  nev = String(nev || '').trim();
+  if (!email || !email.includes('@')) throw new Error('Érvénytelen email cím.');
+  if (!nev) throw new Error('A név megadása kötelező.');
+  const existing = usersDb.prepare('SELECT id, status FROM users WHERE email = ?').get(email);
+  if (existing && existing.status === 'active') throw new Error('Ezzel az email címmel már van aktív fiók.');
+  const token = generateInviteToken();
+  const expires = new Date(Date.now() + INVITE_VALID_MS).toISOString();
+  if (existing) {
+    usersDb.prepare(
+      `UPDATE users SET role=?, ceg_kulcs=?, telephely_kod=?, reseller_id=?, nev=?, invited_by=?, invite_token=?, invite_expires=?, status='pending' WHERE id=?`
+    ).run(role, cegKulcs || null, telephelyKod || null, resellerId || null, nev, invitedBy, token, expires, existing.id);
+  } else {
+    usersDb.prepare(
+      `INSERT INTO users (email, role, ceg_kulcs, telephely_kod, reseller_id, nev, invited_by, invite_token, invite_expires, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    ).run(email, role, cegKulcs || null, telephelyKod || null, resellerId || null, nev, invitedBy, token, expires, new Date().toISOString());
+  }
+  return token;
+}
+
+function buildInviteLink(req, token) {
+  const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+  return `${baseUrl}/?meghivo=${token}`;
+}
+
+async function sendInviteEmail(link, { email, nev, role }) {
+  const roleLabel = ROLE_LABELS[role] || '';
+  const nevSafe = escapeHtmlServer(nev);
+  const html = `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
+      <p>Kedves ${nevSafe}!</p>
+      <p>Meghívást kaptál az L-NYUGTA rendszerbe, ${roleLabel} jogosultsággal.</p>
+      <p>A fiókod aktiválásához és a jelszavad beállításához kattints az alábbi linkre
+         (48 óráig érvényes):</p>
+      <p style="margin:20px 0;"><a href="${link}" style="background:#5A93C9;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Meghívó elfogadása</a></p>
+      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt a meghívót, kérjük hagyd figyelmen kívül.</p>
+    </div>`;
+  await sendBrevoEmail({ toEmail: email, toName: nev, subject: 'L-NYUGTA — meghívó', html });
+}
+
+// ---------------------------------------------------------------------------
+// Apró segédfüggvények — session token (HMAC-aláírt, cookie-ban tárolt)
+// ---------------------------------------------------------------------------
+
+function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+
+function signSession(payload) {
+  const body = b64url(JSON.stringify(payload));
+  const sig = crypto.createHmac('sha256', SECRETS.sessionSecret).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+function verifySession(token) {
+  if (!token || !token.includes('.')) return null;
+  const [body, sig] = token.split('.');
+  const expected = crypto.createHmac('sha256', SECRETS.sessionSecret).update(body).digest('base64url');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!payload.exp || Date.now() > payload.exp) return null;
+    return payload;
+  } catch (_) { return null; }
+}
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach((part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Kis segédfüggvények a kérés/válasz kezeléshez
+// ---------------------------------------------------------------------------
+
+function sendJson(res, status, obj, extraHeaders = {}) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...extraHeaders });
+  res.end(body);
+}
+
+// ---------------------------------------------------------------------------
+// IT biztonsági segédfüggvények: valódi kliens-IP (reverse proxy mögött),
+// időzítés-biztos összehasonlítás, bejelentkezési rate-limit, biztonsági
+// HTTP-fejlécek.
+// ---------------------------------------------------------------------------
+
+// Az Apache reverse proxy mögött a req.socket.remoteAddress MINDIG a proxy
+// saját (loopback) címét adná vissza — ez a valódi kliens IP-jét olvassa ki
+// az X-Forwarded-For fejlécből (a lánc első, azaz legelső/eredeti címe).
+function getClientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+// Időzítés-biztos string-összehasonlítás (titkok/API-kulcsok/jelszavak
+// összevetésére) — eltérő hosszúságnál is kb. ugyanannyi ideig fut, hogy a
+// válaszidőből ne legyen kikövetkeztethető a helyes érték hossza/tartalma.
+function timingSafeStringEqual(a, b) {
+  const aBuf = Buffer.from(String(a == null ? '' : a), 'utf8');
+  const bBuf = Buffer.from(String(b == null ? '' : b), 'utf8');
+  if (aBuf.length !== bBuf.length) {
+    // Végzünk egy "álló" összehasonlítást is, hogy a hossz-eltérés se legyen
+    // gyorsabb/lassabb válaszidőből kitalálható, majd egyértelműen hamis.
+    crypto.timingSafeEqual(aBuf, aBuf);
+    return false;
+  }
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function verifySyncApiKey(apiKey) {
+  if (!apiKey) return false;
+  return timingSafeStringEqual(apiKey, SECRETS.syncApiKey);
+}
+
+// Bejelentkezési rate-limit: max 8 próbálkozás / 10 perc ablakonként,
+// utána 10 perces zárolás — IP + azonosító (email vagy 'admin') kulcs szerint.
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT_MAX_ATTEMPTS = 8;
+const RATE_LIMIT_LOCKOUT_MS = 10 * 60 * 1000;
+const loginAttempts = new Map(); // "ip::identifier" -> { count, windowStart, lockedUntil }
+
+function loginRateLimitKey(ip, identifier) {
+  return `${ip}::${String(identifier || '').toLowerCase()}`;
+}
+
+// Visszaadja, hogy szabad-e most próbálkozni; ha nem, meddig kell várni.
+function checkLoginRateLimit(ip, identifier) {
+  const key = loginRateLimitKey(ip, identifier);
+  const entry = loginAttempts.get(key);
+  const now = Date.now();
+  if (entry && entry.lockedUntil && now < entry.lockedUntil) {
+    return { allowed: false, retryAfterSeconds: Math.ceil((entry.lockedUntil - now) / 1000) };
+  }
+  return { allowed: true };
+}
+
+// Sikertelen/sikeres bejelentkezési kísérlet rögzítése. Siker esetén törli a
+// számlálót; sikertelen esetén növeli, és a küszöb elérésekor zárol.
+function recordLoginAttempt(ip, identifier, success) {
+  const key = loginRateLimitKey(ip, identifier);
+  const now = Date.now();
+  if (success) { loginAttempts.delete(key); return; }
+  let entry = loginAttempts.get(key);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { count: 0, windowStart: now, lockedUntil: 0 };
+  }
+  entry.count += 1;
+  if (entry.count >= RATE_LIMIT_MAX_ATTEMPTS) {
+    entry.lockedUntil = now + RATE_LIMIT_LOCKOUT_MS;
+  }
+  loginAttempts.set(key, entry);
+}
+
+// Óránkénti takarítás, hogy a memóriában ne gyűljenek a régen lejárt bejegyzések.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of loginAttempts.entries()) {
+    const windowExpired = now - entry.windowStart > RATE_LIMIT_WINDOW_MS;
+    const lockExpired = !entry.lockedUntil || now > entry.lockedUntil;
+    if (windowExpired && lockExpired) loginAttempts.delete(key);
+  }
+}, 60 * 60 * 1000).unref();
+
+function sendRateLimited(res, retryAfterSeconds) {
+  sendJson(res, 429, { error: 'Túl sok sikertelen bejelentkezési kísérlet. Próbáld újra később.', retryAfterSeconds }, { 'Retry-After': String(retryAfterSeconds) });
+}
+
+// Globális biztonsági HTTP-fejlécek — minden válaszra rákerülnek, mert a
+// kérés-kezelő legelején hívjuk meg (res.setHeader jelen esetben megelőzi és
+// összeolvad a későbbi res.writeHead / sendJson hívásokban átadott fejlécekkel).
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; " +
+    "base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://mypos.com"
+  );
+  if (COOKIE_SECURE) res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+}
+function readBody(req, limitBytes = 25 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limitBytes) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+async function readJsonBody(req) {
+  const buf = await readBody(req, 1024 * 1024);
+  if (!buf.length) return {};
+  try { return JSON.parse(buf.toString('utf8')); } catch (_) { return {}; }
+}
+// A myPOS (és általában bármilyen klasszikus HTML-form) POST kéréseket
+// "application/x-www-form-urlencoded" formában küldi, nem JSON-t — erre
+// külön, egyszerű olvasót kell használni.
+async function readFormBody(req) {
+  const buf = await readBody(req, 1024 * 1024);
+  const params = new URLSearchParams(buf.toString('utf8'));
+  const out = {};
+  for (const [k, v] of params) out[k] = v;
+  return out;
+}
+
+// Bejelentkezett munkamenet ELLENŐRZÉSE + hogy a hozzá tartozó cég még
+// ténylegesen létezik-e (pl. nem törölték időközben a .db fájlját).
+function requireAuth(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enysession);
+  if (!session || !session.companyKey || !companyIndex.has(session.companyKey)) return null;
+  return session;
+}
+
+// Cég-szintű ellenőrzés — elfogadja MIND a telephely-választás előtti
+// (companyKey == cégkulcs), MIND a már teljes (companyKey == "cégkulcs:kód")
+// munkameneteket. Ezt használja a telephely-lista lekérdezése, a
+// telephely-választás és a telephely-karbantartó.
+function requireCegAuth(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enysession);
+  if (!session || !session.cegKulcs) return null;
+  return session;
+}
+
+// Admin munkamenet — KÜLÖN cookie-ban (enyadmin), nem keverendő a cégenkénti
+// bejelentkezéssel. Az admin jelszava a data/.secrets.json-ban (vagy
+// ADMIN_PASSWORD env változóban) van, teljesen független a szinkron API kulcstól.
+function requireAdmin(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enyadmin);
+  if (!session || !session.isAdmin) return null;
+  return session;
+}
+
+// Viszonteladói munkamenet — szintén KÜLÖN cookie-ban (enyreseller).
+function requireReseller(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.enyreseller);
+  if (!session || !session.isReseller || !session.resellerId) return null;
+  return session;
+}
+
+// Dátum-tartomány normalizálása: alapértelmezés az utolsó 30 nap
+function todayIsoServer() { return new Date().toISOString().slice(0, 10); }
+
+function resolveRange(query) {
+  const today = new Date();
+  const toDefault = today.toISOString().slice(0, 10);
+  const fromDefault = new Date(today.getTime() - 29 * 86400000).toISOString().slice(0, 10);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : fromDefault;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : toDefault;
+  return { from, to };
+}
+
+const NOT_STORNO = "(IFNULL(storno,'N') != 'I' AND IFNULL(stornozott,'N') != 'I')";
+// A Magyarországon jelenleg érvényes ÁFA kulcsok (Áfa tv. 82. §) — 27%
+// általános, 18% és 5% kedvezményes. A "05%" (vezető nullás) formátum
+// szándékos: pontosan ez a jelölés van már használatban a valódi,
+// androidról szinkronizált adatokban (cikkt.afakod), ehhez igazodunk.
+const VALID_AFA_CODES = ['27%', '18%', '05%'];
+function notStorno(alias) { return `(IFNULL(${alias}.storno,'N') != 'I' AND IFNULL(${alias}.stornozott,'N') != 'I')`; }
+
+// ---------------------------------------------------------------------------
+// API route handlerek
+// ---------------------------------------------------------------------------
+
+const routes = [];
+function route(method, pattern, handler) { routes.push({ method, pattern, handler }); }
+
+/* ---------------------------------------------------------------------------
+   Kliensoldali (böngésző) hibák fogadása — /api/client-error
+
+   Szándékosan NEM igényel bejelentkezést: a legfontosabb hibák (pl. a
+   szkript elszállása a login képernyőn) pont belépés előtt történnek.
+   Emiatt viszont szigorúan védjük:
+     - max. 8 KB-os body (readBody limit),
+     - per-IP rate limit: legfeljebb 10 riport / 10 perc, felette csendben
+       eldobjuk (nem 429 — a támadónak ne adjunk visszajelzést),
+     - minden mezőt fix hosszra vágunk, csak string-eket fogadunk el,
+     - a riport csak a tevékenység-naplóba kerül (admin felületen látszik),
+       soha nem értelmezzük/futtatjuk a tartalmát.
+--------------------------------------------------------------------------- */
+const clientErrorReports = new Map(); // ip -> { count, windowStart }
+const CLIENT_ERROR_WINDOW_MS = 10 * 60 * 1000;
+const CLIENT_ERROR_MAX_PER_WINDOW = 10;
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of clientErrorReports.entries()) {
+    if (now - e.windowStart > CLIENT_ERROR_WINDOW_MS) clientErrorReports.delete(ip);
+  }
+}, 60 * 60 * 1000).unref();
+
+route('POST', '/api/client-error', async (req, res) => {
+  // A kliensnek mindig ok:true-t válaszolunk (kivéve érvénytelen JSON) —
+  // a hibariportolás soha nem okozhat további hibát a felhasználónál.
+  const ip = getClientIp(req);
+  const now = Date.now();
+  let entry = clientErrorReports.get(ip);
+  if (!entry || now - entry.windowStart > CLIENT_ERROR_WINDOW_MS) {
+    entry = { count: 0, windowStart: now };
+  }
+  entry.count += 1;
+  clientErrorReports.set(ip, entry);
+  if (entry.count > CLIENT_ERROR_MAX_PER_WINDOW) return sendJson(res, 200, { ok: true });
+
+  let body;
+  try { body = JSON.parse(await readBody(req, 8 * 1024)); } catch (_) { return sendJson(res, 400, { error: 'Érvénytelen kérés.' }); }
+  const cut = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const msg = cut(body.message, 500);
+  if (!msg) return sendJson(res, 200, { ok: true });
+  const session = requireAuth(req); // ha épp be van lépve, kössük a céghez
+  logActivity({
+    type: 'client_error',
+    ok: false,
+    companyKey: session ? session.companyKey : null,
+    nev: session ? session.nev : null,
+    detail: `${msg} @ ${cut(body.source, 200)}:${cut(String(body.line || ''), 10)} | url: ${cut(body.url, 200)} | ua: ${cut(req.headers['user-agent'] || '', 200)}${body.stack ? ' | stack: ' + cut(body.stack, 1000) : ''}`,
+    ip,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+
+// A korábbi, adószám+kód alapú bejelentkezés megszűnt — mostantól minden
+// nem-admin felhasználó (cégtulajdonos, üzletvezető) kizárólag egyéni,
+// email+jelszó alapú fiókkal léphet be (ld. POST /api/auth/user-login).
+
+route('POST', '/api/auth/logout', async (req, res) => {
+  const session = requireAuth(req);
+  if (session) logActivity({ type: 'company_logout', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Kijelentkezés.' });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enysession=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
+});
+
+route('GET', '/api/me', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  sendJson(res, 200, { company: { nev: session.nev, adoszam: session.adoszam }, sync: meta[session.companyKey] || { lastSync: null, source: null } });
+});
+
+// Telephelyek listája a bejelentkezett céghez — a telephely-választó
+// képernyő és a telephely-karbantartó felület használja. Cég-szintű
+// hitelesítés is elég hozzá (nem kell, hogy már ki legyen választva).
+route('GET', '/api/telephelyek', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem érhetők el más telephelyek.' });
+  const meta = readSyncMeta();
+  const telephelyek = listTelephelyek(session.cegKulcs).map((t) => {
+    const siteKey = makeSiteKey(session.cegKulcs, t.kod);
+    const site = companyIndex.get(siteKey);
+    return {
+      kod: t.kod, nev: t.nev, cim: t.cim || (site ? site.cim : ''),
+      vanAdat: !!site,
+      // csak akkor mutatunk szinkron-időpontot, ha a telephelynek TÉNYLEGESEN
+      // van élő adata is — különben egy elárvult sync-meta bejegyzés (pl.
+      // ideiglenes tárhely-törlés után) ellentmondásos képet adna
+      // ("MÉG NINCS ADAT" jelzés, de mégis van szinkron-dátum)
+      utolsoSzinkron: site ? (meta[siteKey]?.lastSync || null) : null,
+    };
+  });
+  sendJson(res, 200, { cegNev: session.nev, adoszam: session.adoszam, telephelyValasztva: !!session.telephelyKod, telephelyek });
+});
+
+// Telephely kiválasztása (vagy váltás egy másikra, ha már volt kiválasztva) —
+// új, teljes (telephely-szintű) munkamenetet ad.
+route('POST', '/api/telephely/select', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem válthatsz másik telephelyre.' });
+  const { telephelyKod } = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(telephelyKod);
+  const telephelyek = listTelephelyek(session.cegKulcs);
+  const t = telephelyek.find((x) => x.kod === kod);
+  if (!t) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+
+  const siteKey = makeSiteKey(session.cegKulcs, kod);
+  const site = companyIndex.get(siteKey);
+  const payload = {
+    companyKey: siteKey, cegKulcs: session.cegKulcs, telephelyKod: kod,
+    nev: site ? site.nev : session.nev, adoszam: site ? site.adoszam : session.adoszam,
+    exp: Date.now() + SESSION_MAX_AGE_MS,
+  };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+  logActivity({ type: 'telephely_select', ok: true, companyKey: siteKey, nev: payload.nev, detail: `Telephely kiválasztva: ${t.nev} (${kod})` });
+  sendJson(res, 200, {
+    ok: true,
+    company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
+    vanAdat: !!site,
+  }, { 'Set-Cookie': cookie });
+});
+
+// Új telephely felvétele (telephely-karbantartó). Cég-szintű hitelesítés
+// is elég — ki lehet bővíteni a telephely-választó képernyőről is,
+// anélkül hogy előbb ki kéne választani egy meglévőt.
+route('POST', '/api/telephely/create', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hozhatsz létre új telephelyet.' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.kod);
+  const nev = String(body.nev || '').trim();
+  const cim = String(body.cim || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+
+  const data = readTelephelyek();
+  if (!data[session.cegKulcs]) data[session.cegKulcs] = [];
+  if (data[session.cegKulcs].some((t) => t.kod === kod)) {
+    return sendJson(res, 400, { error: `Már létezik telephely "${kod}" kóddal — válassz másikat.` });
+  }
+  data[session.cegKulcs].push({ kod, nev, cim, letrehozva: new Date().toISOString() });
+  writeTelephelyek(data);
+  logActivity({ type: 'telephely_create', ok: true, companyKey: session.cegKulcs, nev: session.nev, detail: `Új telephely: ${nev} (${kod})` });
+  sendJson(res, 200, { ok: true, kod, nev, cim });
+});
+
+// Meglévő telephely nevének/címének szerkesztése (a kód, amivel az
+// androidos eszköz azonosítja magát, NEM módosítható itt — az a
+// szinkron-azonosítás kulcsa, átnevezés helyett új telephelyt kell
+// felvenni, ha tényleg más kód kellene).
+route('POST', '/api/telephely/update', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.kod);
+  if (session.role === 'manager' && kod !== session.telephelyKod) {
+    return sendJson(res, 403, { error: 'Üzletvezetőként csak a saját telephelyed adatait szerkesztheted.' });
+  }
+  const nev = String(body.nev || '').trim();
+  const cim = String(body.cim || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+
+  const data = readTelephelyek();
+  const list = data[session.cegKulcs] || [];
+  const t = list.find((x) => x.kod === kod);
+  if (!t) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  t.nev = nev; t.cim = cim;
+  writeTelephelyek(data);
+  logActivity({ type: 'telephely_update', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Telephely frissítve: ${nev} (${kod})` });
+  sendJson(res, 200, { ok: true, kod, nev, cim });
+});
+
+// Cég-profil: cégadatok (szinkronizált, csak olvasható), kapcsolattartási
+// email és a telephelyek listája egy helyen — a jövőbeli felhasználó- és
+// előfizetés-kezelés is ide fog kerülni.
+route('GET', '/api/profile', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const site = companyIndex.get(session.companyKey);
+  const codes = readAccessCodes();
+  const meta = readSyncMeta();
+  const telephelyek = listTelephelyek(session.cegKulcs).map((t) => {
+    const siteKey = makeSiteKey(session.cegKulcs, t.kod);
+    const s = companyIndex.get(siteKey);
+    return {
+      kod: t.kod, nev: t.nev, cim: t.cim || (s ? s.cim : ''),
+      vanAdat: !!s, aktiv: t.kod === session.telephelyKod,
+      utolsoSzinkron: s ? (meta[siteKey]?.lastSync || null) : null,
+    };
+  });
+  sendJson(res, 200, {
+    cegNev: site ? site.nev : session.nev,
+    adoszam: site ? site.adoszam : session.adoszam,
+    varos: site?.varos || '', cim: site?.cim || '',
+    email: codes[session.cegKulcs]?.email || '',
+    role: session.role || 'owner',
+    telephelyek,
+  });
+});
+
+route('POST', '/api/profile/email', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { email } = await readJsonBody(req);
+  const clean = String(email || '').trim();
+  if (clean && !clean.includes('@')) return sendJson(res, 400, { error: 'Érvénytelen email cím.' });
+  const codes = readAccessCodes();
+  codes[session.cegKulcs] = { ...(codes[session.cegKulcs] || {}), email: clean };
+  writeAccessCodes(codes);
+  logActivity({ type: 'profile_email_update', ok: true, companyKey: session.companyKey, nev: session.nev, detail: clean || '(törölve)' });
+  sendJson(res, 200, { ok: true, email: clean });
+});
+
+// ---------------------------------------------------------------------------
+// Meghívó elfogadása — NYILVÁNOS végpontok (token-alapú, nem igényel
+// bejelentkezést, hiszen a fiók pontosan itt jön létre).
+// ---------------------------------------------------------------------------
+route('GET', '/api/invite/info', async (req, res, query) => {
+  const token = String(query.token || '');
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
+  const u = usersDb.prepare(`SELECT email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
+  if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
+  sendJson(res, 200, { email: u.email, nev: u.nev, role: u.role, roleLabel: ROLE_LABELS[u.role] || u.role });
+});
+
+route('POST', '/api/invite/accept', async (req, res) => {
+  const { token, password } = await readJsonBody(req);
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
+  if (!password || String(password).length < 8) return sendJson(res, 400, { error: 'A jelszónak legalább 8 karakter hosszúnak kell lennie.' });
+  const u = usersDb.prepare(`SELECT id, email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
+  if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
+  usersDb.prepare(`UPDATE users SET password_hash = ?, status = 'active', invite_token = NULL, invite_expires = NULL WHERE id = ?`)
+    .run(hashPassword(String(password)), u.id);
+  logActivity({ type: 'user_invite_accepted', ok: true, companyKey: null, nev: u.nev, detail: `${u.email} (${u.role}) aktiválta a fiókját.` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Elfelejtett jelszó — cégtulajdonos, üzletvezető és viszonteladó fiókokra
+// egyaránt (az admin jelszava egy külön, megosztott jelszó, nincs hozzá
+// email-fiók, arra ez nem vonatkozik). UGYANAZT a token-mechanizmust
+// használja, mint a meghívó-elfogadás (invite_token/invite_expires), hogy
+// ne kelljen külön táblát/logikát fenntartani.
+// ---------------------------------------------------------------------------
+async function sendPasswordResetEmail(link, { email, nev }) {
+  const nevSafe = escapeHtmlServer(nev);
+  const html = `
+    <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
+      <p>Kedves ${nevSafe}!</p>
+      <p>Jelszó-visszaállítást kértél az L-NYUGTA rendszerben.</p>
+      <p>Az új jelszavad beállításához kattints az alábbi linkre (2 óráig érvényes):</p>
+      <p style="margin:20px 0;"><a href="${link}" style="background:#5A93C9;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Új jelszó beállítása</a></p>
+      <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted, nyugodtan hagyd figyelmen kívül ezt az e-mailt — a jelszavad nem változik, amíg nem kattintasz a linkre.</p>
+    </div>`;
+  await sendBrevoEmail({ toEmail: email, toName: nev, subject: 'L-NYUGTA — jelszó visszaállítása', html });
+}
+
+// A válasz SZÁNDÉKOSAN mindig ugyanaz, függetlenül attól, hogy létezik-e a
+// megadott email cím — enélkül a végpont felhasználható lenne annak
+// kitalálására, mely email címekhez tartozik fiók.
+route('POST', '/api/auth/forgot-password', async (req, res) => {
+  const { email } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const GENERIC_MSG = 'Ha ehhez az email címhez tartozik aktív fiók, hamarosan kapsz egy levelet a jelszó-visszaállításhoz.';
+  if (!clean) return sendJson(res, 200, { ok: true, message: GENERIC_MSG });
+
+  const u = usersDb.prepare(`SELECT id, email, nev, role, status FROM users WHERE email = ? AND role IN ('owner','manager','reseller')`).get(clean);
+  if (u && u.status === 'active') {
+    const token = crypto.randomBytes(24).toString('hex');
+    const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(); // 2 óra
+    usersDb.prepare(`UPDATE users SET invite_token = ?, invite_expires = ? WHERE id = ?`).run(token, expires, u.id);
+    const link = `${(req.headers['x-forwarded-proto'] || 'http')}://${req.headers.host}/?jelszo-visszaallitas=${token}`;
+    try {
+      await sendPasswordResetEmail(link, { email: u.email, nev: u.nev });
+      logActivity({ type: 'password_reset_requested', ok: true, companyKey: null, nev: u.nev, detail: `Jelszó-visszaállító email elküldve: ${u.email}` });
+    } catch (e) {
+      // Ha nincs beállítva Brevo (vagy hibázik a küldés), a linket SOHA nem
+      // adjuk vissza közvetlenül a kérelmezőnek (ez lehetővé tenné, hogy
+      // valaki más fiókját vegye át) — csak a szerver naplójába/tevékenység-
+      // naplóba kerül, hogy az admin manuálisan tudja továbbítani, ha kell.
+      console.warn(`[jelszó-visszaállítás] Email küldés sikertelen (${u.email}) — a link: ${link}`);
+      logActivity({ type: 'password_reset_requested', ok: false, companyKey: null, nev: u.nev, detail: `Email küldés sikertelen ${u.email} részére — a link a szerver naplójában.` });
+    }
+  }
+  sendJson(res, 200, { ok: true, message: GENERIC_MSG });
+});
+
+route('GET', '/api/auth/reset-password/check', async (req, res, query) => {
+  const token = String(query.token || '');
+  const u = usersDb.prepare(`SELECT nev, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u || u.status === 'disabled') return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált link.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a link lejárt — kérj egy újat.' });
+  sendJson(res, 200, { ok: true, nev: u.nev });
+});
+
+route('POST', '/api/auth/reset-password', async (req, res) => {
+  const { token, password } = await readJsonBody(req);
+  if (!token) return sendJson(res, 400, { error: 'Hiányzó token.' });
+  if (!password || String(password).length < 8) return sendJson(res, 400, { error: 'A jelszónak legalább 8 karakter hosszúnak kell lennie.' });
+  const u = usersDb.prepare(`SELECT id, email, nev, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  if (!u || u.status === 'disabled') return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált link.' });
+  if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a link lejárt — kérj egy újat.' });
+  usersDb.prepare(`UPDATE users SET password_hash = ?, invite_token = NULL, invite_expires = NULL WHERE id = ?`)
+    .run(hashPassword(String(password)), u.id);
+  logActivity({ type: 'password_reset_completed', ok: true, companyKey: null, nev: u.nev, detail: `${u.email} jelszava sikeresen megváltozott.` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Egyéni fiókos bejelentkezés — cégtulajdonos és üzletvezető.
+// A munkamenet UGYANOLYAN alakú, mint az adószám+kód bejelentkezésnél —
+// ez szándékos: minden meglévő végpont (requireAuth/requireCegAuth) így
+// változtatás nélkül működik tovább, akár adószám+kóddal, akár egyéni
+// fiókkal jelentkezett be valaki.
+// ---------------------------------------------------------------------------
+route('POST', '/api/auth/user-login', async (req, res) => {
+  const ip = getClientIp(req);
+  const { email, password } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const rl = checkLoginRateLimit(ip, clean);
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
+  const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role IN ('owner','manager')`).get(clean);
+  if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    recordLoginAttempt(ip, clean, false);
+    logActivity({ type: 'company_login', ok: false, companyKey: u ? u.ceg_kulcs : null, nev: null, detail: `Hibás egyéni belépés: ${clean}`, ip });
+    return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
+  }
+  recordLoginAttempt(ip, clean, true);
+
+  if (u.role === 'manager') {
+    // Üzletvezető — mindig egy KONKRÉT, rögzített telephelyre szól a hozzáférése.
+    const siteKey = makeSiteKey(u.ceg_kulcs, u.telephely_kod);
+    const site = companyIndex.get(siteKey);
+    const telephelyInfo = listTelephelyek(u.ceg_kulcs).find((t) => t.kod === u.telephely_kod);
+    const payload = {
+      companyKey: siteKey, cegKulcs: u.ceg_kulcs, telephelyKod: u.telephely_kod, role: 'manager',
+      nev: site ? site.nev : u.nev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
+    };
+    const token = signSession(payload);
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+    logActivity({ type: 'company_login', ok: true, companyKey: siteKey, nev: u.nev, detail: `Üzletvezetői belépés: ${clean}`, ip });
+    return sendJson(res, 200, {
+      ok: true, telephelyValasztva: true, vanAdat: !!site,
+      company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: telephelyInfo?.nev || u.telephely_kod },
+    }, { 'Set-Cookie': cookie });
+  }
+
+  // owner — a cég egészéhez fér hozzá, pontosan úgy, mint az adószám+kód bejelentkezésnél.
+  const telephelyek = listTelephelyek(u.ceg_kulcs);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === u.ceg_kulcs);
+  const displayNev = anySite ? anySite.nev : u.nev;
+  logActivity({ type: 'company_login', ok: true, companyKey: u.ceg_kulcs, nev: displayNev, detail: `Egyéni (cégtulajdonosi) belépés: ${clean}`, ip });
+
+  if (telephelyek.length === 1) {
+    const t = telephelyek[0];
+    const siteKey = makeSiteKey(u.ceg_kulcs, t.kod);
+    const site = companyIndex.get(siteKey);
+    const payload = {
+      companyKey: siteKey, cegKulcs: u.ceg_kulcs, telephelyKod: t.kod,
+      nev: site ? site.nev : displayNev, adoszam: site ? site.adoszam : u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS,
+    };
+    const token = signSession(payload);
+    const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+    return sendJson(res, 200, {
+      ok: true, telephelyValasztva: true, vanAdat: !!site,
+      company: { nev: payload.nev, adoszam: payload.adoszam, varos: site?.varos, cim: site?.cim, telephelyNev: t.nev },
+    }, { 'Set-Cookie': cookie });
+  }
+
+  const payload = { companyKey: u.ceg_kulcs, cegKulcs: u.ceg_kulcs, telephelyKod: null, nev: displayNev, adoszam: u.ceg_kulcs, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+  sendJson(res, 200, { ok: true, telephelyValasztva: false, company: { nev: displayNev, adoszam: u.ceg_kulcs } }, { 'Set-Cookie': cookie });
+});
+
+// ---------------------------------------------------------------------------
+// Viszonteladói bejelentkezés — külön munkamenet-cookie (enyreseller),
+// nem keveredik a cégek/admin munkamenetével.
+// ---------------------------------------------------------------------------
+route('POST', '/api/auth/reseller-login', async (req, res) => {
+  const ip = getClientIp(req);
+  const { email, password } = await readJsonBody(req);
+  const clean = String(email || '').trim().toLowerCase();
+  const rl = checkLoginRateLimit(ip, clean);
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
+  const u = usersDb.prepare(`SELECT * FROM users WHERE email = ? AND role = 'reseller'`).get(clean);
+  if (!u || u.status !== 'active' || !verifyPassword(String(password || ''), u.password_hash)) {
+    recordLoginAttempt(ip, clean, false);
+    logActivity({ type: 'reseller_login', ok: false, companyKey: null, nev: null, detail: `Hibás viszonteladói belépés: ${clean}`, ip });
+    return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
+  }
+  recordLoginAttempt(ip, clean, true);
+  const payload = { isReseller: true, resellerId: u.id, nev: u.nev, email: u.email, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enyreseller=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+  logActivity({ type: 'reseller_login', ok: true, companyKey: null, nev: u.nev, detail: clean, ip });
+  sendJson(res, 200, { ok: true, nev: u.nev, email: u.email }, { 'Set-Cookie': cookie });
+});
+
+route('POST', '/api/auth/reseller-logout', async (req, res) => {
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyreseller=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
+});
+
+// A viszonteladó KIZÁRÓLAG a saját ügyfeleit látja — más viszonteladók
+// cégeihez semmilyen rálátása nincs, ahogy kérted ("nincs átjárás").
+route('GET', '/api/reseller/overview', async (req, res) => {
+  const reseller = requireReseller(req);
+  if (!reseller) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const codes = readAccessCodes();
+  const myCegKulcsok = new Set(
+    Object.entries(codes).filter(([, v]) => v.resellerId === reseller.resellerId).map(([k]) => k)
+  );
+  const meta = readSyncMeta();
+  const companies = [...companyIndex.entries()]
+    .filter(([, entry]) => myCegKulcsok.has(entry.cegKulcs))
+    .map(([key, entry]) => {
+      const telephelyInfo = listTelephelyek(entry.cegKulcs).find((t) => t.kod === entry.telephelyKod);
+      return {
+        key, cegKulcs: entry.cegKulcs, telephelyKod: entry.telephelyKod, telephelyNev: telephelyInfo?.nev || entry.telephelyKod,
+        nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+        ...(meta[key] || { lastSync: null, source: null, bytes: null }),
+      };
+    })
+    .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
+  sendJson(res, 200, { reseller: { nev: reseller.nev, email: reseller.email }, companies });
+});
+
+// Viszonteladó új ügyfelet ("cégtulajdonos" szintű felhasználót) hív meg —
+// ez egyúttal elő is regisztrálja az új céget (adószám alapján), ha még
+// nem létezne, hogy legyen hova az első androidos szinkronnak megérkeznie.
+route('POST', '/api/reseller/invite-owner', async (req, res) => {
+  const reseller = requireReseller(req);
+  if (!reseller) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cegKulcs = companyKeyFromAdoszam(body.adoszam);
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+
+  const codes = readAccessCodes();
+  if (!codes[cegKulcs]) codes[cegKulcs] = { code: generateAccessCode(), email: '' };
+  codes[cegKulcs].resellerId = reseller.resellerId;
+  writeAccessCodes(codes);
+  ensureTelephely(cegKulcs, '01', 'Fő telephely');
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role: 'owner', cegKulcs, resellerId: reseller.resellerId, invitedBy: reseller.email });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role: 'owner' }); }
+  catch (e) { emailWarning = e.message; } // a fiók/meghívó ettől még létrejött, csak az email nem ment ki
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: reseller.nev, detail: `Cégtulajdonos meghívva: ${email} (${nev}), adószám: ${cegKulcs}` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
+});
+
+// Cégtulajdonos (a Profil oldalról) üzletvezetőt hív meg egy konkrét
+// telephelyére.
+route('POST', '/api/profile/invite-manager', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hívhatsz meg új felhasználót.' });
+  const body = await readJsonBody(req);
+  const kod = normalizeTelephelyKod(body.telephelyKod);
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+  if (!listTelephelyek(session.cegKulcs).some((t) => t.kod === kod)) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role: 'manager', cegKulcs: session.cegKulcs, telephelyKod: kod, invitedBy: session.nev });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role: 'manager' }); }
+  catch (e) { emailWarning = e.message; }
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Üzletvezető meghívva: ${email} (${nev})` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
+});
+
+// ---------------------------------------------------------------------------
+// Eszköz-karbantartó — céges (nem admin) felhasználóknak. Cégtulajdonos
+// a TELJES céget látja (minden telephely eszközét), üzletvezető CSAK a
+// saját telephelyéét — ugyanaz a szabály, mint minden más üzletvezetői
+// korlátozásnál ebben a rendszerben.
+route('GET', '/api/profile/devices', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = session.role === 'manager'
+    ? licenseDb.prepare('SELECT * FROM company_devices WHERE ceg_kulcs = ? AND telephely_kod = ? ORDER BY elso_latott').all(session.cegKulcs, session.telephelyKod)
+    : licenseDb.prepare('SELECT * FROM company_devices WHERE ceg_kulcs = ? ORDER BY elso_latott').all(session.cegKulcs);
+  sendJson(res, 200, {
+    devices: rows.map((d) => ({
+      id: d.id, eszkozAzonosito: d.eszkoz_azonosito, telephelyKod: d.telephely_kod, nev: d.nev,
+      progtip: d.progtip, verzio: d.verzio, elsoLatott: d.elso_latott, utolsoLatott: d.utolso_latott,
+    })),
+  });
+});
+
+route('POST', '/api/profile/devices/rename', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev } = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT id, ceg_kulcs, telephely_kod FROM company_devices WHERE id = ?').get(id);
+  if (!device || device.ceg_kulcs !== session.cegKulcs) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  if (session.role === 'manager' && device.telephely_kod !== session.telephelyKod) {
+    return sendJson(res, 403, { error: 'Ez az eszköz nem a te telephelyedhez tartozik.' });
+  }
+  licenseDb.prepare('UPDATE company_devices SET nev = ? WHERE id = ?').run(String(nev || '').trim() || null, id);
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/profile/devices/remove', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT id, ceg_kulcs, telephely_kod FROM company_devices WHERE id = ?').get(id);
+  if (!device || device.ceg_kulcs !== session.cegKulcs) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  if (session.role === 'manager' && device.telephely_kod !== session.telephelyKod) {
+    return sendJson(res, 403, { error: 'Ez az eszköz nem a te telephelyedhez tartozik.' });
+  }
+  licenseDb.prepare('DELETE FROM company_devices WHERE id = ?').run(id);
+  sendJson(res, 200, { ok: true });
+});
+
+// Előfizetés-állapot a cég saját felhasználóinak — alap regisztráltság,
+// elérhető csomagok (árral), és a saját fizetési előzmény.
+route('GET', '/api/profile/subscription', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const sub = licenseDb.prepare('SELECT aktiv, megjegyzes FROM company_subscription WHERE ceg_kulcs = ?').get(session.cegKulcs);
+  const packages = licenseDb.prepare('SELECT id, nev, leiras, ar FROM license_packages WHERE aktiv = 1 AND ar > 0 ORDER BY sorrend, nev').all();
+  const payments = licenseDb.prepare('SELECT order_id, cel, osszeg, penznem, allapot, letrehozva FROM license_payments WHERE ceg_kulcs = ? ORDER BY letrehozva DESC LIMIT 20').all(session.cegKulcs);
+  sendJson(res, 200, {
+    alapElofizetesAktiv: !sub || !!sub.aktiv,
+    megjegyzes: sub ? sub.megjegyzes : null,
+    alapElofizetesAra: parseInt(process.env.ALAP_ELOFIZETES_AR_HUF || '0', 10) || null,
+    myposElerheto: myposConfigured(),
+    csomagok: packages,
+    fizetesek: payments.map((p) => ({ orderId: p.order_id, cel: p.cel, osszeg: p.osszeg, penznem: p.penznem, allapot: p.allapot, letrehozva: p.letrehozva })),
+  });
+});
+
+// Admin: viszonteladó, cégtulajdonos vagy üzletvezető meghívása —
+// bármelyik szintre, bármelyik céghez/telephelyhez.
+route('POST', '/api/admin/invite-user', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const role = String(body.role || '');
+  if (!['reseller', 'owner', 'manager'].includes(role)) return sendJson(res, 400, { error: 'Érvénytelen szerepkör.' });
+  const email = String(body.email || '').trim();
+  const nev = String(body.nev || '').trim();
+  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+
+  let cegKulcs = null, telephelyKod = null;
+  if (role === 'owner' || role === 'manager') {
+    cegKulcs = companyKeyFromAdoszam(body.adoszam);
+    if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const codes = readAccessCodes();
+    if (!codes[cegKulcs]) { codes[cegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(cegKulcs, '01', 'Fő telephely');
+    if (role === 'manager') {
+      telephelyKod = normalizeTelephelyKod(body.telephelyKod);
+      if (!listTelephelyek(cegKulcs).some((t) => t.kod === telephelyKod)) return sendJson(res, 404, { error: 'Ismeretlen telephely ennél a cégnél.' });
+    }
+  }
+
+  let token;
+  try {
+    token = createInvite({ email, nev, role, cegKulcs, telephelyKod, invitedBy: 'admin' });
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const link = buildInviteLink(req, token);
+  let emailWarning = null;
+  try { await sendInviteEmail(link, { email, nev, role }); }
+  catch (e) { emailWarning = e.message; }
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `${ROLE_LABELS[role]} meghívva: ${email} (${nev})` });
+  sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
+});
+
+// Felhasználók listája — hierarchia szerint kiegészítve (viszonteladó neve,
+// cégnév, telephely neve), hogy az admin panel csoportosítva tudja mutatni.
+route('GET', '/api/admin/users', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = usersDb.prepare(
+    `SELECT id, email, role, ceg_kulcs, telephely_kod, reseller_id, nev, invited_by, status, created_at FROM users ORDER BY created_at DESC`
+  ).all();
+  const resellerNevByld = new Map(rows.filter((r) => r.role === 'reseller').map((r) => [r.id, r.nev]));
+  const users = rows.map((u) => {
+    let cegNev = null, telephelyNev = null;
+    if (u.ceg_kulcs) {
+      const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === u.ceg_kulcs);
+      cegNev = anySite ? anySite.nev : u.ceg_kulcs;
+      if (u.telephely_kod) {
+        const t = listTelephelyek(u.ceg_kulcs).find((x) => x.kod === u.telephely_kod);
+        telephelyNev = t ? t.nev : u.telephely_kod;
+      }
+    }
+    return {
+      id: u.id, email: u.email, nev: u.nev, role: u.role, status: u.status,
+      cegKulcs: u.ceg_kulcs, cegNev, telephelyKod: u.telephely_kod, telephelyNev,
+      resellerId: u.reseller_id, resellerNev: u.reseller_id ? (resellerNevByld.get(u.reseller_id) || null) : null,
+      invitedBy: u.invited_by, createdAt: u.created_at,
+    };
+  });
+  sendJson(res, 200, { users });
+});
+
+// Felhasználó szerkesztése — csak a nevet és az állapotot (aktív/letiltva)
+// lehet módosítani. A szerepkör/cég/telephely szándékosan NEM módosítható
+// itt (ha ez kellene, töröld és hívd meg újra a megfelelő szinttel).
+route('POST', '/api/admin/users/update', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, status, cegKulcs, telephelyKod } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev, role FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  const cleanNev = String(nev || '').trim();
+  if (!cleanNev) return sendJson(res, 400, { error: 'A név megadása kötelező.' });
+  if (!['active', 'disabled', 'pending'].includes(status)) return sendJson(res, 400, { error: 'Érvénytelen állapot.' });
+
+  let detail = `${u.email}: név/állapot módosítva (${status})`;
+  if (u.role === 'owner') {
+    // Cégtulajdonos áthelyezhető egy másik (akár még nem szinkronizált) céghez.
+    const newCegKulcs = companyKeyFromAdoszam(cegKulcs || '');
+    if (newCegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const codes = readAccessCodes();
+    if (!codes[newCegKulcs]) { codes[newCegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(newCegKulcs, '01', 'Fő telephely');
+    usersDb.prepare('UPDATE users SET nev = ?, status = ?, ceg_kulcs = ?, telephely_kod = NULL WHERE id = ?').run(cleanNev, status, newCegKulcs, id);
+    detail += `, cég: ${newCegKulcs}`;
+  } else if (u.role === 'manager') {
+    // Üzletvezető áthelyezhető egy másik cég/telephely párosra.
+    const newCegKulcs = companyKeyFromAdoszam(cegKulcs || '');
+    if (newCegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+    const newTelephelyKod = normalizeTelephelyKod(telephelyKod || '01');
+    const codes = readAccessCodes();
+    if (!codes[newCegKulcs]) { codes[newCegKulcs] = { code: generateAccessCode(), email: '' }; writeAccessCodes(codes); }
+    ensureTelephely(newCegKulcs, '01', 'Fő telephely');
+    if (!listTelephelyek(newCegKulcs).some((t) => t.kod === newTelephelyKod)) {
+      return sendJson(res, 404, { error: 'Ismeretlen telephely ennél a cégnél.' });
+    }
+    usersDb.prepare('UPDATE users SET nev = ?, status = ?, ceg_kulcs = ?, telephely_kod = ? WHERE id = ?').run(cleanNev, status, newCegKulcs, newTelephelyKod, id);
+    detail += `, cég/telephely: ${newCegKulcs}/${newTelephelyKod}`;
+  } else {
+    usersDb.prepare('UPDATE users SET nev = ?, status = ? WHERE id = ?').run(cleanNev, status, id);
+  }
+  logActivity({ type: 'user_update', ok: true, companyKey: null, nev: 'admin', detail });
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/users/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, role, nev FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  if (u.role === 'reseller') {
+    const dependentCount = usersDb.prepare(`SELECT COUNT(*) AS c FROM users WHERE reseller_id = ?`).get(id).c;
+    if (dependentCount > 0) {
+      return sendJson(res, 400, { error: `Ez a viszonteladó ${dependentCount} céghez van rendelve — előbb azokat rendeld át vagy töröld.` });
+    }
+  }
+  usersDb.prepare('DELETE FROM users WHERE id = ?').run(id);
+  logActivity({ type: 'user_delete', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `${u.email} (${u.role}) törölve` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Admin által kezdeményezett jelszó-visszaállítás — pl. ha egy felhasználó
+// telefonon elakadt (rossz jelszó, zárolás), az admin KÖZVETLENÜL tud neki
+// egy friss, azonnal használható linket adni, anélkül hogy a felhasználónak
+// magának kellene végigmennie az "elfelejtett jelszó" e-mailes folyamaton.
+// (Az admin már hitelesített/megbízható, ezért itt — a nyilvános
+// "elfelejtett jelszó" végponttól eltérően — biztonságosan visszaadható a
+// link közvetlenül a válaszban.)
+route('POST', '/api/admin/users/reset-link', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev, role, status FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  if (u.status === 'disabled') return sendJson(res, 400, { error: 'Ez a felhasználó le van tiltva — előbb aktiváld, ha jelszót akarsz neki adni.' });
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  usersDb.prepare(`UPDATE users SET invite_token = ?, invite_expires = ?, status = 'active' WHERE id = ?`).run(token, expires, id);
+  const link = `${(req.headers['x-forwarded-proto'] || 'http')}://${req.headers.host}/?jelszo-visszaallitas=${token}`;
+  logActivity({ type: 'password_reset_admin', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `Admin jelszó-visszaállító linket generált: ${u.email} részére` });
+  sendJson(res, 200, { ok: true, link });
+});
+
+// Bejelentkezési zárolás feloldása egy adott felhasználóra — az EMAIL
+// CÍMÉHEZ tartozó összes zárolást töröljük, függetlenül attól, melyik
+// IP-címről érkeztek a sikertelen próbálkozások (a felhasználó telefonja
+// gyakran más IP-t kap Wifi és mobilnet között váltva, ezért nem elég
+// csak egyetlen konkrét IP-t feloldani).
+route('POST', '/api/admin/users/clear-lockout', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const u = usersDb.prepare('SELECT id, email, nev FROM users WHERE id = ?').get(id);
+  if (!u) return sendJson(res, 404, { error: 'Ismeretlen felhasználó.' });
+  const emailLower = u.email.toLowerCase();
+  let removed = 0;
+  for (const key of [...loginAttempts.keys()]) {
+    if (key.endsWith(`::${emailLower}`)) { loginAttempts.delete(key); removed++; }
+  }
+  logActivity({ type: 'login_lockout_cleared', ok: true, companyKey: u.ceg_kulcs || null, nev: 'admin', detail: `Bejelentkezési zárolás feloldva: ${u.email} (${removed} bejegyzés törölve)` });
+  sendJson(res, 200, { ok: true, removed });
+});
+
+// ---------------------------------------------------------------------------
+// Admin — Licenc-kezelés
+// ---------------------------------------------------------------------------
+
+// Funkció-katalógus listája (aktív és kivezetett is, hogy a korábban
+// kiosztott, de már kivezetett funkciók se tűnjenek el nyomtalanul).
+route('GET', '/api/admin/license/features', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = licenseDb.prepare(`SELECT key, nev, leiras, alap_ar, aktiv, sorrend FROM license_features ORDER BY sorrend, nev`).all();
+  sendJson(res, 200, {
+    features: rows.map((r) => ({ key: r.key, nev: r.nev, leiras: r.leiras || '', alapAr: r.alap_ar, aktiv: !!r.aktiv, sorrend: r.sorrend })),
+  });
+});
+
+// Funkció felvétele / szerkesztése (upsert `key` alapján). Ha nincs `key`
+// megadva, a névből generálunk egyet — de admin megadhat SAJÁT, explicit
+// kulcsot is felvételkor (pl. hogy pontosan az androidos appban már
+// hardkódolt funkció-azonosítót használja, ne egy AI-generált slugot).
+// Meglévő kulcs átnevezésére (a company_licenses kiosztásokkal együtt)
+// külön végpont van: /api/admin/license/features/rename-key.
+// Egy már ÉLŐ, meglévő katalógusnál is biztonságosan pótolja a valós,
+// Androidban hardkódolt kulcsok közül azokat, amik MÉG NINCSENEK benne —
+// ami már megvan (akár a régi, AI-tippre generált néven), azt EGYÁLTALÁN
+// NEM bántja. A meglévő, feleslegessé vált kulcsokat ezután kézzel,
+// szabadon átnevezheted (rename-key) vagy törölheted, a saját tempódban.
+route('POST', '/api/admin/license/features/seed-real', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const now = new Date().toISOString();
+  const added = [];
+  for (const [key, nev, leiras, alapAr, sorrend] of REAL_LICENSE_FEATURE_DEFAULTS) {
+    const exists = licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(key);
+    if (exists) continue;
+    licenseDb.prepare(
+      `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)`
+    ).run(key, nev, leiras, alapAr, sorrend, now);
+    added.push(key);
+  }
+  if (added.length) {
+    logActivity({ type: 'license_feature_seed_real', ok: true, companyKey: null, nev: 'admin', detail: `Hiányzó valós funkciók pótolva: ${added.join(', ')}` });
+  }
+  sendJson(res, 200, { ok: true, added });
+});
+
+// A katalógusban lévő, de a valós 12 azonosító közé NEM tartozó ("kamu",
+// régi AI-tippre generált) bejegyzések eltávolítása — csak azokat törli,
+// amik SEHOL nincsenek kiosztva egyetlen cégnél sem (ugyanaz a védelem,
+// mint az egyenkénti törlésnél). Amit nem tud törölni, azt jelenti.
+route('POST', '/api/admin/license/features/remove-fake', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const realKeys = new Set(REAL_LICENSE_FEATURE_DEFAULTS.map((d) => d[0]));
+  const all = licenseDb.prepare('SELECT key, nev FROM license_features').all();
+  const removed = [];
+  const skipped = [];
+  for (const f of all) {
+    if (realKeys.has(f.key)) continue;
+    const inUse = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_licenses WHERE feature_key = ?').get(f.key).c;
+    if (inUse > 0) { skipped.push(`${f.nev} (${f.key}) — ${inUse} cégnél kiosztva`); continue; }
+    licenseDb.prepare('DELETE FROM license_features WHERE key = ?').run(f.key);
+    removed.push(f.key);
+  }
+  if (removed.length) {
+    logActivity({ type: 'license_feature_remove_fake', ok: true, companyKey: null, nev: 'admin', detail: `Kamu funkciók törölve: ${removed.join(', ')}` });
+  }
+  sendJson(res, 200, { ok: true, removed, skipped });
+});
+
+route('POST', '/api/admin/license/features/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const nev = String(body.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'A funkció nevének megadása kötelező.' });
+  const alapAr = Math.max(0, parseInt(body.alapAr, 10) || 0);
+  const sorrend = parseInt(body.sorrend, 10) || 0;
+  const aktiv = body.aktiv === false ? 0 : 1;
+  const leiras = String(body.leiras || '').trim();
+  let key = String(body.key || '').trim();
+  const existing = key ? licenseDb.prepare('SELECT key FROM license_features WHERE key = ?').get(key) : null;
+  const isNew = !existing;
+  if (isNew) {
+    if (!key) {
+      key = slugifyFeatureKey(nev);
+      // Ütközés esetén (ugyanaz a slug már foglalt) számot fűzünk a végére.
+      let candidate = key, n = 2;
+      while (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(candidate)) {
+        candidate = `${key}_${n}`; n += 1;
+      }
+      key = candidate;
+    }
+    licenseDb.prepare(
+      `INSERT INTO license_features (key, nev, leiras, alap_ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(key, nev, leiras, alapAr, aktiv, sorrend, new Date().toISOString());
+    logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Új funkció felvéve: ${nev} (${key})` });
+  } else {
+    licenseDb.prepare(
+      `UPDATE license_features SET nev = ?, leiras = ?, alap_ar = ?, aktiv = ?, sorrend = ? WHERE key = ?`
+    ).run(nev, leiras, alapAr, aktiv, sorrend, key);
+    logActivity({ type: 'license_feature_save', ok: true, companyKey: null, nev: 'admin', detail: `Funkció módosítva: ${nev} (${key})` });
+  }
+  sendJson(res, 200, { ok: true, key });
+});
+
+// Meglévő funkció-kulcs átnevezése — arra kell, ha egy korábban tippre
+// felvett kulcsot utólag az androidos appban ténylegesen használt, fix
+// azonosítóra kell cserélni. A már kiosztott company_licenses sorokat is
+// átvezeti az új kulcsra, hogy egyetlen meglévő cég licence se vesszen el.
+route('POST', '/api/admin/license/features/rename-key', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { key, ujKulcs } = await readJsonBody(req);
+  const regi = String(key || '').trim();
+  const uj = String(ujKulcs || '').trim();
+  if (!regi || !uj) return sendJson(res, 400, { error: 'Hiányzó régi vagy új kulcs.' });
+  if (regi === uj) return sendJson(res, 200, { ok: true, key: uj });
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(regi);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  if (licenseDb.prepare('SELECT 1 FROM license_features WHERE key = ?').get(uj)) {
+    return sendJson(res, 400, { error: 'Az új kulcs már foglalt egy másik funkciónál.' });
+  }
+  licenseDb.prepare('UPDATE license_features SET key = ? WHERE key = ?').run(uj, regi);
+  licenseDb.prepare('UPDATE company_licenses SET feature_key = ? WHERE feature_key = ?').run(uj, regi);
+  logActivity({ type: 'license_feature_rename', ok: true, companyKey: null, nev: 'admin', detail: `Funkció-kulcs átnevezve: ${feature.nev} (${regi} → ${uj})` });
+  sendJson(res, 200, { ok: true, key: uj });
+});
+
+// Funkció törlése a katalógusból — csak akkor engedjük, ha egyetlen cég
+// sem rendelkezik vele (különben inkább kapcsold ki az "aktív" jelzőt).
+route('POST', '/api/admin/license/features/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { key } = await readJsonBody(req);
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(key);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  const inUse = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_licenses WHERE feature_key = ?').get(key).c;
+  if (inUse > 0) {
+    return sendJson(res, 400, { error: `Ez a funkció ${inUse} cégnél van kiosztva — előbb vond vissza azoknál, vagy kapcsold ki helyette az "aktív" jelzőt.` });
+  }
+  licenseDb.prepare('DELETE FROM license_features WHERE key = ?').run(key);
+  logActivity({ type: 'license_feature_delete', ok: true, companyKey: null, nev: 'admin', detail: `Funkció törölve a katalógusból: ${feature.nev} (${key})` });
+  sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// CSOMAGOK — egyszerű, kényelmi gyűjtőnevek a katalógus funkcióira. Egy
+// csomag csak azt adja meg, mely funkciók tartoznak bele; a tényleges
+// hozzáférés-kiosztás mindig a meglévő company_licenses táblát írja.
+// ---------------------------------------------------------------------------
+route('GET', '/api/admin/license/packages', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const packages = licenseDb.prepare('SELECT id, nev, leiras, ar, aktiv, sorrend FROM license_packages ORDER BY sorrend, nev').all();
+  const featureRows = licenseDb.prepare('SELECT package_id, feature_key FROM license_package_features').all();
+  const featuresByPkg = new Map();
+  for (const r of featureRows) {
+    if (!featuresByPkg.has(r.package_id)) featuresByPkg.set(r.package_id, []);
+    featuresByPkg.get(r.package_id).push(r.feature_key);
+  }
+  sendJson(res, 200, {
+    packages: packages.map((p) => ({ ...p, aktiv: !!p.aktiv, featureKeys: featuresByPkg.get(p.id) || [] })),
+  });
+});
+
+// Csomag létrehozása/módosítása — upsert id szerint (id nélkül új).
+route('POST', '/api/admin/license/packages/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, leiras, ar, aktiv, sorrend, featureKeys } = await readJsonBody(req);
+  const cleanNev = String(nev || '').trim();
+  if (!cleanNev) return sendJson(res, 400, { error: 'A csomag nevének megadása kötelező.' });
+  const cleanAr = Math.max(0, parseInt(ar, 10) || 0);
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  const cleanSorrend = parseInt(sorrend, 10) || 0;
+  const cleanKeys = Array.isArray(featureKeys) ? featureKeys.filter((k) => typeof k === 'string' && k) : [];
+  // Csak létező katalógus-kulcsokat fogadunk el a csomagba.
+  const validKeys = new Set(licenseDb.prepare('SELECT key FROM license_features').all().map((r) => r.key));
+  const finalKeys = cleanKeys.filter((k) => validKeys.has(k));
+
+  let pkgId = id ? parseInt(id, 10) : null;
+  if (pkgId) {
+    const exists = licenseDb.prepare('SELECT id FROM license_packages WHERE id = ?').get(pkgId);
+    if (!exists) return sendJson(res, 404, { error: 'Ismeretlen csomag.' });
+    licenseDb.prepare('UPDATE license_packages SET nev = ?, leiras = ?, ar = ?, aktiv = ?, sorrend = ? WHERE id = ?')
+      .run(cleanNev, leiras || null, cleanAr, cleanAktiv, cleanSorrend, pkgId);
+  } else {
+    const result = licenseDb.prepare(
+      'INSERT INTO license_packages (nev, leiras, ar, aktiv, sorrend, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(cleanNev, leiras || null, cleanAr, cleanAktiv, cleanSorrend, new Date().toISOString());
+    pkgId = Number(result.lastInsertRowid);
+  }
+  licenseDb.prepare('DELETE FROM license_package_features WHERE package_id = ?').run(pkgId);
+  for (const key of finalKeys) {
+    licenseDb.prepare('INSERT INTO license_package_features (package_id, feature_key) VALUES (?, ?)').run(pkgId, key);
+  }
+  logActivity({ type: 'license_package_save', ok: true, companyKey: null, nev: 'admin', detail: `Csomag mentve: ${cleanNev} (${finalKeys.length} funkció)` });
+  sendJson(res, 200, { ok: true, id: pkgId });
+});
+
+route('POST', '/api/admin/license/packages/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const pkg = licenseDb.prepare('SELECT nev FROM license_packages WHERE id = ?').get(id);
+  if (!pkg) return sendJson(res, 404, { error: 'Ismeretlen csomag.' });
+  licenseDb.prepare('DELETE FROM license_package_features WHERE package_id = ?').run(id);
+  licenseDb.prepare('DELETE FROM license_packages WHERE id = ?').run(id);
+  logActivity({ type: 'license_package_delete', ok: true, companyKey: null, nev: 'admin', detail: `Csomag törölve: ${pkg.nev}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Egy csomag kiosztása egy cégnek — a csomagban lévő ÖSSZES funkciót
+// egyszerre, ugyanazzal a lejárattal állítja be a company_licenses
+// táblában (a csomag ára itt csak tájékoztató, magára a csomagra nem
+// jön létre külön nyilvántartás — lásd fenti megjegyzés).
+// Egy csomag funkcióinak kiosztása egy cégnek — közös logika, amit az
+// admin-végpont ÉS a myPOS fizetés-visszaigazolás egyaránt meghív.
+function grantPackageToCompany(cegKulcs, packageId, lejarat, jovahagyta) {
+  const pkg = licenseDb.prepare('SELECT id, nev, ar FROM license_packages WHERE id = ?').get(packageId);
+  if (!pkg) throw new Error('Ismeretlen csomag.');
+  const keys = licenseDb.prepare('SELECT feature_key FROM license_package_features WHERE package_id = ?').all(packageId).map((r) => r.feature_key);
+  if (!keys.length) throw new Error('Ennek a csomagnak nincs funkciója beállítva.');
+  const cleanLejarat = /^\d{4}-\d{2}-\d{2}$/.test(lejarat || '') ? lejarat : null;
+  const now = new Date().toISOString();
+  for (const key of keys) {
+    licenseDb.prepare(`
+      INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+      VALUES (?, ?, 0, ?, 1, ?, ?)
+      ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+    `).run(cegKulcs, key, cleanLejarat, jovahagyta, now);
+  }
+  return { featureCount: keys.length, pkgNev: pkg.nev };
+}
+
+route('POST', '/api/admin/license/packages/grant', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, packageId, lejarat } = await readJsonBody(req);
+  if (!cegKulcs || !packageId) return sendJson(res, 400, { error: 'Hiányzó cégkulcs vagy csomag-azonosító.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  let result;
+  try { result = grantPackageToCompany(cegKulcs, packageId, lejarat, 'admin'); }
+  catch (e) { return sendJson(res, 404, { error: e.message }); }
+  logActivity({
+    type: 'license_package_grant', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Csomag kiosztva: ${result.pkgNev} (${result.featureCount} funkció)${lejarat ? `, lejárat: ${lejarat}` : ', nincs lejárat'}`,
+  });
+  sendJson(res, 200, { ok: true, featureCount: result.featureCount });
+});
+
+// Cégenkénti licenc-áttekintés — minden ismert cég (a companyIndexből,
+// telephelyenként deduplikálva egyetlen céges sorra), mindegyikhez az
+// összes katalógus-funkció aktuális állapotával (kiosztva/nincs kiosztva).
+route('GET', '/api/admin/license/companies', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const features = licenseDb.prepare(`SELECT key, nev, alap_ar, aktiv FROM license_features ORDER BY sorrend, nev`).all();
+
+  // Cégek deduplikálása cégkulcs szerint — egy cégnek több telephelye is
+  // lehet a companyIndexben, de a licenc céges szintű, nem telephelyszintű.
+  const byCeg = new Map();
+  for (const entry of companyIndex.values()) {
+    if (!byCeg.has(entry.cegKulcs)) byCeg.set(entry.cegKulcs, entry);
+  }
+  const grantsByCeg = new Map();
+  for (const row of licenseDb.prepare('SELECT * FROM company_licenses').all()) {
+    if (!grantsByCeg.has(row.ceg_kulcs)) grantsByCeg.set(row.ceg_kulcs, new Map());
+    grantsByCeg.get(row.ceg_kulcs).set(row.feature_key, row);
+  }
+  // Eszközszám cégenként (hány regisztrált eszköz van), a beállított
+  // korláttal együtt — hogy az admin lista egyben mutassa, pl. "3 / 5".
+  const deviceCountByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, COUNT(*) AS c FROM company_devices GROUP BY ceg_kulcs').all()
+      .map((r) => [r.ceg_kulcs, r.c])
+  );
+  const deviceLimitByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, eszkoz_limit FROM company_device_limits').all()
+      .map((r) => [r.ceg_kulcs, r.eszkoz_limit])
+  );
+  const subscriptionByCeg = new Map(
+    licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes, proba_vege, proba_kezi FROM company_subscription').all()
+      .map((r) => [r.ceg_kulcs, r])
+  );
+
+  const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
+    const grants = grantsByCeg.get(cegKulcs) || new Map();
+    const licenses = features.map((f) => {
+      const row = grants.get(f.key);
+      const status = licenseRowStatus(row);
+      return {
+        key: f.key, nev: f.nev, alapAr: f.alap_ar, katalogusAktiv: !!f.aktiv,
+        kiosztva: !!row, ar: row ? row.ar : null, lejarat: row ? row.lejarat : null,
+        aktiv: row ? !!row.aktiv : false, ...status,
+      };
+    });
+    const sub = subscriptionByCeg.get(cegKulcs);
+    return {
+      cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
+      eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
+      eszkozLimit: deviceLimitByCeg.has(cegKulcs) ? deviceLimitByCeg.get(cegKulcs) : null,
+      alapElofizetesAktiv: !sub || !!sub.aktiv,
+      alapMegjegyzes: sub ? sub.megjegyzes : null,
+      probaKezi: !!(sub && sub.proba_kezi),
+      probaVege: sub && sub.proba_kezi ? sub.proba_vege : null,
+      probaNapokHatra: sub && sub.proba_kezi
+        ? (sub.proba_vege ? Math.max(0, Math.ceil((new Date(sub.proba_vege + 'T23:59:59') - new Date()) / 86400000)) : 0)
+        : null,
+    };
+  }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
+
+  sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
+});
+
+// Az alap regisztráltság (a havidíj fizetve van-e) be/kikapcsolása egy
+// cégnek — ettől FÜGGETLEN minden funkció-kiosztás, hogy az admin ne
+// veszítse el a beállításokat, ha egy cég átmenetileg nem fizet, majd
+// visszatér.
+route('POST', '/api/admin/license/subscription', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, aktiv, megjegyzes } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  const cleanMegjegyzes = String(megjegyzes || '').trim() || null;
+  licenseDb.prepare(`
+    INSERT INTO company_subscription (ceg_kulcs, aktiv, megjegyzes, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET aktiv = excluded.aktiv, megjegyzes = excluded.megjegyzes, updated_at = excluded.updated_at
+  `).run(cegKulcs, cleanAktiv, cleanMegjegyzes, new Date().toISOString());
+  logActivity({
+    type: 'license_subscription', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Alap regisztráció ${cleanAktiv ? 'aktiválva' : 'szüneteltetve'}${cleanMegjegyzes ? ` — ${cleanMegjegyzes}` : ''}`,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+// Cégenkénti próbaidő KÉZI beállítása/felülbírálása — hány nap van hátra
+// a próbaidőből, MOSTANTÓL számítva. 0 = nincs próbaidő (azonnal a
+// tényleges funkció-kiosztás számít). Ha ezt egyszer beállítottad egy
+// cégre, onnantól ez felülírja az automatikus (első szinkrontól
+// számított) próbaidő-logikát — a "napok" mező üresen hagyásával/
+// törlésével visszaállítható az automatikus viselkedés.
+route('POST', '/api/admin/license/trial', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, napok } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite2 = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite2 && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+
+  if (napok === null || napok === '' || napok === undefined) {
+    // Visszaállítás az automatikus viselkedésre.
+    licenseDb.prepare(`
+      INSERT INTO company_subscription (ceg_kulcs, aktiv, proba_vege, proba_kezi, updated_at) VALUES (?, 1, NULL, 0, ?)
+      ON CONFLICT(ceg_kulcs) DO UPDATE SET proba_vege = NULL, proba_kezi = 0, updated_at = excluded.updated_at
+    `).run(cegKulcs, new Date().toISOString());
+    logActivity({ type: 'license_trial_set', ok: true, companyKey: cegKulcs, nev: anySite2?.nev || cegKulcs, detail: 'Próbaidő visszaállítva automatikusra.' });
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const cleanNapok = Math.max(0, parseInt(napok, 10) || 0);
+  const probaVege = cleanNapok > 0 ? addDaysISO(todayIsoServer(), cleanNapok) : null;
+  licenseDb.prepare(`
+    INSERT INTO company_subscription (ceg_kulcs, aktiv, proba_vege, proba_kezi, updated_at) VALUES (?, 1, ?, 1, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET proba_vege = excluded.proba_vege, proba_kezi = 1, updated_at = excluded.updated_at
+  `).run(cegKulcs, probaVege, new Date().toISOString());
+  logActivity({
+    type: 'license_trial_set', ok: true, companyKey: cegKulcs, nev: anySite2?.nev || cegKulcs,
+    detail: cleanNapok > 0 ? `Próbaidő kézzel beállítva: ${cleanNapok} nap (lejár: ${probaVege})` : 'Próbaidő kikapcsolva (0 nap).',
+  });
+  sendJson(res, 200, { ok: true, probaVege });
+});
+
+// ---------------------------------------------------------------------------
+// FIZETÉS — myPOS Checkout API. Lásd a fájl elején a myPOS-config
+// szakaszt a szükséges környezeti változókról.
+// ---------------------------------------------------------------------------
+
+// Egy fizetés-cél (alap előfizetés / csomag / önálló funkció) áráért és
+// leírásáért felelős — mindhárom esetet egy helyen kezeljük.
+function resolvePaymentTarget(cel) {
+  if (cel === 'alap_elofizetes') {
+    const ar = parseInt(process.env.ALAP_ELOFIZETES_AR_HUF || '0', 10);
+    if (!ar) throw new Error('Az alap előfizetés ára nincs beállítva (ALAP_ELOFIZETES_AR_HUF).');
+    return { osszeg: ar, penznem: 'HUF', leiras: 'Alap előfizetés' };
+  }
+  if (cel.startsWith('csomag:')) {
+    const id = parseInt(cel.slice(7), 10);
+    const pkg = licenseDb.prepare('SELECT id, nev, ar FROM license_packages WHERE id = ? AND aktiv = 1').get(id);
+    if (!pkg) throw new Error('Ismeretlen vagy inaktív csomag.');
+    if (!pkg.ar) throw new Error('Ennek a csomagnak nincs ára beállítva.');
+    return { osszeg: pkg.ar, penznem: 'HUF', leiras: `Csomag: ${pkg.nev}` };
+  }
+  if (cel.startsWith('funkcio:')) {
+    const key = cel.slice(8);
+    const f = licenseDb.prepare('SELECT key, nev, alap_ar FROM license_features WHERE key = ? AND aktiv = 1').get(key);
+    if (!f) throw new Error('Ismeretlen vagy inaktív funkció.');
+    if (!f.alap_ar) throw new Error('Ennek a funkciónak nincs ára beállítva.');
+    return { osszeg: f.alap_ar, penznem: 'HUF', leiras: `Funkció: ${f.nev}` };
+  }
+  throw new Error('Ismeretlen fizetési cél.');
+}
+
+// Fizetés indítása — a cég bejelentkezett felhasználója kéri (owner vagy
+// manager egyaránt). Visszaadja a myPOS hosted checkout oldalára mutató,
+// előre aláírt POST-mezőket — a frontend ezekből épít egy automatikusan
+// elküldött HTML-űrlapot, ami átirányítja a vásárlót a myPOS fizetési
+// oldalára.
+route('POST', '/api/payment/start', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (!myposConfigured()) {
+    return sendJson(res, 501, { error: 'A bankkártyás fizetés még nincs beállítva a szerveren (hiányzó myPOS hozzáférési adatok) — keresd az üzemeltetőt.' });
+  }
+  const { cel } = await readJsonBody(req);
+  let target;
+  try { target = resolvePaymentTarget(String(cel || '')); }
+  catch (e) { return sendJson(res, 400, { error: e.message }); }
+
+  const orderId = `LNY${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  licenseDb.prepare(`
+    INSERT INTO license_payments (order_id, ceg_kulcs, cel, osszeg, penznem, allapot, letrehozva)
+    VALUES (?, ?, ?, ?, ?, 'FUGGOBEN', ?)
+  `).run(orderId, session.cegKulcs, cel, target.osszeg, target.penznem, now);
+
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0];
+  const origin = `${proto}://${req.headers.host}`;
+  const fields = [
+    ['IPCmethod', 'IPCPurchase'],
+    ['IPCVersion', '1.4'],
+    ['IPCLanguage', 'HU'],
+    ['SID', process.env.MYPOS_SID],
+    ['WalletNumber', process.env.MYPOS_WALLET],
+    ['Amount', target.osszeg.toFixed(2)],
+    ['Currency', target.penznem],
+    ['OrderID', orderId],
+    ['URL_OK', `${origin}/api/payment/return?order=${orderId}`],
+    ['URL_Cancel', `${origin}/api/payment/return?order=${orderId}&cancelled=1`],
+    ['URL_Notify', `${origin}/api/payment/notify`],
+    ['CardTokenRequest', '0'],
+    ['KeyIndex', process.env.MYPOS_KEY_INDEX || '1'],
+    ['PaymentParametersRequired', '1'],
+    ['PaymentMethod', '1'],
+  ];
+  const signature = myposSign(fields, myposPrivateKey());
+  const postFields = Object.fromEntries(fields);
+  postFields.Signature = signature;
+
+  logActivity({ type: 'payment_start', ok: true, companyKey: session.cegKulcs, nev: session.nev, detail: `Fizetés indítva: ${target.leiras}, ${target.osszeg} ${target.penznem} (${orderId})` });
+  sendJson(res, 200, { ok: true, checkoutUrl: MYPOS_CHECKOUT_URL, fields: postFields, orderId, leiras: target.leiras, osszeg: target.osszeg, penznem: target.penznem });
+});
+
+// A vásárló böngészője ide tér vissza a fizetés után (URL_OK/URL_Cancel) —
+// ez NEM megbízható visszaigazolás (a myPOS dokumentációja is kifejezetten
+// figyelmeztet erre), csak egy egyszerű "köszönjük, ellenőrizzük" oldalt
+// mutat. A TÉNYLEGES visszaigazolás a lenti /api/payment/notify
+// szerver-szerver hívásból érkezik.
+route('GET', '/api/payment/return', async (req, res, query) => {
+  const orderId = query.order || '';
+  const cancelled = query.cancelled === '1';
+  const row = licenseDb.prepare('SELECT allapot FROM license_payments WHERE order_id = ?').get(orderId);
+  const html = `<!DOCTYPE html><html lang="hu"><head><meta charset="utf-8"><title>Fizetés</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+    <body style="font-family:sans-serif;text-align:center;padding:60px 20px;">
+    <h2>${cancelled ? 'A fizetés megszakadt' : 'Köszönjük!'}</h2>
+    <p>${cancelled ? 'Nem történt terhelés.' : `A fizetés állapota: ${row ? row.allapot : 'feldolgozás alatt'}. Ez az oldal nem a végleges visszaigazolás — pár másodpercen belül frissül a rendszerben.`}</p>
+    <p><a href="/">Vissza az alkalmazásba</a></p>
+    </body></html>`;
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+});
+
+// A myPOS SZERVER-SZERVER értesítése egy fizetés eredményéről — EZ a
+// megbízható forrás, nem a fenti böngésző-visszairányítás. Aláírás-
+// ellenőrzés a myPOS nyilvános tanúsítványával, majd összeg/pénznem
+// egyeztetés a saját nyilvántartásunkkal, mielőtt bármit jóváírnánk.
+route('POST', '/api/payment/notify', async (req, res) => {
+  const body = await readFormBody(req);
+  const publicCert = myposPublicCert();
+  if (!publicCert) {
+    console.error('[fizetés] myPOS notify érkezett, de nincs beállítva MYPOS_PUBLIC_CERT_PATH — nem tudjuk ellenőrizni az aláírást, elutasítva.');
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('NOK');
+  }
+  const fieldOrder = ['IPCmethod', 'SID', 'Amount', 'Currency', 'OrderID', 'IPC_Trnref', 'RequestSTAN', 'RequestDateTime'];
+  const orderedFields = fieldOrder.filter((k) => body[k] !== undefined).map((k) => [k, body[k]]);
+  const validSignature = body.Signature && myposVerify(orderedFields, body.Signature, publicCert);
+  if (!validSignature) {
+    logActivity({ type: 'payment_notify', ok: false, companyKey: null, nev: null, detail: `Érvénytelen aláírás — elutasítva (OrderID: ${body.OrderID || '?'})` });
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('NOK');
+  }
+
+  const payment = licenseDb.prepare('SELECT * FROM license_payments WHERE order_id = ?').get(body.OrderID);
+  if (!payment) {
+    logActivity({ type: 'payment_notify', ok: false, companyKey: null, nev: null, detail: `Ismeretlen OrderID: ${body.OrderID}` });
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('NOK');
+  }
+  const amountMatches = Math.abs(parseFloat(body.Amount) - payment.osszeg) < 0.01;
+  const currencyMatches = body.Currency === payment.penznem;
+  if (!amountMatches || !currencyMatches) {
+    logActivity({ type: 'payment_notify', ok: false, companyKey: payment.ceg_kulcs, nev: null, detail: `Összeg/pénznem eltérés (OrderID: ${body.OrderID}) — várt: ${payment.osszeg} ${payment.penznem}, kapott: ${body.Amount} ${body.Currency}` });
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('NOK');
+  }
+
+  const now = new Date().toISOString();
+  licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERES', mypos_trnref = ?, lezarva = ? WHERE order_id = ?`)
+    .run(body.IPC_Trnref || null, now, body.OrderID);
+
+  // A fizetés tárgyának tényleges jóváírása.
+  try {
+    if (payment.cel === 'alap_elofizetes') {
+      const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
+      licenseDb.prepare(`
+        INSERT INTO company_subscription (ceg_kulcs, aktiv, megjegyzes, updated_at) VALUES (?, 1, ?, ?)
+        ON CONFLICT(ceg_kulcs) DO UPDATE SET aktiv = 1, megjegyzes = excluded.megjegyzes, updated_at = excluded.updated_at
+      `).run(payment.ceg_kulcs, `Fizetve myPOS-on (${body.IPC_Trnref}), ${napok} napra`, now);
+    } else if (payment.cel.startsWith('csomag:')) {
+      const packageId = parseInt(payment.cel.slice(7), 10);
+      const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
+      grantPackageToCompany(payment.ceg_kulcs, packageId, addDaysISO(todayIsoServer(), napok), `myPOS fizetés (${body.IPC_Trnref})`);
+    } else if (payment.cel.startsWith('funkcio:')) {
+      const key = payment.cel.slice(8);
+      const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
+      const lejarat = addDaysISO(todayIsoServer(), napok);
+      licenseDb.prepare(`
+        INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+        VALUES (?, ?, 0, ?, 1, ?, ?)
+        ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+      `).run(payment.ceg_kulcs, key, lejarat, `myPOS fizetés (${body.IPC_Trnref})`, now);
+    }
+    logActivity({ type: 'payment_notify', ok: true, companyKey: payment.ceg_kulcs, nev: null, detail: `Sikeres fizetés jóváírva: ${payment.cel}, ${payment.osszeg} ${payment.penznem} (OrderID: ${body.OrderID})` });
+  } catch (e) {
+    console.error('[fizetés] jóváírási hiba:', e.message);
+    logActivity({ type: 'payment_notify', ok: false, companyKey: payment.ceg_kulcs, nev: null, detail: `Fizetés sikeres volt, de a jóváírás hibázott: ${e.message}` });
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK');
+});
+
+// Admin: fizetési előzmények — minden kísérlet, nem csak a sikeresek.
+route('GET', '/api/admin/payments', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '100', 10) || 100, 500);
+  const rows = licenseDb.prepare('SELECT * FROM license_payments ORDER BY letrehozva DESC LIMIT ?').all(limit);
+  sendJson(res, 200, {
+    myposConfigured: myposConfigured(),
+    payments: rows.map((p) => ({
+      orderId: p.order_id, cegKulcs: p.ceg_kulcs, cel: p.cel, osszeg: p.osszeg, penznem: p.penznem,
+      allapot: p.allapot, myposTrnref: p.mypos_trnref, letrehozva: p.letrehozva, lezarva: p.lezarva,
+    })),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REGISZTRÁCIÓK — Cég → Telephely(ek) → Eszköz(ök) hierarchia, a régi
+// LSZAMLA rendszerből importált adatokból, a saját L-NYUGTA cég-
+// nyilvántartással összefésülve. Azok a cégek is megjelennek, akiknek MÉG
+// nincs egyetlen regisztrációjuk sem (üresen) — és fordítva, azok a
+// regisztrációk is, amikhez (még) nincs tényleges L-NYUGTA szinkron.
+// ---------------------------------------------------------------------------
+route('GET', '/api/admin/registrations', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+
+  const companies = licenseDb.prepare('SELECT * FROM reg_companies ORDER BY nev').all();
+  const sites = licenseDb.prepare('SELECT * FROM reg_sites').all();
+  const devices = licenseDb.prepare('SELECT * FROM reg_devices').all();
+  const sitesByCompany = new Map();
+  sites.forEach((s) => {
+    if (!sitesByCompany.has(s.company_id)) sitesByCompany.set(s.company_id, []);
+    sitesByCompany.get(s.company_id).push(s);
+  });
+  const devicesBySite = new Map();
+  devices.forEach((d) => {
+    if (!devicesBySite.has(d.site_id)) devicesBySite.set(d.site_id, []);
+    devicesBySite.get(d.site_id).push(d);
+  });
+
+  // Melyik adószámokhoz van TÉNYLEGES, élő L-NYUGTA szinkron (companyIndex)?
+  const liveByAdoszam = new Map();
+  for (const [key, entry] of companyIndex) {
+    if (!liveByAdoszam.has(entry.adoszam)) liveByAdoszam.set(entry.adoszam, []);
+    liveByAdoszam.get(entry.adoszam).push({ key, telephelyKod: entry.telephelyKod, nev: entry.nev });
+  }
+
+  const result = companies.map((c) => ({
+    id: c.id, adoszam: c.adoszam, nev: c.nev,
+    hasLiveSync: liveByAdoszam.has(c.adoszam),
+    liveSites: liveByAdoszam.get(c.adoszam) || [],
+    sites: (sitesByCompany.get(c.id) || []).map((s) => ({
+      id: s.id, nev: s.nev, varos: s.varos, cim: s.cim,
+      devices: (devicesBySite.get(s.id) || []).map((d) => ({
+        id: d.id, uuid: d.uuid, progtip: d.progtip, verzio: d.verzio,
+        regdat: d.regdat, ervdat: d.ervdat, email: d.email, telefon: d.telefon,
+        kapcsnev: d.kapcsnev, regmodel: d.regmodel, regmanufacturer: d.regmanufacturer,
+        statusz: d.statusz, szszelotag: d.szszelotag,
+      })),
+    })),
+  }));
+
+  // Azok az élő L-NYUGTA cégek is bekerülnek (üres regisztrációval), amikhez
+  // MÉG nincs egyetlen reg_companies bejegyzés sem.
+  const knownAdoszamok = new Set(companies.map((c) => c.adoszam));
+  const seenEmpty = new Set();
+  for (const [, entry] of companyIndex) {
+    if (knownAdoszamok.has(entry.adoszam) || seenEmpty.has(entry.adoszam)) continue;
+    seenEmpty.add(entry.adoszam);
+    result.push({
+      id: null, adoszam: entry.adoszam, nev: entry.nev,
+      hasLiveSync: true, liveSites: liveByAdoszam.get(entry.adoszam) || [],
+      sites: [],
+    });
+  }
+
+  result.sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
+  sendJson(res, 200, { companies: result });
+});
+
+route('POST', '/api/admin/registrations/company/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { adoszam, nev } = await readJsonBody(req);
+  const cleanAdoszam = String(adoszam || '').trim();
+  if (!cleanAdoszam) return sendJson(res, 400, { error: 'Az adószám megadása kötelező.' });
+  const existing = licenseDb.prepare('SELECT id FROM reg_companies WHERE adoszam = ?').get(cleanAdoszam);
+  if (existing) return sendJson(res, 409, { error: 'Ez az adószám már szerepel a nyilvántartásban.' });
+  const result = licenseDb.prepare('INSERT INTO reg_companies (adoszam, nev, created_at) VALUES (?, ?, ?)')
+    .run(cleanAdoszam, String(nev || '').trim() || null, new Date().toISOString());
+  logActivity({ type: 'reg_company_add', ok: true, companyKey: null, nev: 'admin', detail: `Regisztrációs cég felvéve: ${nev} (${cleanAdoszam})` });
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/site/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyId, nev, varos, cim } = await readJsonBody(req);
+  const company = licenseDb.prepare('SELECT id FROM reg_companies WHERE id = ?').get(companyId);
+  if (!company) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const result = licenseDb.prepare('INSERT INTO reg_sites (company_id, nev, varos, cim) VALUES (?, ?, ?, ?)')
+    .run(companyId, String(nev || '').trim() || 'Telephely', String(varos || '').trim() || null, String(cim || '').trim() || null);
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/site/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, varos, cim } = await readJsonBody(req);
+  const site = licenseDb.prepare('SELECT id FROM reg_sites WHERE id = ?').get(id);
+  if (!site) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  licenseDb.prepare('UPDATE reg_sites SET nev = ?, varos = ?, cim = ? WHERE id = ?')
+    .run(String(nev || '').trim() || null, String(varos || '').trim() || null, String(cim || '').trim() || null, id);
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/registrations/device/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const b = await readJsonBody(req);
+  const site = licenseDb.prepare('SELECT id FROM reg_sites WHERE id = ?').get(b.siteId);
+  if (!site) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  const now = new Date().toISOString();
+  const result = licenseDb.prepare(`
+    INSERT INTO reg_devices (site_id, uuid, progtip, verzio, regdat, ervdat, email, telefon, kapcsnev, regmodel, regmanufacturer, statusz, szszelotag, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    b.siteId, b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
+    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
+    b.statusz || 'I', b.szszelotag || null, now, now
+  );
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/device/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const b = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT id FROM reg_devices WHERE id = ?').get(b.id);
+  if (!device) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  licenseDb.prepare(`
+    UPDATE reg_devices SET uuid = ?, progtip = ?, verzio = ?, regdat = ?, ervdat = ?, email = ?, telefon = ?,
+      kapcsnev = ?, regmodel = ?, regmanufacturer = ?, statusz = ?, szszelotag = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
+    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
+    b.statusz || null, b.szszelotag || null, new Date().toISOString(), b.id
+  );
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/registrations/device/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  licenseDb.prepare('DELETE FROM reg_devices WHERE id = ?').run(id);
+  sendJson(res, 200, { ok: true });
+});
+
+// Licenc kiosztása / módosítása egy cégnek egy adott funkcióra — upsert.
+route('POST', '/api/admin/license/grant', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, featureKey, ar, lejarat, aktiv } = await readJsonBody(req);
+  if (!cegKulcs || !featureKey) return sendJson(res, 400, { error: 'Hiányzó cégkulcs vagy funkció-kulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(featureKey);
+  if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
+  const cleanAr = Math.max(0, parseInt(ar, 10) || 0);
+  const cleanLejarat = /^\d{4}-\d{2}-\d{2}$/.test(lejarat || '') ? lejarat : null;
+  const cleanAktiv = aktiv === false ? 0 : 1;
+  licenseDb.prepare(`
+    INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET ar = excluded.ar, lejarat = excluded.lejarat, aktiv = excluded.aktiv, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+  `).run(cegKulcs, featureKey, cleanAr, cleanLejarat, cleanAktiv, 'admin', new Date().toISOString());
+  logActivity({
+    type: 'license_grant', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs,
+    detail: `Licenc frissítve — ${feature.nev}: ${cleanAr} Ft${cleanLejarat ? `, lejárat: ${cleanLejarat}` : ', nincs lejárat'}${cleanAktiv ? '' : ' (letiltva)'}`,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+// Licenc visszavonása (a kiosztás teljes törlése — a cég ismét
+// "nincs regisztráció" állapotba kerül az adott funkcióra).
+route('POST', '/api/admin/license/revoke', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, featureKey } = await readJsonBody(req);
+  const feature = licenseDb.prepare('SELECT nev FROM license_features WHERE key = ?').get(featureKey);
+  const changes = licenseDb.prepare('DELETE FROM company_licenses WHERE ceg_kulcs = ? AND feature_key = ?').run(cegKulcs, featureKey).changes;
+  if (!changes) return sendJson(res, 404, { error: 'Ez a cég nem rendelkezik ezzel a funkcióval.' });
+  logActivity({ type: 'license_revoke', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `Licenc visszavonva: ${feature?.nev || featureKey}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Cég eszközkorlátjának beállítása/módosítása — ha eszkozLimit 0 vagy
+// hiányzik, a korlát törlődik (ismét korlátlan lesz, ez az alapállapot).
+route('POST', '/api/admin/license/device-limit', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, eszkozLimit } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  if (!anySite && !listTelephelyek(cegKulcs).length) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const limit = parseInt(eszkozLimit, 10) || 0;
+  if (limit <= 0) {
+    licenseDb.prepare('DELETE FROM company_device_limits WHERE ceg_kulcs = ?').run(cegKulcs);
+    logActivity({ type: 'license_device_limit', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs, detail: 'Eszközkorlát törölve (korlátlan).' });
+  } else {
+    licenseDb.prepare(`
+      INSERT INTO company_device_limits (ceg_kulcs, eszkoz_limit, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(ceg_kulcs) DO UPDATE SET eszkoz_limit = excluded.eszkoz_limit, updated_at = excluded.updated_at
+    `).run(cegKulcs, limit, new Date().toISOString());
+    logActivity({ type: 'license_device_limit', ok: true, companyKey: cegKulcs, nev: anySite?.nev || cegKulcs, detail: `Eszközkorlát beállítva: ${limit} db.` });
+  }
+  sendJson(res, 200, { ok: true });
+});
+
+// Egy cég regisztrált eszközeinek listája + a beállított korlát — az admin
+// felület ebből rakja ki, hogy pl. "3 / 5 eszköz foglalt".
+route('GET', '/api/admin/license/devices', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const cegKulcs = String(query.cegKulcs || '').trim();
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const limitRow = licenseDb.prepare('SELECT eszkoz_limit FROM company_device_limits WHERE ceg_kulcs = ?').get(cegKulcs);
+  const devices = licenseDb.prepare(
+    'SELECT id, eszkoz_azonosito, telephely_kod, nev, progtip, verzio, elso_latott, utolso_latott FROM company_devices WHERE ceg_kulcs = ? ORDER BY elso_latott'
+  ).all(cegKulcs);
+  sendJson(res, 200, {
+    cegKulcs,
+    eszkozLimit: limitRow ? limitRow.eszkoz_limit : null,
+    devices: devices.map((d) => ({
+      id: d.id, eszkozAzonosito: d.eszkoz_azonosito, telephelyKod: d.telephely_kod, nev: d.nev,
+      progtip: d.progtip, verzio: d.verzio, elsoLatott: d.elso_latott, utolsoLatott: d.utolso_latott,
+    })),
+  });
+});
+
+// Egy eszköz saját, kényelmi neve (pl. "1-es kassza") — az admin adja
+// meg, az app maga csak az UUID-t és a programtípust küldi.
+route('POST', '/api/admin/license/devices/rename', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev } = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT id FROM company_devices WHERE id = ?').get(id);
+  if (!device) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  licenseDb.prepare('UPDATE company_devices SET nev = ? WHERE id = ?').run(String(nev || '').trim() || null, id);
+  sendJson(res, 200, { ok: true });
+});
+
+// Programtípus-katalógus — melyik androidos app-változatokat láttuk már
+// valaha szinkronizálni (automatikusan bővül, lásd recordDeviceSync).
+route('GET', '/api/admin/license/program-types', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const types = licenseDb.prepare('SELECT kulcs, nev, elso_latott FROM program_tipusok ORDER BY kulcs').all();
+  sendJson(res, 200, { types });
+});
+
+// Egy eszköz eltávolítása a cég regisztrált eszközei közül — pl. ha az
+// ügyfél lecserélt egy telefont, ezzel szabadul fel a helye az újnak.
+route('POST', '/api/admin/license/devices/remove', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT ceg_kulcs, eszkoz_azonosito FROM company_devices WHERE id = ?').get(id);
+  if (!device) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  licenseDb.prepare('DELETE FROM company_devices WHERE id = ?').run(id);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === device.ceg_kulcs);
+  logActivity({
+    type: 'license_device_remove', ok: true, companyKey: device.ceg_kulcs, nev: anySite?.nev || device.ceg_kulcs,
+    detail: `Eszköz eltávolítva a regisztráltak közül: ${device.eszkoz_azonosito}`,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+
+// ---------------------------------------------------------------------------
+// Összehasonlítás — rugalmas, mód-alapú elemzési motor. Minden mód pontosan
+// két, azonos hosszúságú időszakot (A és B) állít elő különböző logika
+// szerint, utána egy KÖZÖS számítás fut le mindkettőre (napi sorozat, hét
+// napjai szerinti bontás, cikk-mozgások, automatikus szöveges elemzés).
+// ---------------------------------------------------------------------------
+function addDaysISO(iso, days) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function addMonthsISO(iso, months) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+function addYearsISO(iso, years) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return d.toISOString().slice(0, 10);
+}
+function spanDaysOf(from, to) { return Math.round((new Date(to) - new Date(from)) / 86400000) + 1; }
+function weekdayOfISO(iso) { return new Date(iso + 'T00:00:00Z').getUTCDay(); }
+function mondayOfWeek(iso) {
+  const wd = weekdayOfISO(iso); // 0=vasárnap
+  const back = wd === 0 ? 6 : wd - 1;
+  return addDaysISO(iso, -back);
+}
+
+function periodRevenue(k, from, to, cikk) {
+  if (cikk) {
+    const r = get(k,
+      `SELECT IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny, COUNT(DISTINCT nf.bsz) AS cnt
+       FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+       WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ?`,
+      [from, to, cikk]
+    );
+    return { revenue: r.revenue, cnt: r.cnt, menny: r.menny };
+  }
+  return get(k,
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
+    [from, to]
+  );
+}
+function dailySeries(k, from, to, cikk) {
+  const rows = cikk
+    ? all(k,
+        `SELECT nf.keltdat AS d, IFNULL(SUM(nt.sorbrutto),0) AS revenue
+         FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+         WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ? GROUP BY nf.keltdat`,
+        [from, to, cikk]
+      )
+    : all(k,
+        `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat`,
+        [from, to]
+      );
+  const map = new Map(rows.map((r) => [r.d, r.revenue]));
+  const out = [];
+  let d = from, i = 0;
+  while (d <= to) { out.push({ idx: i, d, revenue: map.get(d) || 0 }); d = addDaysISO(d, 1); i++; }
+  return out;
+}
+function weekdayBreakdown(k, from, to, cikk) {
+  const rows = cikk
+    ? all(k,
+        `SELECT CAST(strftime('%w', nf.keltdat) AS INTEGER) AS wd,
+                IFNULL(SUM(nt.sorbrutto),0) AS revenue, COUNT(DISTINCT nf.keltdat) AS napok
+         FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+         WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ? GROUP BY wd`,
+        [from, to, cikk]
+      )
+    : all(k,
+        `SELECT CAST(strftime('%w', keltdat) AS INTEGER) AS wd,
+                IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(DISTINCT keltdat) AS napok
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY wd`,
+        [from, to]
+      );
+  const byWd = new Map(rows.map((r) => [r.wd, r]));
+  const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+  return labels.map((label, wd) => {
+    const r = byWd.get(wd);
+    return { wd, label, avgRevenue: r && r.napok ? Math.round(r.revenue / r.napok) : 0 };
+  });
+}
+function productMovers(k, fromA, toA, fromB, toB) {
+  const a = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [fromA, toA]
+  );
+  const b = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.sorbrutto),0) AS revenue, IFNULL(SUM(nt.menny),0) AS menny
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} GROUP BY nt.megnevezes`,
+    [fromB, toB]
+  );
+  const bMap = new Map(b.map((p) => [p.nev, p]));
+  const names = new Set([...a.map((p) => p.nev), ...b.map((p) => p.nev)]);
+  const movers = [...names].map((nev) => {
+    const pa = a.find((p) => p.nev === nev) || { revenue: 0, menny: 0 };
+    const pb = bMap.get(nev) || { revenue: 0, menny: 0 };
+    return { nev, aRevenue: pa.revenue, bRevenue: pb.revenue, deltaRevenue: pa.revenue - pb.revenue, deltaMenny: pa.menny - pb.menny };
+  }).sort((x, y) => Math.abs(y.deltaRevenue) - Math.abs(x.deltaRevenue));
+  return { gainers: movers.filter((m) => m.deltaRevenue > 0).slice(0, 8), losers: movers.filter((m) => m.deltaRevenue < 0).slice(0, 8) };
+}
+function pctChange(a, b) { if (!b) return a > 0 ? 100 : 0; return Math.round(((a - b) / b) * 1000) / 10; }
+
+// Rövid, legfeljebb ~50 szavas, automatikusan generált, "szakértői szemű"
+// elemzés-szöveg — a tényleges számított adatokra reagál, sablon-alapon.
+function buildAnalysisText({ labelA, labelB, revenueA, revenueB, weekdayA, weekdayB, movers }) {
+  const delta = pctChange(revenueA, revenueB);
+  const parts = [];
+  if (revenueB === 0 && revenueA === 0) {
+    parts.push(`Egyik időszakban sincs forgalom — nincs miből következtetni.`);
+    return parts.join(' ');
+  }
+  const irany = delta > 0 ? 'nőtt' : delta < 0 ? 'csökkent' : 'nem változott';
+  parts.push(`A forgalom ${Math.abs(delta)}%-kal ${irany} (${labelA}: ${Math.round(revenueA).toLocaleString('hu-HU')} Ft, ${labelB}: ${Math.round(revenueB).toLocaleString('hu-HU')} Ft).`);
+
+  if (weekdayA && weekdayB) {
+    let bestWd = null, bestDelta = -Infinity;
+    for (let i = 0; i < weekdayA.length; i++) {
+      const d = weekdayA[i].avgRevenue - weekdayB[i].avgRevenue;
+      if (Math.abs(d) > Math.abs(bestDelta)) { bestDelta = d; bestWd = weekdayA[i].label; }
+    }
+    if (bestWd && Math.abs(bestDelta) > 0) {
+      parts.push(`A legnagyobb eltérés ${bestWd}-n mutatkozik (${bestDelta > 0 ? '+' : ''}${Math.round(bestDelta).toLocaleString('hu-HU')} Ft/nap átlagosan).`);
+    }
+  }
+  if (movers && (movers.gainers.length || movers.losers.length)) {
+    const top = movers.gainers[0] || movers.losers[0];
+    if (top) {
+      const irany2 = top.deltaRevenue > 0 ? 'húzta leginkább a növekedést' : 'okozta leginkább a visszaesést';
+      parts.push(`A(z) "${top.nev}" ${irany2} (${top.deltaRevenue > 0 ? '+' : ''}${Math.round(top.deltaRevenue).toLocaleString('hu-HU')} Ft).`);
+    }
+  }
+  return parts.join(' ');
+}
+
+function computeComparison(k, periodA, periodB, cikk) {
+  const a = periodRevenue(k, periodA.from, periodA.to, cikk);
+  const b = periodRevenue(k, periodB.from, periodB.to, cikk);
+  const dailyA = dailySeries(k, periodA.from, periodA.to, cikk);
+  const dailyB = dailySeries(k, periodB.from, periodB.to, cikk);
+  const weekdayA = weekdayBreakdown(k, periodA.from, periodA.to, cikk);
+  const weekdayB = weekdayBreakdown(k, periodB.from, periodB.to, cikk);
+  const movers = cikk ? null : productMovers(k, periodA.from, periodA.to, periodB.from, periodB.to);
+  const analysis = buildAnalysisText({
+    labelA: periodA.label, labelB: periodB.label,
+    revenueA: a.revenue, revenueB: b.revenue, weekdayA, weekdayB, movers,
+  });
+  return {
+    periodA: { ...periodA, revenue: a.revenue, receiptCount: a.cnt },
+    periodB: { ...periodB, revenue: b.revenue, receiptCount: b.cnt },
+    deltaPct: pctChange(a.revenue, b.revenue),
+    dailyA, dailyB, weekdayA, weekdayB, movers, analysis,
+  };
+}
+
+route('GET', '/api/compare', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const mode = query.mode || '';
+  const cikk = query.cikk ? String(query.cikk) : null;
+  const today = todayIsoServer();
+  let periodA, periodB;
+
+  if (mode === 'years') {
+    const yA = parseInt(query.yearA, 10), yB = parseInt(query.yearB, 10);
+    if (!yA || !yB) return sendJson(res, 400, { error: 'Válassz ki két évet.' });
+    periodA = { from: `${yA}-01-01`, to: `${yA}-12-31`, label: String(yA) };
+    periodB = { from: `${yB}-01-01`, to: `${yB}-12-31`, label: String(yB) };
+  } else if (mode === 'ytd') {
+    const y = parseInt(today.slice(0, 4), 10);
+    periodA = { from: `${y}-01-01`, to: today, label: `${y} eddig` };
+    periodB = { from: `${y - 1}-01-01`, to: addYearsISO(today, -1), label: `${y - 1} azonos időszaka` };
+  } else if (mode === 'month') {
+    const monthStart = today.slice(0, 8) + '01';
+    const prevMonthStart = addMonthsISO(monthStart, -1);
+    const prevMonthSameDay = addMonthsISO(today, -1);
+    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
+    periodB = { from: prevMonthStart, to: prevMonthSameDay, label: 'Előző hónap (azonos hosszban)' };
+  } else if (mode === 'same-month-last-year') {
+    const monthStart = today.slice(0, 8) + '01';
+    const dayOfMonth = parseInt(today.slice(8, 10), 10);
+    const lastYearMonthStart = addYearsISO(monthStart, -1);
+    // Ha a hónap tört (pl. ma a hónap 18. napja), az előző év azonos
+    // hónapját is CSAK ugyanaddig a napig nézzük, ne a teljes hónapig —
+    // rövidebb hónapnál (pl. február) a hónap tényleges utolsó napjára
+    // szorítva, hogy sose lépjünk át a következő hónapba.
+    const lastYearMonthEndFull = addDaysISO(addMonthsISO(lastYearMonthStart, 1), -1);
+    const lastYearSameDay = addDaysISO(lastYearMonthStart, dayOfMonth - 1);
+    const lastYearTo = lastYearSameDay <= lastYearMonthEndFull ? lastYearSameDay : lastYearMonthEndFull;
+    periodA = { from: monthStart, to: today, label: 'Ez a hónap (eddig)' };
+    periodB = { from: lastYearMonthStart, to: lastYearTo, label: 'Előző év, ugyanez a hónap (azonos napig)' };
+  } else if (mode === 'week') {
+    const mondayThis = mondayOfWeek(today);
+    periodA = { from: mondayThis, to: today, label: 'Ez a hét (eddig)' };
+    periodB = { from: addDaysISO(mondayThis, -7), to: addDaysISO(today, -7), label: 'Előző hét (azonos hosszban)' };
+  } else if (mode === 'custom') {
+    const { fromA, toA, fromB, toB } = query;
+    if (!fromA || !toA || !fromB || !toB) return sendJson(res, 400, { error: 'Add meg mind a két időszak kezdő és záró dátumát.' });
+    const lenA = spanDaysOf(fromA, toA), lenB = spanDaysOf(fromB, toB);
+    if (lenA !== lenB) return sendJson(res, 400, { error: `A két időszaknak azonos hosszúnak kell lennie (jelenleg ${lenA} vs. ${lenB} nap).` });
+    periodA = { from: fromA, to: toA, label: `${fromA} – ${toA}` };
+    periodB = { from: fromB, to: toB, label: `${fromB} – ${toB}` };
+  } else if (mode === 'weekday') {
+    // Nem A/B összehasonlítás, hanem EGY adott hét-napjának minden
+    // előfordulása egy kiválasztott időszakon belül — trendként.
+    const { from, to } = query;
+    const wd = parseInt(query.weekday, 10);
+    if (!from || !to || Number.isNaN(wd)) return sendJson(res, 400, { error: 'Add meg az időszakot és a hét napját.' });
+    const rows = cikk
+      ? all(k,
+          `SELECT nf.keltdat AS d, IFNULL(SUM(nt.sorbrutto),0) AS revenue
+           FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+           WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')} AND nt.megnevezes = ?
+             AND CAST(strftime('%w', nf.keltdat) AS INTEGER) = ?
+           GROUP BY nf.keltdat ORDER BY nf.keltdat`,
+          [from, to, cikk, wd]
+        )
+      : all(k,
+          `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+           FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} AND CAST(strftime('%w', keltdat) AS INTEGER) = ?
+           GROUP BY keltdat ORDER BY keltdat`,
+          [from, to, wd]
+        );
+    const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+    const avg = rows.length ? rows.reduce((s, r) => s + r.revenue, 0) / rows.length : 0;
+    const max = rows.reduce((m, r) => Math.max(m, r.revenue), 0);
+    const trend = rows.length >= 2 ? pctChange(rows[rows.length - 1].revenue, rows[0].revenue) : 0;
+    const analysis = rows.length
+      ? `${rows.length} ${labels[wd].toLowerCase()} volt a vizsgált időszakban, átlagosan ${Math.round(avg).toLocaleString('hu-HU')} Ft forgalommal. ` +
+        `A legerősebb nap ${Math.round(max).toLocaleString('hu-HU')} Ft-ot hozott. ` +
+        `Az első és az utolsó előfordulás között ${trend > 0 ? '+' : ''}${trend}% a változás.`
+      : `Nincs adat a kiválasztott napra ebben az időszakban.`;
+    return sendJson(res, 200, { mode, weekday: wd, weekdayLabel: labels[wd], from, to, points: rows, avg: Math.round(avg), analysis });
+  } else {
+    return sendJson(res, 400, { error: 'Ismeretlen vagy hiányzó mód.' });
+  }
+
+  sendJson(res, 200, { mode, cikk, ...computeComparison(k, periodA, periodB, cikk) });
+});
+
+route('GET', '/api/compare/products', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const q = String(query.q || '').trim();
+  const rows = all(k,
+    `SELECT DISTINCT megnevezes AS nev FROM cikkt WHERE status='A' ${q ? 'AND megnevezes LIKE ?' : ''} ORDER BY megnevezes LIMIT 30`,
+    q ? [`%${q}%`] : []
+  );
+  sendJson(res, 200, { items: rows.map((r) => r.nev) });
+});
+
+// ---------------------------------------------------------------------------
+// Nyitvatartás-optimalizálás — hét napja szerint összeveti a TÉNYLEGESEN
+// rögzített nyitvatartást a valós, óránkénti forgalmi eloszlással, hogy
+// megmutassa: van-e "holt" (nyitva, de érdemi eladás nélküli) időszak a
+// nyitvatartás szélein, vagy fordítva — zárás közelében is van-e még
+// számottevő forgalom, ami esetleg hosszabbítást indokolna.
+// ---------------------------------------------------------------------------
+route('GET', '/api/analysis/opening-hours', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : todayIsoServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : addDaysISO(to, -89);
+
+  const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+
+  // Tényleges, rögzített nyitvatartás átlaga hét napja szerint, PLUSZ maguk
+  // a konkrét dátumok is (ez kell az óránkénti ÁTLAG/MEDIÁN helyes
+  // számításához — enélkül a "nulla forgalmú óra" napok kimaradnának a
+  // nevezőből, és torzítanák az átlagot).
+  const openDaysRaw = all(k,
+    `SELECT targynap, CAST(strftime('%w', targynap) AS INTEGER) AS wd,
+            CAST(strftime('%H', nyitas) AS INTEGER) + CAST(strftime('%M', nyitas) AS INTEGER)/60.0 AS nyitasOra,
+            CAST(strftime('%H', zaras) AS INTEGER) + CAST(strftime('%M', zaras) AS INTEGER)/60.0 AS zarasOra
+     FROM ntaknapzaras WHERE targynap BETWEEN ? AND ? AND nyitas IS NOT NULL AND zaras IS NOT NULL`,
+    [from, to]
+  );
+  const datesByWd = new Map(); // wd -> [targynap, ...]
+  const openByWd = new Map(); // wd -> {nyitasOra: atlag, zarasOra: atlag, napok}
+  for (let wd = 0; wd < 7; wd++) datesByWd.set(wd, []);
+  const sumsByWd = new Map();
+  openDaysRaw.forEach((r) => {
+    datesByWd.get(r.wd).push(r.targynap);
+    if (!sumsByWd.has(r.wd)) sumsByWd.set(r.wd, { nyitasSum: 0, zarasSum: 0, n: 0 });
+    const s = sumsByWd.get(r.wd);
+    s.nyitasSum += r.nyitasOra; s.zarasSum += r.zarasOra; s.n++;
+  });
+  for (const [wd, s] of sumsByWd) {
+    openByWd.set(wd, { nyitasOra: s.nyitasSum / s.n, zarasOra: s.zarasSum / s.n, napok: s.n });
+  }
+
+  // Óránkénti forgalom ÉS nyugtaszám, DÁTUMONKÉNT (nem összesítve) — a
+  // nyugta TÉNYLEGES kezdési időpontja (rendkezdatum) alapján, hogy utána
+  // a JS oldalon kiszámolhassuk a helyes, óránkénti ÁTLAGOT és MEDIÁNT
+  // MINDHÁROM mutatóra (forgalom, nyugtaszám, kosárérték) — a nulla
+  // forgalmú órákat/napokat is figyelembe véve a nevezőben.
+  const perDateHourly = all(k,
+    `SELECT keltdat, CAST(strftime('%H', rendkezdatum) AS INTEGER) AS hh,
+            COUNT(*) AS nyugtaszam,
+            IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND rendkezdatum IS NOT NULL AND ${NOT_STORNO}
+     GROUP BY keltdat, hh`,
+    [from, to]
+  );
+  const dateHourMap = new Map(); // "date-hh" -> { revenue, nyugtaszam }
+  perDateHourly.forEach((r) => dateHourMap.set(`${r.keltdat}-${r.hh}`, { revenue: r.revenue, nyugtaszam: r.nyugtaszam }));
+
+  function median(arr) {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+  }
+  function avgOf(arr) { return arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0; }
+
+  const fmtHH = (dec) => {
+    if (dec === undefined || dec === null || Number.isNaN(dec)) return null;
+    const h = Math.floor(dec), m = Math.round((dec - h) * 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+
+  const METRICS = ['revenue', 'nyugtaszam', 'kosarertek'];
+  const weekdays = [];
+  const heatmap = { revenue: [], nyugtaszam: [], kosarertek: [] }; // [metric][wd][hh] = ATLAG (nem osszeg!)
+  for (let wd = 0; wd < 7; wd++) {
+    const dates = datesByWd.get(wd);
+    const hourly = { revenue: { avg: [], median: [] }, nyugtaszam: { avg: [], median: [] }, kosarertek: { avg: [], median: [] } };
+    let totalAvgRevenue = 0, peakAvgRevenue = 0;
+    for (let h = 0; h < 24; h++) {
+      const revValues = [], cntValues = [], basketValues = [];
+      dates.forEach((d) => {
+        const cell = dateHourMap.get(`${d}-${h}`);
+        const rev = cell ? cell.revenue : 0;
+        const cnt = cell ? cell.nyugtaszam : 0;
+        revValues.push(rev);
+        cntValues.push(cnt);
+        basketValues.push(cnt > 0 ? rev / cnt : 0);
+      });
+      const revAvg = Math.round(avgOf(revValues));
+      hourly.revenue.avg.push(revAvg);
+      hourly.revenue.median.push(median(revValues));
+      hourly.nyugtaszam.avg.push(Math.round(avgOf(cntValues) * 10) / 10);
+      hourly.nyugtaszam.median.push(median(cntValues));
+      hourly.kosarertek.avg.push(Math.round(avgOf(basketValues)));
+      hourly.kosarertek.median.push(median(basketValues));
+      totalAvgRevenue += revAvg;
+      if (revAvg > peakAvgRevenue) peakAvgRevenue = revAvg;
+    }
+    METRICS.forEach((m) => heatmap[m].push(hourly[m].avg));
+
+    const open = openByWd.get(wd);
+    let deadZoneStartHours = 0, deadZoneEndHours = 0, recommendation = null;
+    if (open && peakAvgRevenue > 0) {
+      const threshold = peakAvgRevenue * 0.08; // önkényes, de bevált küszöb: a csúcsóra 8%-a alatt "elhanyagolható" forgalom
+      const openH = Math.round(open.nyitasOra);
+      const closeH = Math.round(open.zarasOra);
+      const revAvgArr = hourly.revenue.avg;
+      for (let h = openH; h < closeH; h++) {
+        if (revAvgArr[h] <= threshold) deadZoneStartHours++; else break;
+      }
+      for (let h = closeH - 1; h >= openH; h--) {
+        if (revAvgArr[h] <= threshold) deadZoneEndHours++; else break;
+      }
+      const lastHourShare = revAvgArr[closeH - 1] && totalAvgRevenue ? Math.round((revAvgArr[closeH - 1] / totalAvgRevenue) * 100) : 0;
+
+      const parts = [];
+      if (deadZoneEndHours >= 1) {
+        parts.push(`A zárás előtti ${deadZoneEndHours} óra átlagosan érdemi forgalom nélkül telik (a nyitvatartás vége: ${fmtHH(open.zarasOra)}) — érdemes lehet fontolóra venni a korábbi zárást.`);
+      }
+      if (deadZoneStartHours >= 1) {
+        parts.push(`A nyitás utáni ${deadZoneStartHours} óra is jellemzően forgalom nélkül telik (nyitás: ${fmtHH(open.nyitasOra)}) — később nyitva is elegendő lehet.`);
+      }
+      if (deadZoneEndHours === 0 && lastHourShare >= 10) {
+        parts.push(`A zárás előtti utolsó órában is jelentős (az átlagos napi forgalom ${lastHourShare}%-a) az eladás — érdemes megfontolni a nyitvatartás meghosszabbítását.`);
+      }
+      if (!parts.length) {
+        parts.push(`A nyitvatartás jól illeszkedik a tényleges forgalmi mintázathoz, nincs számottevő holt időszak.`);
+      }
+      recommendation = parts.join(' ');
+    }
+
+    weekdays.push({
+      wd, label: labels[wd],
+      avgNyitas: open ? fmtHH(open.nyitasOra) : null,
+      avgZaras: open ? fmtHH(open.zarasOra) : null,
+      napok: open ? open.napok : 0,
+      hourly, totalAvgRevenue, peakAvgRevenue,
+      deadZoneStartHours, deadZoneEndHours, recommendation,
+    });
+  }
+
+  // Globális, összegző megállapítás — melyik nap(ok) mutatják a legnagyobb
+  // eltérést, hogy azonnal odairányítsuk a figyelmet.
+  const withIssues = weekdays.filter((w) => w.recommendation && (w.deadZoneStartHours > 0 || w.deadZoneEndHours > 0));
+  let globalRecommendation;
+  if (!withIssues.length) {
+    globalRecommendation = 'A vizsgált időszakban a nyitvatartás minden napon jól illeszkedik a tényleges forgalmi mintázathoz.';
+  } else {
+    const worst = [...withIssues].sort((a, b) => (b.deadZoneStartHours + b.deadZoneEndHours) - (a.deadZoneStartHours + a.deadZoneEndHours))[0];
+    globalRecommendation = `A legnagyobb, nyitvatartással kapcsolatos eltérés ${worst.label.toLowerCase()}on/-en látszik — lásd lent a részleteket. ${withIssues.length} napon van érdemi eltérés a nyitvatartás és a tényleges forgalom között.`;
+  }
+
+  sendJson(res, 200, { from, to, weekdays, heatmap, globalRecommendation });
+});
+
+// ---------------------------------------------------------------------------
+// CIKKENKÉNTI ELEMZÉS — ugyanaz a módszertan, mint a nyitvatartás-
+// optimalizálásnál: a kiválasztott cikk óránkénti/hét napja szerinti
+// eladási INTENZITÁSÁT mutatja (mennyiség és bevétel), hőtérképpel és
+// automatikus szöveges megállapítással.
+// ---------------------------------------------------------------------------
+
+// Legjobban fogyó cikkek listája a kiválasztott időszakban — ez a
+// belépési pont, innen választható ki egy konkrét cikk a részletes
+// elemzéshez.
+// ---------------------------------------------------------------------------
+// ÁTFOGÓ RIPORT — egy oldalon összefoglalja a legfontosabb mutatókat
+// (forgalom, nyugtaszám, kosárérték, hét napja szerinti minta, legjobban
+// fogyó cikkek), automatikus szöveges összefoglalóval — ez a belépési
+// pont, ami a másik két elemzésre (nyitvatartás, cikkenkénti) irányítja
+// a figyelmet, ha ott mélyebbre érdemes ásni.
+route('GET', '/api/analysis/report', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : todayIsoServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : addDaysISO(to, -29);
+
+  const cur = periodRevenue(k, from, to);
+  const avgBasket = cur.cnt ? Math.round(cur.revenue / cur.cnt) : 0;
+  const weekday = weekdayBreakdown(k, from, to);
+  const topProducts = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg, IFNULL(SUM(nt.sorbrutto),0) AS bevetel
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')}
+     GROUP BY nt.megnevezes ORDER BY mennyiseg DESC LIMIT 5`,
+    [from, to]
+  );
+
+  // A hét legerősebb és leggyengébb (de aktív) napja — ez adja az
+  // automatikus szöveges összefoglaló gerincét.
+  const activeWeekday = weekday.filter((w) => w.avgRevenue > 0);
+  const best = [...activeWeekday].sort((a, b) => b.avgRevenue - a.avgRevenue)[0];
+  const worst = [...activeWeekday].sort((a, b) => a.avgRevenue - b.avgRevenue)[0];
+
+  const parts = [];
+  parts.push(`A vizsgált időszakban (${from} – ${to}) az összforgalom ${Math.round(cur.revenue).toLocaleString('hu-HU')} Ft volt, ${cur.cnt} nyugtán, átlagosan ${avgBasket.toLocaleString('hu-HU')} Ft-os kosárértékkel.`);
+  if (best && worst && best.label !== worst.label) {
+    parts.push(`A legerősebb nap ${best.label.toLowerCase()} (átlag ${Math.round(best.avgRevenue).toLocaleString('hu-HU')} Ft/nap), a leggyengébb — de még aktív — nap ${worst.label.toLowerCase()} (átlag ${Math.round(worst.avgRevenue).toLocaleString('hu-HU')} Ft/nap).`);
+  }
+  if (topProducts.length) {
+    parts.push(`A legjobban fogyó cikk a(z) "${topProducts[0].nev}" volt (${topProducts[0].mennyiseg} db).`);
+  }
+  parts.push('A "Nyitvatartás optimalizálása" és a "Cikkenkénti elemzés" nézetekben ezekre a mintázatokra órás bontásban, mélyebben is rá lehet nézni.');
+
+  sendJson(res, 200, {
+    from, to,
+    revenue: cur.revenue, receiptCount: cur.cnt, avgBasket,
+    weekday, topProducts,
+    osszefoglalo: parts.join(' '),
+  });
+});
+
+route('GET', '/api/analysis/products/top', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : todayIsoServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : addDaysISO(to, -89);
+  const limit = Math.min(parseInt(query.limit || '20', 10) || 20, 100);
+  const rows = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg, IFNULL(SUM(nt.sorbrutto),0) AS bevetel
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')}
+     GROUP BY nt.megnevezes ORDER BY mennyiseg DESC LIMIT ?`,
+    [from, to, limit]
+  );
+  sendJson(res, 200, { from, to, products: rows });
+});
+
+// Egy KONKRÉT cikk óránkénti/hét napja szerinti eladási intenzitása —
+// pontosan a nyitvatartás-elemzéssel megegyező szerkezetben (heatmap,
+// napi részletek, átlag+medián, automatikus megállapítás), csak
+// mennyiségre és bevételre, nem nyitvatartásra vetítve.
+route('GET', '/api/analysis/products/detail', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(query.to || '') ? query.to : todayIsoServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(query.from || '') ? query.from : addDaysISO(to, -89);
+  const cikk = String(query.cikk || '').trim();
+  if (!cikk) return sendJson(res, 400, { error: 'Hiányzó cikk.' });
+
+  const labels = ['Vasárnap', 'Hétfő', 'Kedd', 'Szerda', 'Csütörtök', 'Péntek', 'Szombat'];
+  const labelsRagozott = ['Vasárnap', 'Hétfőn', 'Kedden', 'Szerdán', 'Csütörtökön', 'Pénteken', 'Szombaton'];
+
+  // Minden nap, ami a vizsgált időszakban ténylegesen "élt" (volt rajta
+  // legalább 1 nyugta, függetlenül attól, hogy ez a cikk fogyott-e azon
+  // a napon) — ez adja a helyes nevezőt az átlagszámításhoz, hogy egy
+  // olyan nap, amikor a cikk NEM fogyott, ne maradjon ki a nevezőből.
+  const activeDates = all(k,
+    `SELECT DISTINCT keltdat AS d, CAST(strftime('%w', keltdat) AS INTEGER) AS wd
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
+    [from, to]
+  );
+  const datesByWd = new Map();
+  for (let wd = 0; wd < 7; wd++) datesByWd.set(wd, []);
+  activeDates.forEach((r) => datesByWd.get(r.wd).push(r.d));
+
+  const perDateHourly = all(k,
+    `SELECT nf.keltdat AS keltdat, CAST(strftime('%H', nf.rendkezdatum) AS INTEGER) AS hh,
+            IFNULL(SUM(nt.menny),0) AS mennyiseg, IFNULL(SUM(nt.sorbrutto),0) AS bevetel
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND nf.rendkezdatum IS NOT NULL AND ${notStorno('nf')} AND nt.megnevezes = ?
+     GROUP BY nf.keltdat, hh`,
+    [from, to, cikk]
+  );
+  const dateHourMap = new Map();
+  perDateHourly.forEach((r) => dateHourMap.set(`${r.keltdat}-${r.hh}`, { mennyiseg: r.mennyiseg, bevetel: r.bevetel }));
+
+  function median(arr) {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2 * 10) / 10;
+  }
+  function avgOf(arr) { return arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0; }
+
+  const METRICS = ['mennyiseg', 'bevetel'];
+  const weekdays = [];
+  const heatmap = { mennyiseg: [], bevetel: [] };
+  let grandTotalMenny = 0;
+  for (let wd = 0; wd < 7; wd++) {
+    const dates = datesByWd.get(wd);
+    const hourly = { mennyiseg: { avg: [], median: [] }, bevetel: { avg: [], median: [] } };
+    let peakMenny = 0, totalMenny = 0;
+    for (let h = 0; h < 24; h++) {
+      const mennyValues = [], bevValues = [];
+      dates.forEach((d) => {
+        const cell = dateHourMap.get(`${d}-${h}`);
+        mennyValues.push(cell ? cell.mennyiseg : 0);
+        bevValues.push(cell ? cell.bevetel : 0);
+      });
+      const mennyAvg = Math.round(avgOf(mennyValues) * 10) / 10;
+      hourly.mennyiseg.avg.push(mennyAvg);
+      hourly.mennyiseg.median.push(median(mennyValues));
+      hourly.bevetel.avg.push(Math.round(avgOf(bevValues)));
+      hourly.bevetel.median.push(median(bevValues));
+      totalMenny += mennyAvg;
+      if (mennyAvg > peakMenny) peakMenny = mennyAvg;
+    }
+    METRICS.forEach((m) => heatmap[m].push(hourly[m].avg));
+    grandTotalMenny += totalMenny;
+
+    let recommendation = null;
+    if (dates.length && peakMenny > 0) {
+      const peakHour = hourly.mennyiseg.avg.indexOf(peakMenny);
+      recommendation = `${labelsRagozott[wd]} átlagosan ${Math.round(totalMenny * 10) / 10} db kel el naponta, a csúcs ${peakHour}:00–${peakHour + 1}:00 között van (átlagosan ${peakMenny} db/óra).`;
+    } else if (dates.length) {
+      recommendation = `${labelsRagozott[wd]} a vizsgált időszakban nem fogyott ez a cikk.`;
+    }
+
+    weekdays.push({ wd, label: labels[wd], napok: dates.length, hourly, totalAvgMenny: totalMenny, peakAvgMenny: peakMenny, recommendation });
+  }
+
+  const best = [...weekdays].filter((w) => w.napok > 0).sort((a, b) => b.totalAvgMenny - a.totalAvgMenny)[0];
+  const globalRecommendation = best && best.totalAvgMenny > 0
+    ? `A(z) "${cikk}" legerősebb napja: ${best.label} (átlagosan ${Math.round(best.totalAvgMenny * 10) / 10} db/nap). A vizsgált időszak teljes mennyisége: ${Math.round(grandTotalMenny * 10) / 10} db/nap-egyenérték átlagban a hét napjaira vetítve.`
+    : `A(z) "${cikk}" nem fogyott a vizsgált időszakban.`;
+
+  sendJson(res, 200, { from, to, cikk, weekdays, heatmap, globalRecommendation });
+});
+
+route('GET', '/api/summary', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const cur = get(k,
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
+    [from, to]
+  );
+  const byFizmod = all(k,
+    `SELECT fizmod, COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY fizmod ORDER BY revenue DESC`,
+    [from, to]
+  );
+  // előző, azonos hosszúságú időszak a trendhez
+  const spanDays = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+  const prevTo = new Date(new Date(from).getTime() - 86400000).toISOString().slice(0, 10);
+  const prevFrom = new Date(new Date(from).getTime() - spanDays * 86400000).toISOString().slice(0, 10);
+  const prev = get(k,
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`,
+    [prevFrom, prevTo]
+  );
+  sendJson(res, 200, {
+    from, to,
+    revenue: cur.revenue, receiptCount: cur.cnt,
+    avgBasket: cur.cnt ? Math.round(cur.revenue / cur.cnt) : 0,
+    byFizmod,
+    prev: { revenue: prev.revenue, receiptCount: prev.cnt, from: prevFrom, to: prevTo },
+  });
+});
+
+route('GET', '/api/revenue-series', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const group = ['hour', 'day', 'week', 'month'].includes(query.group) ? query.group : 'day';
+
+  if (group === 'hour') {
+    if (from !== to) {
+      return sendJson(res, 400, { error: 'Óránkénti bontáshoz egyetlen napot válassz ki (a kezdő és záró dátum legyen ugyanaz).' });
+    }
+    // Az órás bontáshoz a rendkezdatum (a nyugta tényleges kezdési időpontja)
+    // kell, NEM az umdate — utóbbi azt mutatja, mikor szinkronizálódott utoljára
+    // a sor a szerverre, ami sok nyugtánál egyszerre, jóval később történik,
+    // és órás bontásban félrevezető torlódást mutatna egyetlen órában.
+    const rows = all(k,
+      `SELECT strftime('%H', rendkezdatum) AS hh, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(*) AS cnt
+       FROM nyfej WHERE keltdat = ? AND rendkezdatum IS NOT NULL AND ${NOT_STORNO} GROUP BY hh`,
+      [from]
+    );
+    const byHour = new Map(rows.map((r) => [r.hh, r]));
+    const points = [];
+    for (let h = 0; h < 24; h++) {
+      const hh = String(h).padStart(2, '0');
+      const row = byHour.get(hh);
+      points.push({ d: hh, revenue: row ? row.revenue : 0, cnt: row ? row.cnt : 0 });
+    }
+    return sendJson(res, 200, { group, points });
+  }
+
+  const daily = all(k,
+    `SELECT keltdat AS d, IFNULL(SUM(bruttokp+bruttoafr+bruttokartya),0) AS revenue, COUNT(*) AS cnt
+     FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ${NOT_STORNO} GROUP BY keltdat ORDER BY keltdat`,
+    [from, to]
+  );
+
+  // A GROUP BY keltdat csak azokat a napokat adja vissza, amiken tényleg volt
+  // forgalom — forgalom nélküli napokra NULLA-val ki kell tölteni a sorozatot,
+  // különben a grafikon elszórt pontokat kap folytonos vonal helyett, ha a
+  // tartományban csak néhány napon volt adat.
+  const dailyMap = new Map(daily.map((r) => [r.d, r]));
+  const allDays = [];
+  {
+    const cursor = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    while (cursor <= end) {
+      const iso = cursor.toISOString().slice(0, 10);
+      const row = dailyMap.get(iso);
+      allDays.push({ d: iso, revenue: row ? row.revenue : 0, cnt: row ? row.cnt : 0 });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  }
+
+  if (group === 'day') return sendJson(res, 200, { group, points: allDays });
+  const buckets = new Map();
+  for (const row of allDays) {
+    const d = new Date(row.d);
+    let key;
+    if (group === 'month') {
+      key = row.d.slice(0, 7);
+    } else {
+      const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const dayNum = (tmp.getUTCDay() + 6) % 7; // hétfő=0
+      tmp.setUTCDate(tmp.getUTCDate() - dayNum);
+      key = tmp.toISOString().slice(0, 10);
+    }
+    const acc = buckets.get(key) || { d: key, revenue: 0, cnt: 0 };
+    acc.revenue += row.revenue; acc.cnt += row.cnt;
+    buckets.set(key, acc);
+  }
+  sendJson(res, 200, { group, points: [...buckets.values()].sort((a, b) => a.d.localeCompare(b.d)) });
+});
+
+
+route('GET', '/api/products', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const q = (query.q || '').trim();
+  const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
+  const offset = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
+  const params = [from, to];
+  let where = `nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')}`;
+  if (q) { where += ' AND nt.megnevezes LIKE ?'; params.push(`%${q}%`); }
+  const rows = all(k,
+    `SELECT nt.megnevezes AS nev, SUM(nt.menny) AS mennyiseg, nt.me AS me,
+            IFNULL(SUM(nt.sorbrutto),0) AS arbevetel, COUNT(DISTINCT nt.bsz) AS nyugtaszam
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE ${where}
+     GROUP BY nt.megnevezes, nt.me
+     ORDER BY arbevetel DESC
+     LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
+  );
+  const totalRow = get(k,
+    `SELECT COUNT(DISTINCT nt.megnevezes) AS cnt FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz WHERE ${where}`,
+    params
+  );
+  sendJson(res, 200, { from, to, q, items: rows, total: totalRow.cnt, limit, offset });
+});
+
+route('GET', '/api/receipts', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const q = (query.q || '').trim();
+  const fizmod = (query.fizmod || '').trim();
+  const min = query.min ? parseFloat(query.min) : null;
+  const max = query.max ? parseFloat(query.max) : null;
+  const limit = Math.min(parseInt(query.limit || '25', 10) || 25, 200);
+  const offset = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
+
+  let where = `keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`;
+  const params = [from, to];
+  if (q) { where += ' AND bsz LIKE ?'; params.push(`%${q}%`); }
+  if (fizmod) { where += ' AND fizmod = ?'; params.push(fizmod); }
+  if (min !== null) { where += ' AND (bruttokp+bruttoafr+bruttokartya) >= ?'; params.push(min); }
+  if (max !== null) { where += ' AND (bruttokp+bruttoafr+bruttokartya) <= ?'; params.push(max); }
+
+  const rows = all(k,
+    `SELECT bsz, keltdat, fizmod, (bruttokp+bruttoafr+bruttokartya) AS osszeg
+     FROM nyfej WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
+  );
+  const totalRow = get(k, `SELECT COUNT(*) AS cnt FROM nyfej WHERE ${where}`, params);
+  sendJson(res, 200, { from, to, q, fizmod, items: rows, total: totalRow.cnt, limit, offset });
+});
+
+route('GET', '/api/vat-breakdown', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+  const rows = all(k,
+    `SELECT nt.afakod AS afakod,
+            IFNULL(SUM(nt.sorbrutto),0) AS brutto,
+            IFNULL(SUM(nt.sorafa),0) AS afa,
+            IFNULL(SUM(nt.sornetto),0) AS netto
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')}
+     GROUP BY nt.afakod ORDER BY brutto DESC`,
+    [from, to]
+  );
+  sendJson(res, 200, { from, to, items: rows });
+});
+
+// Cikktörzs (a teljes termékkínálat, nem csak amit eladtak) — egyelőre
+// csak olvasható. Ez táplálja a Készlet modul termékválasztóját is.
+route('GET', '/api/products/master', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey,
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status, c.afakodelv AS afakodElviteli,
+            IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
+     WHERE c.status = 'A' ORDER BY c.megnevezes`
+  );
+  let pendingRows = [];
+  try {
+    pendingRows = productChangesDb.prepare(
+      `SELECT payload, meta FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'cikk_upsert'`
+    ).all(session.companyKey);
+  } catch (_) {}
+  const pendingMap = new Map();
+  for (const p of pendingRows) {
+    try {
+      const pl = JSON.parse(p.payload);
+      const meta = p.meta ? JSON.parse(p.meta) : {};
+      pendingMap.set(pl.megnevezes, { ...pl, csoportNev: pl.csoport?.megnevezes || meta.csoportNev || null });
+    } catch (_) {}
+  }
+  const items = rows.map((r) => ({ ...r, pendingChange: pendingMap.get(r.nev) || null }));
+  // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
+  const existingNames = new Set(rows.map((r) => r.nev));
+  for (const [nev, pl] of pendingMap) {
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, pendingChange: pl, isNewPending: true });
+  }
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+  sendJson(res, 200, { items });
+});
+
+route('GET', '/api/products/groups', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey, `SELECT megnevezes AS nev FROM cikkcsop WHERE status = 'A' ORDER BY megnevezes`);
+  const names = new Set(rows.map((r) => r.nev));
+  let pending = [];
+  try {
+    pending = productChangesDb.prepare(
+      `SELECT payload FROM product_changes WHERE company_key = ? AND status = 'pending' AND change_type = 'csoport_upsert'`
+    ).all(session.companyKey);
+  } catch (_) {}
+  const items = rows.map((r) => ({ nev: r.nev, isNewPending: false }));
+  for (const p of pending) {
+    try {
+      const pl = JSON.parse(p.payload);
+      if (pl.megnevezes && !names.has(pl.megnevezes)) { items.push({ nev: pl.megnevezes, isNewPending: true }); names.add(pl.megnevezes); }
+    } catch (_) {}
+  }
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+  sendJson(res, 200, { items });
+});
+
+// Egyedi cikk létrehozása/módosítása — függő módosításként kerül be, NEM
+// közvetlenül a szinkronizált adatbázisba (lásd fenti magyarázat).
+// A payload mezőnevei PONTOSAN a cikkt / cikkcsop táblák oszlopneveivel
+// kell, hogy egyezzenek (kisbetűvel) — az androidos oldal ezek alapján ír
+// közvetlenül a saját adatbázisába, nem tud kitalálni egyedi elnevezéseket,
+// amiket a webes felület esetleg máshogy hívna.
+// FONTOS: az androidos alkalmazás a payload MINDEN kulcsát egy az egyben,
+// generikusan (mezőnév = oszlopnév) próbálja ráilleszteni a cikkt táblára,
+// és HA BÁRMELYIK KULCS NEM LÉTEZŐ OSZLOP, elutasítja az egész szinkront
+// ("Érvénytelen mezőnév érkezett a JSON-ben" hiba). Emiatt a payload
+// KIZÁRÓLAG szó szerinti cikkt-oszlopneveket tartalmazhat — semmi mást,
+// még beágyazott objektumot sem (ezt élesben, androidos hibaüzenetből
+// derítettük ki). A tervezett csoport nevét ezért KÜLÖN, a "meta" mezőben
+// tároljuk — az csak a weben jelenik meg, sosem kerül elküldésre.
+// A fejlesztő megerősítette (2026.07.15), hogy a "csoport": { "megnevezes":
+// ... } mezőt mostantól KÜLÖN, nem-generikus logikával dolgozzák fel az
+// androidos oldalon (nem a cikkt tábla generikus, mezőnév=oszlopnév alapú
+// illesztőjén keresztül) — ezért ismét belekerülhet a payloadba.
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }) {
+  const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
+  if (csoportNev) payload.csoport = { megnevezes: csoportNev };
+  return payload;
+}
+
+route('POST', '/api/products/change', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const megnevezes = String(body.megnevezes || '').trim();
+  if (!megnevezes) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
+  const bruttoar = parseFloat(body.bruttoar);
+  if (!Number.isFinite(bruttoar) || bruttoar < 0) return sendJson(res, 400, { error: 'Érvénytelen bruttó ár.' });
+  const afakod = String(body.afakod || '').trim();
+  if (!afakod) return sendJson(res, 400, { error: 'Az ÁFA kód kötelező.' });
+  if (!VALID_AFA_CODES.includes(afakod)) return sendJson(res, 400, { error: `Érvénytelen ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
+  const me = String(body.me || '').trim() || 'Darab';
+  const csoportNev = String(body.csoportNev || '').trim() || null;
+  const vonalkod = String(body.vonalkod || '').trim() || null;
+  const afakodelv = String(body.afakodElviteli || '').trim() || null;
+  if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
+  logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Új termékcsoport létrehozása — szintén függő módosításként.
+route('POST', '/api/products/group', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const megnevezes = String(body.megnevezes || '').trim();
+  if (!megnevezes) return sendJson(res, 400, { error: 'A csoport neve kötelező.' });
+  addProductChange(session.companyKey, 'csoport_upsert', { megnevezes }, 'web_form');
+  logActivity({ type: 'product_group_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: megnevezes });
+  sendJson(res, 200, { ok: true });
+});
+
+// Tömeges árváltoztatás — csoport szerint vagy megadott cikknevek szerint,
+// százalékos vagy fix összegű módosítással. Cikkenként külön függő
+// módosítást hoz létre.
+route('POST', '/api/products/bulk-price', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const mode = body.mode === 'fixed' ? 'fixed' : 'percent';
+  const value = parseFloat(body.value);
+  if (!Number.isFinite(value)) return sendJson(res, 400, { error: 'Érvénytelen érték.' });
+  const csoportNev = body.csoportNev ? String(body.csoportNev).trim() : null;
+  const names = Array.isArray(body.names) ? body.names.filter(Boolean) : null;
+  if (!csoportNev && !names) return sendJson(res, 400, { error: 'Válassz csoportot vagy cikkeket.' });
+
+  let products = all(session.companyKey,
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.afakodelv, IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A'`
+  );
+  if (csoportNev) products = products.filter((p) => p.csoportNev === csoportNev);
+  if (names) products = products.filter((p) => names.includes(p.nev));
+  if (!products.length) return sendJson(res, 400, { error: 'Nincs a feltételnek megfelelő cikk.' });
+
+  for (const p of products) {
+    let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
+    newPrice = Math.max(0, Math.round(newPrice));
+    addProductChange(session.companyKey, 'cikk_upsert',
+      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev }),
+      'web_bulk_price');
+  }
+  logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
+  sendJson(res, 200, { ok: true, count: products.length });
+});
+
+// Függő + korábbi módosítások listája (a webes "Cikktörzs" nézet állapot-oszlopához).
+route('GET', '/api/products/changes', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = productChangesDb.prepare(
+    `SELECT id, change_type AS changeType, payload, status, source, created_at AS createdAt, delivered_at AS deliveredAt
+     FROM product_changes WHERE company_key = ? ORDER BY id DESC LIMIT 300`
+  ).all(session.companyKey);
+  const items = rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
+  sendJson(res, 200, { items });
+});
+
+// CSV export — a jelenlegi, élő cikktörzs letöltése Excelben szerkeszthető formában.
+const CSV_HEADERS = ['Cikknév', 'Csoport', 'Egység', 'Bruttó ár', 'ÁFA kód', 'Vonalkód', 'Elviteli ÁFA kód'];
+
+route('GET', '/api/products/export', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rows = all(session.companyKey,
+    `SELECT c.megnevezes AS nev, IFNULL(g.megnevezes,'') AS csoport, c.me, c.bruttoar, c.afakod, IFNULL(c.vonalkod,'') AS vonalkod, IFNULL(c.afakodelv,'') AS afakodelv
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A' ORDER BY c.megnevezes`
+  );
+  const csv = toCsv(
+    rows.map((r) => ({ 'Cikknév': r.nev, 'Csoport': r.csoport, 'Egység': r.me, 'Bruttó ár': r.bruttoar, 'ÁFA kód': r.afakod, 'Vonalkód': r.vonalkod, 'Elviteli ÁFA kód': r.afakodelv })),
+    CSV_HEADERS
+  );
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs.csv"' });
+  res.end(csv);
+});
+
+// Letölthető minta CSV (üres kiindulási sablon, pár példasorral).
+route('GET', '/api/products/import-template', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const example = [
+    { 'Cikknév': 'Espresso', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 650, 'ÁFA kód': '05%', 'Vonalkód': '', 'Elviteli ÁFA kód': '' },
+    { 'Cikknév': 'Croissant', 'Csoport': 'Kávézó kínálat', 'Egység': 'Darab', 'Bruttó ár': 790, 'ÁFA kód': '27%', 'Vonalkód': '', 'Elviteli ÁFA kód': '27%' },
+  ];
+  const csv = toCsv(example, CSV_HEADERS);
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cikktorzs-minta.csv"' });
+  res.end(csv);
+});
+
+// CSV import — soronként egy függő cikk-módosítást hoz létre.
+route('POST', '/api/products/import', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const buf = await readBody(req, 5 * 1024 * 1024);
+  const text = buf.toString('utf8');
+  const rows = parseCsv(text);
+  if (!rows.length) return sendJson(res, 400, { error: 'Üres vagy érvénytelen CSV fájl.' });
+  const header = rows[0].map((h) => h.trim());
+  const idx = {
+    nev: header.indexOf('Cikknév'), csoport: header.indexOf('Csoport'), me: header.indexOf('Egység'),
+    ar: header.indexOf('Bruttó ár'), afa: header.indexOf('ÁFA kód'), vonalkod: header.indexOf('Vonalkód'),
+    afakodelv: header.indexOf('Elviteli ÁFA kód'),
+  };
+  if (idx.nev === -1 || idx.ar === -1 || idx.afa === -1) {
+    return sendJson(res, 400, { error: 'Hiányzó kötelező oszlop (Cikknév, Bruttó ár, ÁFA kód). Használd a letölthető mintát.' });
+  }
+  let count = 0;
+  const errors = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const nev = (r[idx.nev] || '').trim();
+    if (!nev) continue;
+    const ar = parseFloat(r[idx.ar]);
+    const afa = (r[idx.afa] || '').trim();
+    if (!Number.isFinite(ar) || ar < 0 || !afa) { errors.push(`${i + 1}. sor: hiányos vagy érvénytelen adat`); continue; }
+    if (!VALID_AFA_CODES.includes(afa)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen ÁFA kód (${afa}) — megengedett: ${VALID_AFA_CODES.join(', ')}`); continue; }
+    const afakodElvitelRaw = (idx.afakodelv > -1 && r[idx.afakodelv]) ? r[idx.afakodelv].trim() : null;
+    if (afakodElvitelRaw && !VALID_AFA_CODES.includes(afakodElvitelRaw)) { errors.push(`${i + 1}. sor (${nev}): érvénytelen elviteli ÁFA kód (${afakodElvitelRaw})`); continue; }
+    const csoportNevImport = (idx.csoport > -1 && r[idx.csoport]) ? r[idx.csoport].trim() : null;
+    addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({
+      megnevezes: nev,
+      me: (idx.me > -1 && r[idx.me]) ? r[idx.me].trim() : 'Darab',
+      bruttoar: ar,
+      afakod: afa,
+      vonalkod: (idx.vonalkod > -1 && r[idx.vonalkod]) ? r[idx.vonalkod].trim() : null,
+      afakodelv: afakodElvitelRaw,
+      csoportNev: csoportNevImport,
+    }), 'excel_import');
+    count++;
+  }
+  logActivity({ type: 'product_import', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${count} cikk importálva${errors.length ? `, ${errors.length} hibás sor` : ''}` });
+  sendJson(res, 200, { ok: true, count, errors });
+});
+
+// ---------------------------------------------------------------------------
+// Készlet — bevételezés alapú nyilvántartás. A stock.db-ben tárolt
+// bevételezések és a szinkronizált nytet-ből számolt eladások különbségéből
+// adódik a jelenlegi készlet. Teljes, dátumhatár nélküli összesítés (a
+// készlet fizikai állapot, nem egy kiválasztott jelentési időszakra
+// vonatkozik). MINDEN aktív cikk szerepel a listában, akkor is, ha még
+// egyszer sem volt hozzá bevételezés rögzítve (0-ként) — ez szándékos: a
+// meglévő boltoknak a valós készletet egy nyitó bevételezéssel kell majd
+// feltölteniük, addig természetes, hogy negatív értéket mutat.
+// ---------------------------------------------------------------------------
+function readThresholds(companyKey) {
+  const rows = stockDb.prepare(`SELECT scope, nev, kuszob FROM keszlet_riasztas WHERE company_key = ?`).all(companyKey);
+  const cikk = new Map(), csoport = new Map();
+  for (const r of rows) (r.scope === 'cikk' ? cikk : csoport).set(r.nev, r.kuszob);
+  return { cikk, csoport };
+}
+
+route('GET', '/api/stock', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const q = (query.q || '').trim().toLowerCase();
+  const csoportSzuro = (query.csoport || '').trim();
+
+  const products = all(k,
+    `SELECT c.megnevezes AS nev, c.me,
+            IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
+     FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
+     WHERE c.status = 'A'`
+  );
+  const received = stockDb.prepare(
+    `SELECT cikk_nev AS nev, SUM(mennyiseg) AS mennyiseg, MAX(datum) AS utolsoBevetelezes
+     FROM bevetelezesek WHERE company_key = ? GROUP BY cikk_nev`
+  ).all(k);
+  const receivedMap = new Map(received.map((r) => [r.nev, r]));
+  const sold = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE ${notStorno('nf')}
+     GROUP BY nt.megnevezes`
+  );
+  const soldMap = new Map(sold.map((r) => [r.nev, r.mennyiseg]));
+  const thresholds = readThresholds(k);
+
+  // olyan cikk is bekerülhet, ami már nincs az aktív cikkt-ben, de van rá
+  // bevételezés vagy eladás (pl. kifutott termék) — ne tűnjön el nyomtalanul
+  const byName = new Map(products.map((p) => [p.nev, p]));
+  for (const r of received) if (!byName.has(r.nev)) byName.set(r.nev, { nev: r.nev, me: null, csoportNev: 'Nincs csoport' });
+  for (const s of sold) if (!byName.has(s.nev)) byName.set(s.nev, { nev: s.nev, me: null, csoportNev: 'Nincs csoport' });
+
+  let items = [...byName.values()].map((p) => {
+    const r = receivedMap.get(p.nev);
+    const bevetelezve = r ? r.mennyiseg : 0;
+    const eladva = soldMap.get(p.nev) || 0;
+    const keszlet = bevetelezve - eladva;
+    const kuszob = thresholds.cikk.has(p.nev) ? thresholds.cikk.get(p.nev)
+      : (thresholds.csoport.has(p.csoportNev) ? thresholds.csoport.get(p.csoportNev) : null);
+    return {
+      nev: p.nev, me: p.me, csoportNev: p.csoportNev,
+      bevetelezve, eladva, keszlet,
+      utolsoBevetelezes: r ? r.utolsoBevetelezes : null,
+      kuszob, alacsony: kuszob != null && keszlet < kuszob,
+    };
+  });
+
+  // csoportok listája (szűretlen alapon, hogy a csempék ne tűnjenek el szűréskor)
+  const groupCounts = new Map();
+  for (const it of items) groupCounts.set(it.csoportNev, (groupCounts.get(it.csoportNev) || 0) + 1);
+  const groups = [...groupCounts.entries()].map(([nev, cnt]) => ({ nev, cnt, kuszob: thresholds.csoport.has(nev) ? thresholds.csoport.get(nev) : null })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  if (csoportSzuro) items = items.filter((it) => it.csoportNev === csoportSzuro);
+  if (q) items = items.filter((it) => it.nev.toLowerCase().includes(q));
+  items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  sendJson(res, 200, { items, groups });
+});
+
+route('GET', '/api/stock/receipts', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
+  const rows = stockDb.prepare(
+    `SELECT id, datum, cikk_nev AS cikkNev, me, mennyiseg, beszerzesi_ar AS beszerzesiAr, szallito, megjegyzes, szamla_fajl AS szamlaFajl, created_at AS createdAt
+     FROM bevetelezesek WHERE company_key = ? ORDER BY id DESC LIMIT ?`
+  ).all(session.companyKey, limit);
+  sendJson(res, 200, { items: rows });
+});
+
+route('POST', '/api/stock/receipt', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cikkNev = String(body.cikkNev || '').trim();
+  const mennyiseg = parseFloat(body.mennyiseg);
+  if (!cikkNev) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
+  if (!Number.isFinite(mennyiseg) || mennyiseg <= 0) return sendJson(res, 400, { error: 'A mennyiségnek pozitív számnak kell lennie.' });
+  const datum = /^\d{4}-\d{2}-\d{2}$/.test(body.datum || '') ? body.datum : todayIsoServer();
+  const me = String(body.me || '').trim() || null;
+  const beszerzesiAr = body.beszerzesiAr !== undefined && body.beszerzesiAr !== '' ? parseFloat(body.beszerzesiAr) : null;
+  const szallito = String(body.szallito || '').trim() || null;
+  const megjegyzes = String(body.megjegyzes || '').trim() || null;
+
+  // Számla-fotó/fájl csatolása — opcionális, base64-ben érkezik (data URL
+  // vagy nyers base64), a szerver menti fájlba, csak a fájlnevet tároljuk el.
+  let szamlaFajl = null;
+  if (body.fajlAdat && body.fajlNev) {
+    const MAX_BYTES = 8 * 1024 * 1024; // 8 MB — bőven elég egy telefonos fotóhoz/PDF-hez
+    const match = /^data:([^;]+);base64,(.+)$/.exec(body.fajlAdat);
+    const b64 = match ? match[2] : body.fajlAdat;
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length > MAX_BYTES) return sendJson(res, 400, { error: 'A csatolt fájl túl nagy (max. 8 MB).' });
+    const ext = (path.extname(String(body.fajlNev)) || '.jpg').slice(0, 6).replace(/[^a-zA-Z0-9.]/g, '');
+    const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
+    szamlaFajl = `${crypto.randomBytes(12).toString('hex')}${ext}`;
+    fs.writeFileSync(path.join(safeDir, szamlaFajl), buf);
+  }
+
+  const result = stockDb.prepare(
+    `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, szamla_fajl, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(session.companyKey, datum, cikkNev, me, mennyiseg, beszerzesiAr, szallito, megjegyzes, szamlaFajl, new Date().toISOString());
+
+  logActivity({ type: 'stock_receipt_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${cikkNev}: ${mennyiseg} ${me || ''}`.trim() });
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+// A bevételezéshez csatolt számla-fájl (fotó/PDF) letöltése/megtekintése —
+// csak a saját cég munkamenete érheti el.
+route('GET', '/api/stock/receipt-file', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const id = parseInt(query.id, 10);
+  if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
+  const row = stockDb.prepare(`SELECT szamla_fajl FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
+  if (!row || !row.szamla_fajl) return sendJson(res, 404, { error: 'Nincs csatolt fájl.' });
+  const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  const filePath = path.join(safeDir, row.szamla_fajl);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található.' });
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.pdf': 'application/pdf', '.heic': 'image/heic' }[ext] || 'application/octet-stream';
+  const data = fs.readFileSync(filePath);
+  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' });
+  res.end(data);
+});
+
+route('DELETE', '/api/stock/receipt', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const id = parseInt(query.id, 10);
+  if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
+  const existing = stockDb.prepare(`SELECT cikk_nev, mennyiseg, szamla_fajl FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
+  const result = stockDb.prepare(`DELETE FROM bevetelezesek WHERE id = ? AND company_key = ?`).run(id, session.companyKey);
+  if (result.changes === 0) return sendJson(res, 404, { error: 'Nem található (vagy nem a te cégedhez tartozik).' });
+  if (existing && existing.szamla_fajl) {
+    try {
+      const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
+      fs.unlinkSync(path.join(safeDir, existing.szamla_fajl));
+    } catch (_) { /* ha a fájl már nincs a lemezen, nem gond */ }
+  }
+  logActivity({ type: 'stock_receipt_delete', ok: true, companyKey: session.companyKey, nev: session.nev, detail: existing ? `${existing.cikk_nev}: ${existing.mennyiseg}` : `#${id}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Teljes készlet nullázása — minden cikkhez egy korrekciós bevételezési
+// tételt szúr be, ami pontosan nullára hozza az egyenleget. A meglévő
+// bevételezési/eladási előzmény TELJES EGÉSZÉBEN megmarad, ez csak egy
+// újabb, jól látható, "Készlet nullázása" jelölésű tételt ad hozzá —
+// nem törli a korábbi adatokat.
+route('POST', '/api/stock/reset', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+
+  const products = all(k, `SELECT megnevezes AS nev, me FROM cikkt WHERE status = 'A'`);
+  const received = stockDb.prepare(
+    `SELECT cikk_nev AS nev, SUM(mennyiseg) AS mennyiseg FROM bevetelezesek WHERE company_key = ? GROUP BY cikk_nev`
+  ).all(k);
+  const receivedMap = new Map(received.map((r) => [r.nev, r.mennyiseg]));
+  const sold = all(k,
+    `SELECT nt.megnevezes AS nev, IFNULL(SUM(nt.menny),0) AS mennyiseg
+     FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
+     WHERE ${notStorno('nf')}
+     GROUP BY nt.megnevezes`
+  );
+  const soldMap = new Map(sold.map((r) => [r.nev, r.mennyiseg]));
+
+  const byName = new Map(products.map((p) => [p.nev, p]));
+  for (const r of received) if (!byName.has(r.nev)) byName.set(r.nev, { nev: r.nev, me: null });
+  for (const s of sold) if (!byName.has(s.nev)) byName.set(s.nev, { nev: s.nev, me: null });
+
+  const datum = todayIsoServer();
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const p of byName.values()) {
+    const bevetelezve = receivedMap.get(p.nev) || 0;
+    const eladva = soldMap.get(p.nev) || 0;
+    const keszlet = bevetelezve - eladva;
+    if (keszlet === 0) continue; // már nulla, nincs teendő
+    stockDb.prepare(
+      `INSERT INTO bevetelezesek (company_key, datum, cikk_nev, me, mennyiseg, beszerzesi_ar, szallito, megjegyzes, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`
+    ).run(k, datum, p.nev, p.me, -keszlet, 'Készlet nullázása (automatikus korrekció)', now);
+    count++;
+  }
+  logActivity({ type: 'stock_reset', ok: true, companyKey: k, nev: session.nev, detail: `${count} cikk készlete nullázva` });
+  sendJson(res, 200, { ok: true, count });
+});
+
+
+route('POST', '/api/stock/threshold', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const scope = body.scope === 'csoport' ? 'csoport' : 'cikk';
+  const nev = String(body.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
+  const kuszob = parseFloat(body.kuszob);
+  if (!Number.isFinite(kuszob) || kuszob < 0) return sendJson(res, 400, { error: 'A küszöbnek nemnegatív számnak kell lennie.' });
+  stockDb.prepare(
+    `INSERT INTO keszlet_riasztas (company_key, scope, nev, kuszob) VALUES (?, ?, ?, ?)
+     ON CONFLICT(company_key, scope, nev) DO UPDATE SET kuszob = excluded.kuszob`
+  ).run(session.companyKey, scope, nev, kuszob);
+  logActivity({ type: 'stock_threshold_set', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${scope === 'csoport' ? 'Csoport' : 'Cikk'}: ${nev} → ${kuszob}` });
+  sendJson(res, 200, { ok: true });
+});
+
+route('DELETE', '/api/stock/threshold', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const scope = query.scope === 'csoport' ? 'csoport' : 'cikk';
+  const nev = String(query.nev || '').trim();
+  if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
+  stockDb.prepare(`DELETE FROM keszlet_riasztas WHERE company_key = ? AND scope = ? AND nev = ?`).run(session.companyKey, scope, nev);
+  logActivity({ type: 'stock_threshold_delete', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${scope === 'csoport' ? 'Csoport' : 'Cikk'}: ${nev}` });
+  sendJson(res, 200, { ok: true });
+});
+
+// NTAK (turisztikai adatszolgáltatás) állapot: adatküldések eredménye +
+// napi nyitás-zárás log. Azoknál a cégeknél, akiknek nincs NTAK-kötelezettsége
+// (pl. a demó teszt cégek), ezek a táblák egyszerűen üresek — a végpont ilyenkor
+// is 200-at ad, üres listákkal, a felület pedig "nincs adat" állapotot mutat.
+route('GET', '/api/ntak/summary', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const { from, to } = resolveRange(query);
+
+  // Diagnosztika — MINDIG kiszámoljuk, függetlenül a kiválasztott
+  // időszaktól, hogy üres eredmény esetén a felület meg tudja mutatni,
+  // MIÉRT nincs adat (nincs egyáltalán szinkronizált NTAK-adat, vagy
+  // csak épp ezen az időszakon kívül van) — minden lekérdezés külön
+  // try/catch-ben, hogy egy hiányzó/eltérő szerkezetű tábla se
+  // akassza meg a többit.
+  const diag = { nyfej: null, ntakrms: null, ntaknapzaras: null, error: null };
+  try {
+    diag.nyfej = get(k, `SELECT COUNT(*) AS total, MIN(keltdat) AS minDate, MAX(keltdat) AS maxDate,
+      SUM(CASE WHEN ntakzarasid IS NOT NULL THEN 1 ELSE 0 END) AS vanZarasid,
+      SUM(CASE WHEN ellenorzott IS NOT NULL THEN 1 ELSE 0 END) AS vanEllenorzott
+      FROM nyfej`);
+  } catch (e) { diag.error = `nyfej: ${e.message}`; }
+  try {
+    diag.ntakrms = get(k, `SELECT COUNT(*) AS total, MIN(date(kulddate)) AS minDate, MAX(date(kulddate)) AS maxDate FROM ntakrms`);
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms: ${e.message}`; }
+  try {
+    diag.ntaknapzaras = get(k, `SELECT COUNT(*) AS total, MIN(targynap) AS minDate, MAX(targynap) AS maxDate FROM ntaknapzaras`);
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `ntaknapzaras: ${e.message}`; }
+
+  let napzarasok = [];
+  try {
+    const napzarasokRaw = all(k,
+      `SELECT n.id, n.targynap, n.nyitas, n.zaras, n.borravalo, n.naptipus, n.uuid
+       FROM ntaknapzaras n WHERE n.targynap BETWEEN ? AND ? ORDER BY n.targynap DESC`,
+      [from, to]
+    );
+    // A napzárás tényleges NTAK-küldési állapotát az nyfej táblából, a hozzá
+    // tartozó nyugták (nyfej.ntakzarasid = ntaknapzaras.id) állapotainak
+    // összesítéséből számoljuk — ez a megbízható, elsődleges forrás.
+    napzarasok = napzarasokRaw.map((n) => {
+      let stats = [];
+      try {
+        stats = all(k,
+          `SELECT IFNULL(ellenorzott,'NULL') AS ellenorzott, COUNT(*) AS cnt
+           FROM nyfej WHERE ntakzarasid = ? GROUP BY ellenorzott`,
+          [n.id]
+        );
+      } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `napzárás-státusz (${n.targynap}): ${e.message}`; }
+      let zarasStatusz = null;
+      let zarasNyugtaSzam = 0;
+      if (stats.length) {
+        const byStatus = new Map(stats.map((s) => [s.ellenorzott, s.cnt]));
+        zarasNyugtaSzam = stats.reduce((sum, s) => sum + s.cnt, 0);
+        const sikeres = byStatus.get('TELJESEN_SIKERES') || 0;
+        const hibas = byStatus.get('TELJESEN_HIBAS') || 0;
+        const reszben = byStatus.get('RESZBEN_SIKERES') || byStatus.get('RÉSZBEN_SIKERES') || 0;
+        const ismeretlenVagyNull = byStatus.get('NULL') || 0;
+        if (hibas > 0 || reszben > 0) zarasStatusz = 'RESZBEN_SIKERES';
+        else if (sikeres > 0 && sikeres === zarasNyugtaSzam) zarasStatusz = 'TELJESEN_SIKERES';
+        else if (ismeretlenVagyNull === zarasNyugtaSzam) zarasStatusz = null; // még nincs elküldve
+        else zarasStatusz = 'ISMERETLEN';
+      }
+      const { id, ...rest } = n;
+      return { ...rest, zarasStatusz, zarasNyugtaSzam };
+    });
+  } catch (e) { diag.error = (diag.error ? diag.error + ' | ' : '') + `napzárás lekérdezés: ${e.message}`; }
+
+  let submissionsByStatus = [], submissionsByType = [], recent = [];
+  let usedNyfejFallback = false;
+  try {
+    submissionsByStatus = all(k,
+      `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY ellenorzott ORDER BY cnt DESC`,
+      [from, to]
+    );
+    submissionsByType = all(k,
+      `SELECT url, COUNT(*) AS cnt
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? GROUP BY url ORDER BY cnt DESC`,
+      [from, to]
+    );
+    recent = all(k,
+      `SELECT url, sikeres, uuid, kulddate, elldate, ellenorzott
+       FROM ntakrms WHERE date(kulddate) BETWEEN ? AND ? ORDER BY kulddate DESC LIMIT 100`,
+      [from, to]
+    );
+  } catch (e) {
+    diag.error = (diag.error ? diag.error + ' | ' : '') + `ntakrms lekérdezés: ${e.message}`;
+  }
+
+  // Ha az ntakrms tábla nem létezik (régebbi androidos alkalmazás-verzió),
+  // vagy egyszerűen nincs benne adat a kiválasztott időszakra, a NYUGTÁK
+  // SAJÁT, beépített NTAK-küldési mezőiből (nyfej.kuldstat/ellenorzott)
+  // számoljuk ki ugyanezt — ez ugyanolyan valódi, megbízható forrás,
+  // csak nyugta-szinten, nem egy külön küldési naplóban van.
+  if (!submissionsByStatus.length && !recent.length) {
+    try {
+      submissionsByStatus = all(k,
+        `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS ellenorzott, COUNT(*) AS cnt
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND ellenorzott IS NOT NULL GROUP BY ellenorzott ORDER BY cnt DESC`,
+        [from, to]
+      );
+      const nyfejTotal = get(k, `SELECT COUNT(*) AS cnt FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL`, [from, to]);
+      submissionsByType = nyfejTotal.cnt ? [{ url: 'nyugta-kuldes', cnt: nyfejTotal.cnt }] : [];
+      recent = all(k,
+        `SELECT 'nyugta-kuldes' AS url, bsz, keltdat AS kulddate, NULL AS elldate, ellenorzott, IFNULL(rmsfelduuid, uuid) AS uuid
+         FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL ORDER BY keltdat DESC, id DESC LIMIT 100`,
+        [from, to]
+      );
+      usedNyfejFallback = submissionsByStatus.length > 0 || recent.length > 0;
+    } catch (e) {
+      diag.error = (diag.error ? diag.error + ' | ' : '') + `nyfej-alapú tartalék lekérdezés: ${e.message}`;
+    }
+  }
+
+  sendJson(res, 200, { from, to, napzarasok, submissionsByStatus, submissionsByType, recent, usedNyfejFallback, diag });
+
+});
+
+route('GET', '/api/receipt', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const k = session.companyKey;
+  const bsz = query.bsz;
+  if (!bsz) return sendJson(res, 400, { error: 'bsz paraméter kötelező' });
+  const header = get(k,
+    `SELECT bsz, keltdat, umdate, fizmod, bruttokp, bruttoafr, bruttokartya, sznev, szadoszam, storno, stornozott
+     FROM nyfej WHERE bsz = ?`, [bsz]
+  );
+  if (!header) return sendJson(res, 404, { error: 'Nyugta nem található' });
+  const items = all(k,
+    `SELECT sor, cikkszam, megnevezes, me, menny, bruttoar, afakod, sorbrutto
+     FROM nytet WHERE bsz = ? ORDER BY sor`, [bsz]
+  );
+  sendJson(res, 200, { header, items });
+});
+
+route('GET', '/api/sync/status', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  sendJson(res, 200, meta[session.companyKey] || { lastSync: null, source: null });
+});
+
+// Ide küldi az androidos app időzítve a friss adatbázis-fájlt — CÉGENKÉNT.
+// Hitelesítés: x-api-key fejléc, NEM a böngészős session-nel.
+// Melyik céghez tartozik? Az x-adoszam fejléc (vagy ?adoszam= paraméter) adja meg.
+// Ha ez egy eddig ismeretlen adószám, a cég automatikusan regisztrálódik —
+// így akár több száz eszköz is szinkronizálhat folyamatosan, előzetes
+// admin-beavatkozás nélkül, amíg mindegyik ismeri a közös x-api-key-t.
+// Kérés törzse: a teljes .db fájl nyers bájtjai (application/octet-stream).
+route('POST', '/api/sync/upload', async (req, res, query) => {
+  const ip = getClientIp(req);
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Érvénytelen vagy hiányzó x-api-key.', ip });
+    return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  }
+
+  const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
+  const cegKulcs = companyKeyFromAdoszam(adoszamRaw);
+  if (cegKulcs.length < 8) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: null, nev: null, detail: 'Hiányzó vagy érvénytelen x-adoszam.', ip });
+    return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter — melyik céghez tartozik a feltöltés?' });
+  }
+  // Új: x-telephely fejléc — melyik telephelyről érkezik a feltöltés.
+  // Ha egy még nem frissített androidos app nem küldi, "01"-re esik
+  // vissza (visszafelé kompatibilitás az egytelephelyes cégekkel).
+  const telephelyRaw = req.headers['x-telephely'] || query.telephely;
+  const telephelyKod = normalizeTelephelyKod(telephelyRaw);
+  const key = makeSiteKey(cegKulcs, telephelyKod);
+
+  // Eszköz-azonosítás — TELJESEN OPCIONÁLIS fejlécek. Ha egy régebbi app
+  // nem küldi ezeket, egyszerűen nem történik semmi extra (lásd
+  // recordDeviceSync megjegyzését). Ha egy telephelyen csak 1 eszköz
+  // szinkronizál, ezt sosem kell megkövetelni — csak akkor számít, ha
+  // ténylegesen több eszköz váltakozva ír ugyanoda.
+  const eszkozUuid = req.headers['x-eszkoz-uuid'] || null;
+  const progtip = req.headers['x-progtip'] || null;
+  const verzio = req.headers['x-verzio'] || null;
+
+  let buf;
+  // A korábbi 100 MB-os korlát önkényes volt, semmi köze a git/GitHub-hoz
+  // (az egy teljesen más, a repóba kerülő induló mintaadatokra vonatkozott).
+  // Itt most gyakorlatilag korlátlanra emeltük (2 GB) — ennél nagyobb valódi
+  // POS-adatbázis nem valószínű, de ha mégis kellene, ez a szám bátran
+  // tovább emelhető. A nulla/valóban végtelen limitet szándékosan nem
+  // állítottuk be, mert a teljes törzs egyszerre kerül memóriába feltöltés
+  // közben — egy hibás/rosszindulatú kérés így sem tudja korlátlanul
+  // felzabálni a szerver memóriáját.
+  try { buf = await readBody(req, 2 * 1024 * 1024 * 1024); }
+  catch (_) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: 'A feltöltött fájl túl nagy.', ip });
+    return sendJson(res, 413, { error: 'A feltöltött fájl túl nagy.' });
+  }
+  if (buf.length < 100 || buf.slice(0, 16).toString('utf8').indexOf('SQLite format 3') !== 0) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: 'A törzs nem érvényes SQLite fájl.', ip });
+    return sendJson(res, 400, { error: 'A törzsnek egy érvényes SQLite (.db) fájlnak kell lennie.' });
+  }
+
+  const dbFile = dbFileForKey(key);
+  fs.mkdirSync(path.dirname(dbFile), { recursive: true }); // új cég/telephely esetén a mappa még nem létezik
+  const tmpPath = dbFile + '.uploading';
+  try {
+    fs.writeFileSync(tmpPath, buf);
+    evictConnection(key); // zárjuk a gyorsítótárban lévő, régi fájlra mutató kapcsolatot, mielőtt felülírjuk
+    fs.renameSync(tmpPath, dbFile);
+  } catch (e) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: companyIndex.get(key)?.nev || null, detail: `Fájlírási hiba: ${e.message}`, ip });
+    return sendJson(res, 500, { error: 'Nem sikerült elmenteni a feltöltött fájlt a szerveren.' });
+  }
+
+  let identity = null;
+  try { identity = readCompanyIdentity(dbFile); } catch (e) { console.error(`[hiba] identitás-olvasás sikertelen (${key}):`, e.message); }
+  const isNew = !companyIndex.has(key);
+  if (identity) companyIndex.set(key, { ...identity, dbFile, cegKulcs, telephelyKod });
+  if (isNew) {
+    ensureTelephely(cegKulcs, telephelyKod, null); // ha adminisztratívan még nem lett felvéve, most regisztráljuk
+    ensureAccessCodes(); // új cégnek azonnal legyen belépési kódja
+  }
+  if (identity) reconcileProductChanges(key); // friss adat -> nézzük, teljesült-e valamelyik függő cikktörzs-módosítás
+  if (identity && eszkozUuid) recordDeviceSync(cegKulcs, eszkozUuid, telephelyKod, progtip, verzio);
+
+  if (!identity) {
+    logActivity({ type: 'sync_upload', ok: false, companyKey: key, nev: null, detail: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat (hiányzó szallitot sor?).', ip });
+    return sendJson(res, 400, { error: 'A fájl elmentve, de nem sikerült beolvasni belőle a cégadatokat.' });
+  }
+
+  const meta = readSyncMeta();
+  meta[key] = { lastSync: new Date().toISOString(), source: 'android-sync', bytes: buf.length, nev: identity.nev };
+  writeSyncMeta(meta);
+
+  logActivity({ type: 'sync_upload', ok: true, companyKey: key, nev: identity.nev, detail: `${Math.round(buf.length / 1024)} KB${isNew ? ' — új telephely regisztrálva' : ''}`, ip });
+  console.log(`[sync] ${key} (${identity.nev}) frissítve — ${buf.length} bájt${isNew ? ' — ÚJ TELEPHELY regisztrálva' : ''}`);
+  sendJson(res, 200, { ok: true, companyKey: key, newCompany: isNew, ...meta[key] });
+});
+
+// Demó/manuális "Frissítés most" gomb a felületen — bejelentkezett munkamenettel
+// hívható, a saját cégre vonatkozóan. Amíg nincs valós eszközkapcsolat beállítva
+// (lásd README), csak visszajelzi az aktuális állapotot ahelyett, hogy adatot hamisítana.
+// Ezt kellene lekérdeznie az androidos appnak (ugyanazzal az x-api-key +
+// x-adoszam hitelesítéssel, mint a feltöltésnél), MINDEN szinkron ELŐTT:
+// az itt kapott cikk/csoport módosításokat helyben alkalmazva, MIELŐTT
+// elküldi a saját friss adatbázisát. A szerver automatikusan felismeri,
+// ha egy módosítás megtörtént (a következő feltöltésben már benne van a
+// kért érték), nincs szükség külön visszaigazoló hívásra.
+route('GET', '/api/sync/pending-changes', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const adoszamRaw = req.headers['x-adoszam'] || query.adoszam;
+  const cegKulcs = companyKeyFromAdoszam(adoszamRaw);
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Hiányzó vagy érvénytelen x-adoszam fejléc / adoszam paraméter.' });
+  const telephelyRaw = req.headers['x-telephely'] || query.telephely;
+  const key = makeSiteKey(cegKulcs, telephelyRaw);
+  const rows = productChangesDb.prepare(
+    `SELECT id, change_type AS type, payload FROM product_changes WHERE company_key = ? AND status = 'pending' ORDER BY id ASC`
+  ).all(key);
+  const items = rows.map((r) => ({ id: r.id, type: r.type, payload: JSON.parse(r.payload) }));
+  sendJson(res, 200, { items });
+});
+
+route('POST', '/api/sync/request', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  sendJson(res, 200, {
+    ok: true,
+    triggered: false,
+    message: 'Élő eszközkapcsolat még nincs beállítva ezen a szerveren — az androidos appnak kell HTTP POST-tal elküldenie az adatbázist a /api/sync/upload végpontra, a saját adószámával (lásd README.md). Addig ez a pillanatkép aktív.',
+    meta: meta[session.companyKey] || { lastSync: null, source: null },
+  });
+});
+
+// Adminisztratív áttekintés: milyen cégek vannak regisztrálva. Ugyanazzal az
+// x-api-key-jel hitelesít, mint a szinkron feltöltés (nem böngésző-session).
+// ---------------------------------------------------------------------------
+// IDEIGLENES, TESZT CÉLÚ végpont: a bejelentkező oldal ebből olvassa ki,
+// milyen érvényes adószámokkal/kódokkal lehet éppen belépni. NEM védett —
+// bárki lekérdezheti, mert a bejelentkező oldal (session nélkül) hívja meg.
+// ⚠️ FONTOS: ez a végpont a hozzáférési KÓDOKAT IS kiadja nyíltan — ez pont
+// azt a védelmet üresíti ki, amit a kód bevezetése adott. Éles/nyilvános
+// ---------------------------------------------------------------------------
+// A korábbi, kizárólag teszteléshez létrehozott fix teszt-fiókokat innentől
+// NEM hozzuk létre többé, és — mivel korábbi induláskor esetleg már
+// létrejöttek egy élő adatbázisban — induláskor EGYSZERI, önműködő
+// takarítással el is távolítjuk őket, ha még ott lennének. Az
+// "invited_by = 'teszt-seed'" jelző pontosan ezeket azonosítja.
+// ---------------------------------------------------------------------------
+function removeLegacyTestUsers() {
+  const removed = usersDb.prepare(`DELETE FROM users WHERE invited_by = 'teszt-seed'`).run();
+  if (removed.changes > 0) {
+    console.log(`[info] ${removed.changes} korábbi teszt-fiók eltávolítva az adatbázisból.`);
+  }
+}
+removeLegacyTestUsers();
+
+route('GET', '/api/sync/companies', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const meta = readSyncMeta();
+  const list = [...companyIndex.entries()].map(([key, entry]) => ({
+    key, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+    ...(meta[key] || { lastSync: null, source: null }),
+  }));
+  sendJson(res, 200, { count: list.length, companies: list });
+});
+
+// Élesedés előtt (LICENSE_ENFORCE nincs beállítva / "0"): minden aktív
+// katalógus-funkció mindenkinek engedélyezett, a company_licenses tábla
+// tartalmától függetlenül — ez a jelenlegi, bevezetés előtti állapot.
+// Élesedéskor egyetlen env-változóval (LICENSE_ENFORCE=1) kapcsoljuk be a
+// tényleges érvényesítést, kódmódosítás és újracsomagolás nélkül.
+//
+// Bekapcsolt érvényesítés esetén minden cég kap egy LICENSE_TRIAL_DAYS
+// (alapértelmezetten 7) napos ingyenes próbaidőt, az első szinkronjától
+// számítva — ezalatt ugyanúgy minden funkció engedélyezett, a `lejarat`
+// mező pedig a próba végét mutatja. Nincs külön "próba" jelző vagy
+// figyelmeztető mező: az app a meglévő lejarat-mezőt pontosan ugyanúgy
+// kezeli, mint egy valódi, fizetett licencnél — a szerver oldalon a próba
+// technikailag nem más, mint egy ideiglenes, mindenre kiterjedő "engedély".
+// A próba lejárta UTÁN kizárólag a ténylegesen kiosztott (company_licenses)
+// funkciók maradnak engedélyezve.
+const LICENSE_ENFORCE = process.env.LICENSE_ENFORCE === '1';
+const LICENSE_TRIAL_DAYS = parseInt(process.env.LICENSE_TRIAL_DAYS || '7', 10);
+
+// ---------------------------------------------------------------------------
+// myPOS Checkout API — bankkártyás fizetés előkészítése.
+//
+// FONTOS, ŐSZINTE MEGJEGYZÉS: ez az integráció a myPOS HIVATALOS
+// dokumentációja (developers.mypos.com) alapján készült, de VALÓDI myPOS
+// hozzáférés (kereskedői fiók, StoreID, RSA kulcspár, myPOS nyilvános
+// tanúsítvány) NÉLKÜL nem tesztelhető végig élesben — ezeket a merchant
+// portálon kell létrehoznod/letöltened, és az alábbi környezeti
+// változókban megadnod, MIELŐTT élesbe állítanád. Amíg ezek nincsenek
+// beállítva, a fizetés-indítás egyértelmű hibaüzenetet ad, nem próbál
+// hibásan "úgy tenni", mintha működne.
+//
+// Szükséges környezeti változók:
+//   MYPOS_SID              — StoreID (a myPOS kereskedői fiókodból)
+//   MYPOS_WALLET           — Wallet/Client szám
+//   MYPOS_KEY_INDEX        — a használt kulcs indexe (a merchant portálon adod meg)
+//   MYPOS_PRIVATE_KEY_PATH — a TE saját RSA privát kulcsod (.pem fájl elérési útja)
+//   MYPOS_PUBLIC_CERT_PATH — a myPOS nyilvános tanúsítványa (.pem, a merchant
+//                            portálról letöltve) — ezzel ellenőrizzük, hogy a
+//                            beérkező értesítés TÉNYLEG a myPOS-tól jött
+//   MYPOS_SANDBOX           — "1" = teszt-környezet (alapértelmezett), "0" = éles
+//   MYPOS_BASE_URL_OVERRIDE — opcionális, ha a myPOS URL-je változna
+const MYPOS_SANDBOX = process.env.MYPOS_SANDBOX !== '0';
+const MYPOS_CHECKOUT_URL = process.env.MYPOS_BASE_URL_OVERRIDE
+  || (MYPOS_SANDBOX ? 'https://mypos.com/vmp/checkout-test/' : 'https://mypos.com/vmp/checkout/');
+
+function myposConfigured() {
+  return !!(process.env.MYPOS_SID && process.env.MYPOS_WALLET && process.env.MYPOS_PRIVATE_KEY_PATH);
+}
+function myposPrivateKey() {
+  return fs.readFileSync(process.env.MYPOS_PRIVATE_KEY_PATH, 'utf8');
+}
+function myposPublicCert() {
+  if (!process.env.MYPOS_PUBLIC_CERT_PATH) return null;
+  return fs.readFileSync(process.env.MYPOS_PUBLIC_CERT_PATH, 'utf8');
+}
+
+// A myPOS aláírás-algoritmusa (a hivatalos dokumentáció szerint):
+// 1) az összes POST mező ÉRTÉKÉT (a Signature mezőt kivéve), a küldés
+//    sorrendjében, kötőjellel ("-") összefűzzük,
+// 2) az eredményt Base64-kódoljuk,
+// 3) a Base64-kódolt sztringet SHA-256 + RSA algoritmussal aláírjuk a
+//    privát kulccsal,
+// 4) az aláírást is Base64-kódoljuk — ez kerül a "Signature" mezőbe.
+function myposSign(orderedFields, privateKeyPem) {
+  const concatenated = orderedFields.map(([, v]) => String(v)).join('-');
+  const base64Input = Buffer.from(concatenated, 'utf8').toString('base64');
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(base64Input, 'utf8'), privateKeyPem);
+  return signature.toString('base64');
+}
+// Beérkező (myPOS-tól kapott) adat aláírásának ellenőrzése — ugyanaz a
+// módszer, csak a myPOS NYILVÁNOS tanúsítványával ellenőrizve, nem a mi
+// privát kulcsunkkal aláírva.
+function myposVerify(orderedFields, signatureBase64, publicCertPem) {
+  const concatenated = orderedFields.map(([, v]) => String(v)).join('-');
+  const base64Input = Buffer.from(concatenated, 'utf8').toString('base64');
+  try {
+    return crypto.verify('RSA-SHA256', Buffer.from(base64Input, 'utf8'), publicCertPem, Buffer.from(signatureBase64, 'base64'));
+  } catch (e) {
+    return false;
+  }
+}
+
+// A próbaidő kezdete: az adott cég legkorábban létrehozott telephelye —
+// gyakorlatilag az első regisztráció/szinkron időpontja. Nincs hozzá külön
+// tábla/mező, a telephelyek.json már meglévő "letrehozva" mezőjét
+// használjuk fel erre.
+function companyFirstSeen(cegKulcs) {
+  const sites = listTelephelyek(cegKulcs);
+  if (!sites.length) return null;
+  return sites.reduce((min, t) => (!min || t.letrehozva < min ? t.letrehozva : min), null);
+}
+function companyTrialEnd(cegKulcs) {
+  // Ha az admin KÉZZEL beállított próbaidőt ennél a cégnél (akár 0 napra,
+  // vagyis "nincs próbaidő"), az FELÜLÍRJA az automatikus számítást —
+  // ez a magasabb prioritású forrás. Ha soha nem nyúlt hozzá, marad a
+  // régi, automatikus (első szinkrontól számított) viselkedés.
+  const sub = licenseDb.prepare('SELECT proba_vege, proba_kezi FROM company_subscription WHERE ceg_kulcs = ?').get(cegKulcs);
+  if (sub && sub.proba_kezi) {
+    return sub.proba_vege ? new Date(sub.proba_vege + 'T23:59:59') : null;
+  }
+  const firstSeen = companyFirstSeen(cegKulcs);
+  if (!firstSeen) return null;
+  return new Date(new Date(firstSeen).getTime() + LICENSE_TRIAL_DAYS * 86400000);
+}
+
+// Eszköz-regisztráció ellenőrzése/nyilvántartása egy licenc-lekérdezéskor.
+// Ha az adott eszköz ennél a cégnél már ismert, csak frissítjük az
+// "utoljára látott" időbélyeget és true-val térünk vissza. Ha ismeretlen
+// eszköz, és van még szabad hely a cég eszközkorlátján belül (vagy a
+// cégre egyáltalán nincs korlát beállítva — ez az alapállapot), akkor
+// magától regisztrálódik, nincs hozzá admin-beavatkozás. Ha a korlát már
+// betelt, false-t ad vissza — a hívó ekkor mindent letilt a válaszban.
+// Egy szinkron-feltöltéskor érkező eszköz-adatok (UUID, melyik
+// telephelyről, milyen programtípus/verzió) rögzítése — TELJESEN
+// OPCIONÁLIS: ha egy régebbi androidos verzió ezt nem küldi, egyszerűen
+// nem hívjuk meg, semmi nem változik a viselkedésben. Ha új programtípus
+// érkezik, amit még nem ismerünk, automatikusan felvesszük a
+// katalógusba — nem kell előre regisztrálni.
+function recordDeviceSync(cegKulcs, eszkozAzonosito, telephelyKod, progtip, verzio) {
+  if (!eszkozAzonosito) return;
+  const now = new Date().toISOString();
+  const existing = licenseDb.prepare(
+    'SELECT id FROM company_devices WHERE ceg_kulcs = ? AND eszkoz_azonosito = ?'
+  ).get(cegKulcs, eszkozAzonosito);
+  if (existing) {
+    licenseDb.prepare(
+      'UPDATE company_devices SET utolso_latott = ?, telephely_kod = COALESCE(?, telephely_kod), progtip = COALESCE(?, progtip), verzio = COALESCE(?, verzio) WHERE id = ?'
+    ).run(now, telephelyKod || null, progtip || null, verzio || null, existing.id);
+  } else {
+    licenseDb.prepare(
+      'INSERT INTO company_devices (ceg_kulcs, eszkoz_azonosito, telephely_kod, progtip, verzio, elso_latott, utolso_latott) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(cegKulcs, eszkozAzonosito, telephelyKod || null, progtip || null, verzio || null, now, now);
+  }
+  if (progtip) {
+    const known = licenseDb.prepare('SELECT 1 FROM program_tipusok WHERE kulcs = ?').get(progtip);
+    if (!known) {
+      licenseDb.prepare('INSERT INTO program_tipusok (kulcs, nev, elso_latott) VALUES (?, ?, ?)').run(progtip, progtip, now);
+    }
+  }
+}
+
+function registerOrCheckDevice(cegKulcs, eszkozAzonosito) {
+  const now = new Date().toISOString();
+  const existing = licenseDb.prepare(
+    'SELECT id FROM company_devices WHERE ceg_kulcs = ? AND eszkoz_azonosito = ?'
+  ).get(cegKulcs, eszkozAzonosito);
+  if (existing) {
+    licenseDb.prepare('UPDATE company_devices SET utolso_latott = ? WHERE id = ?').run(now, existing.id);
+    return true;
+  }
+  const limitRow = licenseDb.prepare('SELECT eszkoz_limit FROM company_device_limits WHERE ceg_kulcs = ?').get(cegKulcs);
+  if (limitRow) {
+    const used = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_devices WHERE ceg_kulcs = ?').get(cegKulcs).c;
+    if (used >= limitRow.eszkoz_limit) return false;
+  }
+  licenseDb.prepare(
+    'INSERT INTO company_devices (ceg_kulcs, eszkoz_azonosito, elso_latott, utolso_latott) VALUES (?, ?, ?, ?)'
+  ).run(cegKulcs, eszkozAzonosito, now, now);
+  return true;
+}
+
+// Licenc-állapot lekérdezése az androidos app számára — ugyanúgy
+// x-api-key-jel hitelesít, mint a többi szinkron végpont (NEM böngésző-
+// session). Ez váltja ki a korábbi lszamla-alapú licenc-lekérdezést: az
+// app mostantól a saját szerverünktől kérdezi le, melyik funkciókhoz fér
+// hozzá az adott cég, és meddig érvényesen.
+// A ténylegesen érvényes (effektív) funkció-lista kiszámítása egy cégre —
+// EZ a közös, egyetlen forrás, amit MIND az androidos /api/license/status,
+// MIND az admin felület "tényleges állapot" lekérdezése használ, hogy a
+// kettő SOHA ne térhessen el egymástól.
+function computeEffectiveLicense(cegKulcs, eszkoz) {
+  const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
+  const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
+  const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
+  const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
+  const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
+
+  let funkciok = [];
+  if (!alapElofizetesAktiv) {
+    funkciok = [];
+  } else if (eszkozRegisztralva === false) {
+    funkciok = [];
+  } else if (inTrial) {
+    funkciok = catalog.map((f) => f.key);
+  } else {
+    const grants = new Map(
+      licenseDb.prepare('SELECT * FROM company_licenses WHERE ceg_kulcs = ?').all(cegKulcs).map((r) => [r.feature_key, r])
+    );
+    funkciok = catalog.filter((f) => {
+      const row = grants.get(f.key);
+      const status = licenseRowStatus(row);
+      return !!row && !!row.aktiv && status.allapot !== 'expired';
+    }).map((f) => f.key);
+  }
+  return { alapElofizetesAktiv, funkciok, eszkozRegisztralva, inTrial };
+}
+
+route('GET', '/api/license/status', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+
+  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
+  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
+  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
+  // mező a válaszban).
+  const eszkoz = String(query.eszkoz || '').trim();
+  const effective = computeEffectiveLicense(cegKulcs, eszkoz);
+  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv: effective.alapElofizetesAktiv, funkciok: effective.funkciok };
+  if (eszkoz) payload.eszkozRegisztralva = effective.eszkozRegisztralva;
+  sendJson(res, 200, payload);
+});
+
+// Admin-oldali lekérdezés: mit látna PONTOSAN az androidos app, ha MOST
+// kérdezné le a licenc-állapotot ehhez a céghez? Eddig az admin felület
+// csak a kiosztott (grant) rekordokat mutatta — ez viszont eltérhet a
+// TÉNYLEGES állapottól (pl. próbaidőszakban minden funkció engedélyezett,
+// kiosztástól függetlenül). Ez a végpont pontosan ugyanazt a logikát
+// futtatja le, mint az androidos végpont — csak admin-hitelesítéssel, nem
+// a szinkron API-kulccsal.
+route('GET', '/api/admin/license/effective', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const cegKulcs = String(query.cegKulcs || '').trim();
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const effective = computeEffectiveLicense(cegKulcs, null);
+  sendJson(res, 200, {
+    cegKulcs,
+    alapElofizetesAktiv: effective.alapElofizetesAktiv,
+    inTrial: effective.inTrial,
+    funkciok: effective.funkciok,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADMIN — külön bejelentkezés (nem cégenkénti adószámos belépés), amivel
+// az összes cég szinkron-naplója, NTAK állapota belátható, és bármelyik
+// cég dashboardja megnyitható. Az admin jelszó a data/.secrets.json-ban
+// (vagy ADMIN_PASSWORD env változóban) van.
+// ---------------------------------------------------------------------------
+
+route('POST', '/api/admin/login', async (req, res) => {
+  const ip = getClientIp(req);
+  const { password } = await readJsonBody(req);
+  const rl = checkLoginRateLimit(ip, 'admin');
+  if (!rl.allowed) return sendRateLimited(res, rl.retryAfterSeconds);
+  if (!password || !timingSafeStringEqual(password, SECRETS.adminPassword)) {
+    recordLoginAttempt(ip, 'admin', false);
+    logActivity({ type: 'admin_login', ok: false, companyKey: null, nev: null, detail: 'Hibás admin jelszó.', ip });
+    return sendJson(res, 401, { error: 'Hibás admin jelszó.' });
+  }
+  recordLoginAttempt(ip, 'admin', true);
+  const payload = { isAdmin: true, exp: Date.now() + SESSION_MAX_AGE_MS };
+  const token = signSession(payload);
+  const cookie = `enyadmin=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+  logActivity({ type: 'admin_login', ok: true, companyKey: null, nev: null, detail: 'Sikeres admin bejelentkezés.', ip });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': cookie });
+});
+
+route('POST', '/api/admin/logout', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (admin) logActivity({ type: 'admin_logout', ok: true, companyKey: null, nev: null, detail: 'Admin kijelentkezett.' });
+  sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
+});
+
+function computeNtakOverview() {
+  const rows = [];
+  for (const [key, entry] of companyIndex.entries()) {
+    let byStatus, lastProblem;
+    try {
+      byStatus = all(key, `SELECT IFNULL(ellenorzott,'ISMERETLEN') AS s, COUNT(*) AS c FROM ntakrms GROUP BY s`);
+      lastProblem = get(key,
+        `SELECT url, kulddate, ellenorzott FROM ntakrms WHERE ellenorzott IN ('TELJESEN_HIBAS','RESZBEN_SIKERES') ORDER BY kulddate DESC LIMIT 1`
+      );
+    } catch (_) { byStatus = []; lastProblem = null; }
+    const total = byStatus.reduce((s, r) => s + r.c, 0);
+    if (total === 0) continue; // nincs NTAK adata ennek a cégnek — kihagyjuk az áttekintésből
+    const get1 = (s) => (byStatus.find((r) => r.s === s) || { c: 0 }).c;
+    rows.push({
+      key, nev: entry.nev, adoszam: entry.adoszam, total,
+      ok: get1('TELJESEN_SIKERES'), warn: get1('RESZBEN_SIKERES'), error: get1('TELJESEN_HIBAS'), pending: get1('BEFOGADVA'),
+      lastProblem: lastProblem || null,
+    });
+  }
+  return rows.sort((a, b) => (b.error + b.warn) - (a.error + a.warn));
+}
+
+route('GET', '/api/admin/overview', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const meta = readSyncMeta();
+  const codes = ensureAccessCodes();
+  const resellerRows = usersDb.prepare(`SELECT id, nev, email FROM users WHERE role = 'reseller' ORDER BY nev`).all();
+  const resellerNevByld = new Map(resellerRows.map((r) => [r.id, r.nev]));
+  const companies = [...companyIndex.entries()]
+    .map(([key, entry]) => {
+      const cegKulcs = entry.cegKulcs;
+      let fallbackEmail = '';
+      if (!codes[cegKulcs]?.email) {
+        try { fallbackEmail = get(key, 'SELECT email FROM szallitot LIMIT 1')?.email || ''; } catch (_) {}
+      }
+      const telephelyInfo = listTelephelyek(cegKulcs).find((t) => t.kod === entry.telephelyKod);
+      const resellerId = codes[cegKulcs]?.resellerId || null;
+      return {
+        key, cegKulcs, telephelyKod: entry.telephelyKod, telephelyNev: telephelyInfo?.nev || entry.telephelyKod,
+        nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos,
+        code: codes[cegKulcs]?.code, email: codes[cegKulcs]?.email || fallbackEmail,
+        resellerId, resellerNev: resellerId ? (resellerNevByld.get(resellerId) || null) : null,
+        ...(meta[key] || { lastSync: null, source: null, bytes: null }),
+      };
+    })
+    .sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || ''));
+  const ntak = computeNtakOverview();
+
+  // --- Bővebb, informatívabb statisztikák az Áttekintés oldalhoz ---
+  const now = Date.now();
+  const DAY_MS = 86400000;
+  const syncedLast24h = companies.filter((c) => c.lastSync && now - new Date(c.lastSync).getTime() < DAY_MS).length;
+  const syncedLast7d = companies.filter((c) => c.lastSync && now - new Date(c.lastSync).getTime() < 7 * DAY_MS).length;
+  const neverSynced = companies.filter((c) => !c.lastSync).length;
+
+  const userCounts = usersDb.prepare(`
+    SELECT role, status, COUNT(*) AS c FROM users GROUP BY role, status
+  `).all();
+  const usersByRole = { owner: 0, manager: 0, reseller: 0 };
+  const usersByStatus = { active: 0, pending: 0, disabled: 0 };
+  let totalUsers = 0;
+  userCounts.forEach((r) => {
+    usersByRole[r.role] = (usersByRole[r.role] || 0) + r.c;
+    usersByStatus[r.status] = (usersByStatus[r.status] || 0) + r.c;
+    totalUsers += r.c;
+  });
+
+  const uniqueCegKulcs = [...new Set(companies.map((c) => c.cegKulcs))];
+  const subRows = licenseDb.prepare('SELECT ceg_kulcs, aktiv FROM company_subscription').all();
+  const subByCeg = new Map(subRows.map((r) => [r.ceg_kulcs, r.aktiv]));
+  const pausedSubscriptions = uniqueCegKulcs.filter((ck) => subByCeg.has(ck) && !subByCeg.get(ck)).length;
+  const activeSubscriptions = uniqueCegKulcs.length - pausedSubscriptions;
+
+  const monthStart = todayIsoServer().slice(0, 7) + '-01';
+  const paymentRow = licenseDb.prepare(
+    `SELECT COUNT(*) AS cnt, IFNULL(SUM(osszeg),0) AS total FROM license_payments WHERE allapot = 'SIKERES' AND letrehozva >= ?`
+  ).get(monthStart);
+
+  const recentActivity = readActivityLog(500);
+  const failedSyncCount = recentActivity.filter((e) => e.type === 'sync_upload' && !e.ok).length;
+
+  const stats = {
+    totalCompanies: uniqueCegKulcs.length,
+    totalSites: companies.length,
+    syncedLast24h, syncedLast7d, neverSynced,
+    totalUsers, usersByRole, usersByStatus,
+    activeSubscriptions, pausedSubscriptions,
+    paymentsThisMonthCount: paymentRow.cnt, paymentsThisMonthTotal: paymentRow.total,
+    failedSyncCount,
+    ntakProblems: ntak.reduce((s, n) => s + n.warn + n.error, 0),
+  };
+
+  sendJson(res, 200, { companies, ntak, resellers: resellerRows, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL), stats });
+});
+
+// Cég hozzárendelése (vagy leválasztása) egy viszonteladóhoz — admin
+// bármikor módosíthatja, nemcsak a viszonteladó saját meghívásán keresztül
+// jöhet létre a kapcsolat.
+route('POST', '/api/admin/companies/assign-reseller', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, resellerId } = await readJsonBody(req);
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const codes = readAccessCodes();
+  if (!codes[cegKulcs]) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  if (resellerId) {
+    const reseller = usersDb.prepare(`SELECT id, nev FROM users WHERE id = ? AND role = 'reseller'`).get(resellerId);
+    if (!reseller) return sendJson(res, 404, { error: 'Ismeretlen viszonteladó.' });
+    codes[cegKulcs].resellerId = reseller.id;
+    writeAccessCodes(codes);
+    logActivity({ type: 'company_reseller_assign', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `Hozzárendelve: ${reseller.nev}` });
+  } else {
+    delete codes[cegKulcs].resellerId;
+    writeAccessCodes(codes);
+    logActivity({ type: 'company_reseller_assign', ok: true, companyKey: cegKulcs, nev: 'admin', detail: 'Viszonteladó-hozzárendelés törölve' });
+  }
+  sendJson(res, 200, { ok: true });
+});
+
+// Egy adott cég/telephely legutóbb szinkronizált .db fájljának letöltése —
+// pontosan az van a lemezen, amit az androidos app legutóbb feltöltött.
+route('GET', '/api/admin/companies/download-db', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const key = String(query.key || '');
+  if (!key || !companyIndex.has(key)) return sendJson(res, 404, { error: 'Ismeretlen cég/telephely.' });
+  const filePath = dbFileForKey(key);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található a lemezen — még nem érkezett szinkron.' });
+  const entry = companyIndex.get(key);
+  const { telephelyKod } = splitSiteKey(key);
+  const safeName = `${(entry.nev || 'ceg').replace(/[^a-zA-Z0-9_\-]/g, '_')}_${entry.adoszam || ''}_${telephelyKod || '01'}.db`;
+  const data = fs.readFileSync(filePath);
+  logActivity({ type: 'admin_db_download', ok: true, companyKey: key, nev: 'admin', detail: `Adatbázis letöltve: ${safeName}` });
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${safeName}"`,
+    'Content-Length': data.length,
+  });
+  res.end(data);
+});
+
+// Tevékenység-napló — minden esemény cégenként és típusonként megkülönböztetve.
+// Szűrhető companyKey és type szerint (mindkettő opcionális); emellett egy
+// cégenkénti+típusonkénti összesítő mátrixot is visszaad a csoportosított
+// megjelenítéshez.
+route('GET', '/api/admin/activity', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '1000', 10) || 1000, 5000);
+  let entries = readActivityLog(limit);
+
+  const types = [...new Set(entries.map((e) => e.type))].sort();
+  const companyNames = new Map();
+  for (const e of entries) if (e.companyKey && e.nev && !companyNames.has(e.companyKey)) companyNames.set(e.companyKey, e.nev);
+  const companies = [...companyNames.entries()].map(([key, nev]) => ({ key, nev })).sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
+
+  // cégenkénti + típusonkénti összesítő mátrix a csoportosított nézethez
+  const matrix = new Map(); // companyKey -> { nev, counts: {type: n}, total, lastTs }
+  for (const e of entries) {
+    const mk = e.companyKey || '__admin__';
+    if (!matrix.has(mk)) matrix.set(mk, { key: mk, nev: e.companyKey ? (e.nev || e.companyKey) : 'Admin (nem cég-specifikus)', counts: {}, total: 0, lastTs: e.ts });
+    const row = matrix.get(mk);
+    row.counts[e.type] = (row.counts[e.type] || 0) + 1;
+    row.total += 1;
+    if (e.ts > row.lastTs) row.lastTs = e.ts;
+  }
+  const summary = [...matrix.values()].sort((a, b) => b.total - a.total);
+
+  if (query.company) entries = entries.filter((e) => (e.companyKey || '__admin__') === query.company);
+  if (query.type) entries = entries.filter((e) => e.type === query.type);
+
+  sendJson(res, 200, { entries, types, companies, summary });
+});
+
+// Admin újrageneráltatja egy cég hozzáférési kódját (pl. ha az kiszivárgott).
+// A régi kód azonnal érvénytelenné válik.
+
+// Admin "belép" egy adott cég nevében — utána a normál, cégenkénti
+// dashboard API-kat használja a böngésző, mintha az illető cég jelentkezett
+// volna be az adószámával. Így nem kell duplikálni egyik nézetet sem.
+route('POST', '/api/admin/impersonate', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyKey } = await readJsonBody(req);
+  const entry = companyIndex.get(companyKey); // companyKey itt egy teljes telephely-kulcs ("cégkulcs:kód")
+  if (!entry) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  const payload = {
+    companyKey, cegKulcs: entry.cegKulcs, telephelyKod: entry.telephelyKod,
+    cegid: entry.cegid, nev: entry.nev, adoszam: entry.adoszam, exp: Date.now() + SESSION_MAX_AGE_MS,
+  };
+  const token = signSession(payload);
+  const cookie = `enysession=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}`;
+  const telephelyInfo = listTelephelyek(entry.cegKulcs).find((t) => t.kod === entry.telephelyKod);
+  logActivity({ type: 'admin_impersonate', ok: true, companyKey, nev: entry.nev, detail: 'Admin megnyitotta a telephely nézetét.' });
+  sendJson(res, 200, { ok: true, company: { nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, cim: entry.cim, telephelyNev: telephelyInfo?.nev || entry.telephelyKod } }, { 'Set-Cookie': cookie });
+});
+
+// ---------------------------------------------------------------------------
+// Statikus fájlok kiszolgálása (public/)
+// ---------------------------------------------------------------------------
+
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
+
+function serveStatic(req, res, pathname) {
+  let rel = pathname === '/' ? '/index.html' : pathname;
+  const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
+  if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
+  fs.readFile(filePath, (err, data) => {
+    if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Nem található'); }
+    const ext = path.extname(filePath);
+    // no-cache = a böngésző tárolhatja, de MINDEN betöltéskor revalidál (ETag).
+    // Ha a fájl nem változott → 304, nincs újraletöltés. Ha változott (deploy) →
+    // azonnal az új verziót kapja. Így soha nem fordulhat elő, hogy régi
+    // index.html új app.js-sel (vagy fordítva) fut együtt — ez okozta a
+    // "Cannot access 'loggedIn' before initialization" hibát egyes eszközökön.
+    const etag = `"${crypto.createHash('sha1').update(data).digest('hex')}"`;
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag });
+    res.end(data);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// HTTP szerver + útvonalválasztás
+// ---------------------------------------------------------------------------
+
+const server = http.createServer(async (req, res) => {
+  applySecurityHeaders(res);
+  try {
+    const u = new URL(req.url, `http://${req.headers.host}`);
+    const query = Object.fromEntries(u.searchParams.entries());
+
+    if (u.pathname.startsWith('/api/')) {
+      const found = routes.find((r) => r.method === req.method && r.pattern === u.pathname);
+      if (!found) return sendJson(res, 404, { error: 'Ismeretlen végpont' });
+      return await found.handler(req, res, query);
+    }
+    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, u.pathname);
+    res.writeHead(405); res.end('Method Not Allowed');
+  } catch (err) {
+    if (err && err.code === 'COMPANY_NOT_FOUND') return sendJson(res, 404, { error: 'A cég adatbázisa nem található.' });
+    console.error(err);
+    // A részletes hibaüzenetet (pl. SQL/fájlrendszer belső infó) csak a szerver
+    // naplójába írjuk — a kliens felé kizárólag egy általános üzenet megy ki,
+    // hogy ne szivárogjon ki belső implementációs részlet.
+    sendJson(res, 500, { error: 'Szerverhiba történt. Próbáld újra, vagy jelezd az üzemeltetőnek.' });
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`L-NYUGTA nézegető fut: http://localhost:${PORT}`);
+});
+
+// Rendezett leállás: minden nyitott céges adatbázis-kapcsolatot bezárunk.
+function shutdown() {
+  for (const key of [...dbCache.keys()]) evictConnection(key);
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
