@@ -14,73 +14,6 @@ const fmtHuf = (n) => new Intl.NumberFormat('hu-HU', { maximumFractionDigits: 0 
 const fmtDate = (d) => new Date(d).toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' });
 const fmtDateTime = (d) => new Date(d).toLocaleString('hu-HU');
 const todayIso = () => new Date().toISOString().slice(0, 10);
-
-/* ============================================================
-   Paginator — újrahasznosítható lapozó minden lista-nézethez.
-   Kliens-oldali (a teljes adathalmaz már úgyis be van töltve),
-   csak a MEGJELENÍTETT sorokat vágja le oldalanként.
-   ============================================================ */
-class Paginator {
-  constructor({ pageSize = 15 } = {}) {
-    this.page = 1;
-    this.pageSize = pageSize;
-    this.total = 0;
-  }
-  setTotal(total) {
-    this.total = total;
-    const maxPage = Math.max(1, Math.ceil(total / this.pageSize));
-    if (this.page > maxPage) this.page = maxPage;
-  }
-  slice(arr) {
-    this.setTotal(arr.length);
-    const start = (this.page - 1) * this.pageSize;
-    return arr.slice(start, start + this.pageSize);
-  }
-  renderControls(containerEl, onChange) {
-    const maxPage = Math.max(1, Math.ceil(this.total / this.pageSize));
-    const start = this.total === 0 ? 0 : (this.page - 1) * this.pageSize + 1;
-    const end = Math.min(this.total, this.page * this.pageSize);
-
-    const pageButtons = [];
-    const addBtn = (label, page, opts = {}) => {
-      pageButtons.push(
-        `<button data-page="${page}" ${opts.active ? 'class="is-active"' : ''} ${opts.disabled ? 'disabled' : ''}>${label}</button>`
-      );
-    };
-    addBtn('‹', Math.max(1, this.page - 1), { disabled: this.page === 1 });
-    const windowSize = 2;
-    for (let p = 1; p <= maxPage; p++) {
-      if (p === 1 || p === maxPage || Math.abs(p - this.page) <= windowSize) {
-        addBtn(String(p), p, { active: p === this.page });
-      } else if (Math.abs(p - this.page) === windowSize + 1) {
-        pageButtons.push('<span style="padding:0 4px;">…</span>');
-      }
-    }
-    addBtn('›', Math.min(maxPage, this.page + 1), { disabled: this.page === maxPage });
-
-    containerEl.innerHTML = `
-      <div class="pagination-bar">
-        <span class="pagination-info">${this.total === 0 ? 'Nincs találat' : `${start}–${end} / ${this.total}`}</span>
-        <div class="pagination-controls">${pageButtons.join('')}</div>
-        <select class="pagination-size-select">
-          ${[15, 25, 50, 100].map((n) => `<option value="${n}" ${n === this.pageSize ? 'selected' : ''}>${n} / oldal</option>`).join('')}
-        </select>
-      </div>`;
-
-    containerEl.querySelectorAll('button[data-page]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        this.page = Number(btn.dataset.page);
-        onChange();
-      });
-    });
-    containerEl.querySelector('.pagination-size-select').addEventListener('change', (e) => {
-      this.pageSize = Number(e.target.value);
-      this.page = 1;
-      onChange();
-    });
-  }
-}
-
 const isoDaysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 
 /* Dátumtartomány-preset segédfüggvények — mindig helyi (nem UTC) dátumokkal
@@ -536,8 +469,8 @@ function renderLicenseCompanies() {
     if (c.eszkozLimit != null && c.eszkozSzam >= c.eszkozLimit) {
       warnings.push(`<span class="licenc-badge licenc-badge--expired" title="Betelt az eszközkorlát">⚠ ${c.eszkozSzam}/${c.eszkozLimit} eszköz</span>`);
     }
-    if (c.effectiveInTrial) {
-      warnings.push(`<span class="licenc-badge licenc-badge--warn" title="Amíg tart a próbaidő, minden funkció elérhető, a kiosztástól függetlenül">🎁 próbaidő — még ${c.effectiveTrialDaysLeft} nap</span>`);
+    if (c.probaKezi) {
+      warnings.push(`<span class="licenc-badge licenc-badge--none" title="Kézzel beállított próbaidő">próba: ${c.probaNapokHatra} nap</span>`);
     }
     return `
     <tr data-ceg="${escapeHtml(c.cegKulcs)}">
@@ -776,33 +709,8 @@ document.getElementById('license-grant-modal-backdrop').addEventListener('click'
    ============================================================ */
 let adminUsersCache = [];
 let adminCompaniesCache = [];
-let adminNtakCache = [];
-const adminCompaniesPaginator = new Paginator();
-const adminNtakPaginator = new Paginator();
-
-function renderAdminCompaniesTable() {
-  const compTbody = document.querySelector('#admin-companies-table tbody');
-  const pageData = adminCompaniesPaginator.slice(adminCompaniesCache);
-  compTbody.innerHTML = '';
-  pageData.forEach((c) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${escapeHtml(c.nev)}</td>
-      <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
-      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
-      <td><button class="btn-tiny btn-company-detail" data-key="${escapeHtml(c.key)}">Részletek</button></td>`;
-    compTbody.appendChild(tr);
-  });
-  compTbody.querySelectorAll('.btn-company-detail').forEach((btn) => {
-    btn.addEventListener('click', () => openCompanyDetailModal(btn.dataset.key));
-  });
-  adminCompaniesPaginator.renderControls(document.getElementById('admin-companies-pagination'), renderAdminCompaniesTable);
-}
-
 let adminResellersCache = [];
-let adminUsersRoleFilter = '';
-const adminUsersPaginator = new Paginator();
+let adminUsersGroupMode = 'szerepkor';
 
 async function loadAdminUsers() {
   try {
@@ -811,7 +719,7 @@ async function loadAdminUsers() {
     document.getElementById('admin-users-count').textContent = data.users.length;
     renderAdminUsers();
   } catch (e) {
-    document.querySelector('#admin-users-table tbody').innerHTML = `<tr><td colspan="5" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+    document.getElementById('admin-users-groups').innerHTML = `<p class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -836,25 +744,35 @@ function renderAdminUserRow(u) {
 }
 
 function renderAdminUsers() {
-  if (!adminUsersCache.length) {
-    document.querySelector('#admin-users-table tbody').innerHTML = '<tr><td colspan="5" class="muted">Még nincs egyetlen felhasználó sem.</td></tr>';
-    document.getElementById('admin-users-pagination').innerHTML = '';
-    return;
-  }
-  const filtered = adminUsersRoleFilter
-    ? adminUsersCache.filter((u) => u.role === adminUsersRoleFilter)
-    : adminUsersCache;
-  const tbody = document.querySelector('#admin-users-table tbody');
-  if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">Nincs találat ezzel a szűréssel.</td></tr>';
-    document.getElementById('admin-users-pagination').innerHTML = '';
-    return;
-  }
-  const pageData = adminUsersPaginator.slice(filtered);
-  tbody.innerHTML = pageData.map(renderAdminUserRow).join('');
-  adminUsersPaginator.renderControls(document.getElementById('admin-users-pagination'), renderAdminUsers);
+  const container = document.getElementById('admin-users-groups');
+  if (!adminUsersCache.length) { container.innerHTML = '<p class="muted">Még nincs egyetlen felhasználó sem.</p>'; return; }
 
-  tbody.querySelectorAll('.btn-admin-user-edit').forEach((btn) => {
+  let groups;
+  if (adminUsersGroupMode === 'szerepkor') {
+    groups = ['reseller', 'owner', 'manager'].map((role) => ({
+      cim: ADMIN_ROLE_LABELS[role],
+      users: adminUsersCache.filter((u) => u.role === role),
+    })).filter((g) => g.users.length);
+  } else {
+    const byInviter = new Map();
+    for (const u of adminUsersCache) {
+      const key = u.invitedBy || '(ismeretlen)';
+      if (!byInviter.has(key)) byInviter.set(key, []);
+      byInviter.get(key).push(u);
+    }
+    groups = [...byInviter.entries()].map(([cim, users]) => ({ cim: `Meghívta: ${cim}`, users }));
+  }
+
+  container.innerHTML = groups.map((g) => `
+    <div class="admin-users-group">
+      <div class="admin-users-group-title">${escapeHtml(g.cim)} <span class="profile-soon-badge">${g.users.length}</span></div>
+      <table class="data-table">
+        <thead><tr><th>Név</th><th>Email</th><th>Szerepkör</th><th>Állapot</th><th></th></tr></thead>
+        <tbody>${g.users.map(renderAdminUserRow).join('')}</tbody>
+      </table>
+    </div>`).join('');
+
+  container.querySelectorAll('.btn-admin-user-edit').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = Number(btn.closest('tr').dataset.id);
       const u = adminUsersCache.find((x) => x.id === id);
@@ -904,12 +822,14 @@ function renderAdminUsers() {
   });
 }
 
-document.getElementById('admin-users-role-filter').addEventListener('change', (e) => {
-  adminUsersRoleFilter = e.target.value;
-  adminUsersPaginator.page = 1;
-  renderAdminUsers();
+document.getElementById('admin-users-group-chips').querySelectorAll('.activity-type-chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#admin-users-group-chips .activity-type-chip').forEach((c) => c.classList.remove('is-active'));
+    chip.classList.add('is-active');
+    adminUsersGroupMode = chip.dataset.group;
+    renderAdminUsers();
+  });
 });
-
 
 document.getElementById('user-edit-modal-close').addEventListener('click', () => {
   document.getElementById('user-edit-modal-backdrop').hidden = true;
@@ -1373,8 +1293,6 @@ function renderAdminStatsGrid(s) {
 }
 
 let adminRegCache = [];
-let adminRegSort = { key: 'nev', dir: 'asc' };
-const adminRegPaginator = new Paginator();
 
 async function loadAdminRegistrations() {
   try {
@@ -1382,102 +1300,38 @@ async function loadAdminRegistrations() {
     adminRegCache = data.companies;
     renderAdminRegTable();
   } catch (e) {
-    document.querySelector('#admin-reg-table tbody').innerHTML = `<tr><td colspan="8" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+    document.querySelector('#admin-reg-table tbody').innerHTML = `<tr><td colspan="6" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
   }
-}
-
-// A cégenkénti-telephelyenkénti-eszközönkénti fát EGY LAPOS, eszköz-szintű
-// listává alakítja — ez teszi lehetővé az érdemi rendezést/szűrést
-// (reg. dátum, lejárat, állapot szerint). Az eszköz nélküli cégek egyetlen,
-// "üres" sorként jelennek meg, hogy ők is láthatók maradjanak.
-function flattenRegRows() {
-  const rows = [];
-  adminRegCache.forEach((c) => {
-    const anyDevices = c.sites.some((s) => s.devices.length);
-    if (!anyDevices) {
-      rows.push({
-        cegNev: c.nev || '(névtelen)', adoszam: c.adoszam, telephely: '—',
-        progtip: '—', verzio: '—', regdat: null, ervdat: null,
-        allapot: 'nincs-eszkoz', allapotLabel: 'Nincs eszköz',
-      });
-      return;
-    }
-    c.sites.forEach((s) => {
-      s.devices.forEach((d) => {
-        const napokHatra = d.ervdat ? Math.ceil((new Date(d.ervdat) - new Date()) / 86400000) : null;
-        let allapot = 'aktiv', allapotLabel = 'Aktív';
-        if (napokHatra !== null && napokHatra < 0) { allapot = 'lejart'; allapotLabel = 'Lejárt'; }
-        else if (napokHatra !== null && napokHatra <= 30) { allapot = 'hamarosan'; allapotLabel = `Hamarosan lejár (${napokHatra} nap)`; }
-        rows.push({
-          cegNev: c.nev || '(névtelen)', adoszam: c.adoszam, telephely: s.nev || '—',
-          progtip: d.progtip || '—', verzio: d.verzio || '—', regdat: d.regdat, ervdat: d.ervdat,
-          allapot, allapotLabel,
-        });
-      });
-    });
-  });
-  return rows;
 }
 
 function renderAdminRegTable() {
   const q = (document.getElementById('reg-search-input').value || '').toLowerCase().trim();
-  const statusFilter = document.getElementById('reg-status-filter').value;
-  let rows = flattenRegRows().filter((r) =>
-    (!q || r.cegNev.toLowerCase().includes(q) || (r.adoszam || '').toLowerCase().includes(q))
-    && (!statusFilter || r.allapot === statusFilter)
+  const filtered = adminRegCache.filter((c) =>
+    !q || (c.nev || '').toLowerCase().includes(q) || (c.adoszam || '').toLowerCase().includes(q)
   );
-
-  const { key, dir } = adminRegSort;
-  rows.sort((a, b) => {
-    let av = a[key] ?? '', bv = b[key] ?? '';
-    if (key === 'regdat' || key === 'ervdat') { av = av || ''; bv = bv || ''; }
-    const cmp = String(av).localeCompare(String(bv), 'hu', { numeric: true });
-    return dir === 'asc' ? cmp : -cmp;
-  });
-
-  document.querySelectorAll('#admin-reg-table .reg-sortable').forEach((th) => {
-    th.querySelector('.sort-arrow')?.remove();
-    if (th.dataset.sort === key) {
-      th.insertAdjacentHTML('beforeend', `<span class="sort-arrow">${dir === 'asc' ? '▲' : '▼'}</span>`);
-    }
-  });
-
   const tbody = document.querySelector('#admin-reg-table tbody');
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="muted">Nincs találat.</td></tr>';
-    document.getElementById('admin-reg-pagination').innerHTML = '';
-    return;
-  }
-  const pageData = adminRegPaginator.slice(rows);
-  const statusBadgeClass = { aktiv: 'ok', lejart: 'expired', hamarosan: 'warn', 'nincs-eszkoz': 'none' };
-  tbody.innerHTML = pageData.map((r) => `
-    <tr data-adoszam="${escapeHtml(r.adoszam)}">
-      <td>${escapeHtml(r.cegNev)}</td>
-      <td class="ntak-uuid">${escapeHtml(r.adoszam)}</td>
-      <td>${escapeHtml(r.telephely)}</td>
-      <td>${escapeHtml(r.progtip)}</td>
-      <td>${r.regdat ? escapeHtml(r.regdat.slice(0, 10)) : '—'}</td>
-      <td>${r.ervdat ? escapeHtml(r.ervdat.slice(0, 10)) : '—'}</td>
-      <td><span class="licenc-badge licenc-badge--${statusBadgeClass[r.allapot]}">${escapeHtml(r.allapotLabel)}</span></td>
-      <td><button class="btn-tiny btn-reg-detail" data-adoszam="${escapeHtml(r.adoszam)}">Részletek</button></td>
-    </tr>`).join('');
+  if (!filtered.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">Nincs találat.</td></tr>'; return; }
+  tbody.innerHTML = filtered.map((c) => {
+    const siteCount = c.sites.length;
+    const deviceCount = c.sites.reduce((s, site) => s + site.devices.length, 0);
+    const liveBadge = c.hasLiveSync
+      ? '<span class="licenc-badge licenc-badge--ok">él</span>'
+      : '<span class="licenc-badge licenc-badge--none">nincs</span>';
+    return `
+    <tr data-adoszam="${escapeHtml(c.adoszam)}">
+      <td>${escapeHtml(c.nev || '(névtelen)')}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${siteCount}</td>
+      <td>${deviceCount}</td>
+      <td>${liveBadge}</td>
+      <td><button class="btn-tiny btn-reg-detail" data-adoszam="${escapeHtml(c.adoszam)}">Részletek</button></td>
+    </tr>`;
+  }).join('');
   tbody.querySelectorAll('.btn-reg-detail').forEach((btn) => {
     btn.addEventListener('click', () => openRegDetailModal(btn.dataset.adoszam));
   });
-  adminRegPaginator.renderControls(document.getElementById('admin-reg-pagination'), renderAdminRegTable);
 }
-document.getElementById('reg-search-input').addEventListener('input', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
-document.getElementById('reg-status-filter').addEventListener('change', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
-document.querySelectorAll('#admin-reg-table .reg-sortable').forEach((th) => {
-  th.addEventListener('click', () => {
-    if (adminRegSort.key === th.dataset.sort) {
-      adminRegSort.dir = adminRegSort.dir === 'asc' ? 'desc' : 'asc';
-    } else {
-      adminRegSort = { key: th.dataset.sort, dir: 'asc' };
-    }
-    renderAdminRegTable();
-  });
-});
+document.getElementById('reg-search-input').addEventListener('input', renderAdminRegTable);
 
 function openRegDetailModal(adoszam) {
   const c = adminRegCache.find((x) => x.adoszam === adoszam);
@@ -1646,35 +1500,41 @@ async function loadAdminOverview() {
   document.getElementById('admin-company-count').textContent = data.companies.length;
   adminCompaniesCache = data.companies;
   adminResellersCache = data.resellers;
-  renderAdminCompaniesTable();
-  adminNtakCache = data.ntak;
-  renderAdminNtakTable();
-}
-
-function renderAdminNtakTable() {
-  const ntakTbody = document.querySelector('#admin-ntak-table tbody');
-  if (!adminNtakCache.length) {
-    ntakTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Egyik cégnek sincs NTAK adata.</td></tr>';
-    document.getElementById('admin-ntak-pagination').innerHTML = '';
-    return;
-  }
-  const pageData = adminNtakPaginator.slice(adminNtakCache);
-  ntakTbody.innerHTML = '';
-  pageData.forEach((n) => {
+  const compTbody = document.querySelector('#admin-companies-table tbody');
+  compTbody.innerHTML = '';
+  data.companies.forEach((c) => {
     const tr = document.createElement('tr');
-    const problem = n.lastProblem
-      ? `${NTAK_ADMIN_STATUS_LABELS[n.lastProblem.ellenorzott] || n.lastProblem.ellenorzott} — ${fmtDateTime(n.lastProblem.kulddate)}`
-      : '—';
     tr.innerHTML = `
-      <td>${escapeHtml(n.nev)}</td>
-      <td class="num">${n.ok}</td>
-      <td class="num">${n.warn ? `<span class="ntak-badge warn">${n.warn}</span>` : '0'}</td>
-      <td class="num">${n.error ? `<span class="ntak-badge error">${n.error}</span>` : '0'}</td>
-      <td class="num">${n.pending}</td>
-      <td>${escapeHtml(problem)}</td>`;
-    ntakTbody.appendChild(tr);
+      <td>${escapeHtml(c.nev)}</td>
+      <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
+      <td><button class="btn-tiny btn-company-detail" data-key="${escapeHtml(c.key)}">Részletek</button></td>`;
+    compTbody.appendChild(tr);
   });
-  adminNtakPaginator.renderControls(document.getElementById('admin-ntak-pagination'), renderAdminNtakTable);
+  compTbody.querySelectorAll('.btn-company-detail').forEach((btn) => {
+    btn.addEventListener('click', () => openCompanyDetailModal(btn.dataset.key));
+  });
+  const ntakTbody = document.querySelector('#admin-ntak-table tbody');
+  ntakTbody.innerHTML = '';
+  if (!data.ntak.length) {
+    ntakTbody.innerHTML = '<tr><td colspan="6" class="empty-state">Egyik cégnek sincs NTAK adata.</td></tr>';
+  } else {
+    data.ntak.forEach((n) => {
+      const tr = document.createElement('tr');
+      const problem = n.lastProblem
+        ? `${NTAK_ADMIN_STATUS_LABELS[n.lastProblem.ellenorzott] || n.lastProblem.ellenorzott} — ${fmtDateTime(n.lastProblem.kulddate)}`
+        : '—';
+      tr.innerHTML = `
+        <td>${escapeHtml(n.nev)}</td>
+        <td class="num">${n.ok}</td>
+        <td class="num">${n.warn ? `<span class="ntak-badge warn">${n.warn}</span>` : '0'}</td>
+        <td class="num">${n.error ? `<span class="ntak-badge error">${n.error}</span>` : '0'}</td>
+        <td class="num">${n.pending}</td>
+        <td>${escapeHtml(problem)}</td>`;
+      ntakTbody.appendChild(tr);
+    });
+  }
 }
 
 async function adminOpenCompany(key) {
@@ -1766,7 +1626,6 @@ const ACTIVITY_TYPE_LABELS = {
   admin_db_download: 'Admin: adatbázis letöltve',
 };
 const activityFilter = { company: '', type: '' };
-const activityLogPaginator = new Paginator();
 
 async function loadAdminActivity() {
   const data = await api('/api/admin/activity');
@@ -1789,7 +1648,6 @@ async function loadAdminActivity() {
         <td class="activity-summary-detail" title="${escapeHtml(typeBreakdown)}">${fmtDateTime(row.lastTs)} — <span class="muted">${escapeHtml(typeBreakdown)}</span></td>`;
       tr.addEventListener('click', () => {
         activityFilter.company = row.key;
-        activityLogPaginator.page = 1;
         document.getElementById('activity-company-select').value = row.key;
         renderActivityLog(data);
       });
@@ -1811,7 +1669,6 @@ async function loadAdminActivity() {
   typeChips.querySelectorAll('.activity-type-chip').forEach((btn) => {
     btn.addEventListener('click', () => {
       activityFilter.type = btn.dataset.type;
-      activityLogPaginator.page = 1;
       renderActivityLog(data);
     });
   });
@@ -1830,11 +1687,9 @@ function renderActivityLog(data) {
   tbody.innerHTML = '';
   if (!entries.length) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nincs a szűrésnek megfelelő esemény.</td></tr>';
-    document.getElementById('activity-log-pagination').innerHTML = '';
     return;
   }
-  const pageData = activityLogPaginator.slice(entries);
-  pageData.forEach((e) => {
+  entries.slice(0, 300).forEach((e) => {
     const tr = document.createElement('tr');
     const statusBadge = e.ok ? '<span class="ntak-badge ok">Sikeres</span>' : '<span class="ntak-badge error">Hiba</span>';
     tr.innerHTML = `
@@ -1845,12 +1700,10 @@ function renderActivityLog(data) {
       <td>${escapeHtml(e.detail || '—')}</td>`;
     tbody.appendChild(tr);
   });
-  activityLogPaginator.renderControls(document.getElementById('activity-log-pagination'), () => renderActivityLog(data));
 }
 
 document.getElementById('activity-company-select').addEventListener('change', (e) => {
   activityFilter.company = e.target.value;
-  activityLogPaginator.page = 1;
   loadAdminActivity();
 });
 
