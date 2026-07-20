@@ -1061,6 +1061,7 @@
     <nav class="nav">
       <button class="nav-item admin-nav-item is-active" data-admin-view="overview">Áttekintés</button>
       <button class="nav-item admin-nav-item" data-admin-view="companies">Cégek</button>
+      <button class="nav-item admin-nav-item" data-admin-view="regisztraciok">Regisztrációk</button>
       <button class="nav-item admin-nav-item" data-admin-view="ntak">NTAK állapot</button>
       <button class="nav-item admin-nav-item" data-admin-view="activity">Tevékenység-napló</button>
       <button class="nav-item admin-nav-item" data-admin-view="licenc">Licenc-kezelés</button>
@@ -1094,6 +1095,25 @@
         <div class="table-scroll">
         <table class="data-table" id="admin-companies-table">
           <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Utolsó szinkron</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-view" data-admin-view="regisztraciok" hidden>
+      <div class="card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Regisztrációk</div>
+            <div class="card-subtitle">Cég → Telephely(ek) → Eszköz(ök) — a régi LSZAMLA rendszerből átvett adatok, innentől a webről kezelve</div>
+          </div>
+          <button class="btn-secondary" id="reg-company-new-btn">+ Új cég</button>
+        </div>
+        <input type="text" id="reg-search-input" placeholder="Keresés cégnév vagy adószám szerint…" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <div class="table-scroll">
+        <table class="data-table" id="admin-reg-table">
+          <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Eszköz</th><th>Élő L-NYUGTA szinkron</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         </div>
@@ -1297,6 +1317,75 @@
         <a class="btn-secondary" id="company-detail-download-link" href="#" target="_blank" style="text-decoration:none;text-align:center;">⬇ DB letöltése</a>
         <button class="btn-secondary" id="company-detail-license-btn" title="Adószám vágólapra másolása, majd az lszamla megnyitása">🔗 Licenc (lszamla)</button>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="reg-detail-modal-backdrop" hidden>
+    <div class="modal" style="max-width:720px;">
+      <button class="modal-close" id="reg-detail-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:2px;" id="reg-detail-title">Cég regisztrációi</div>
+      <div class="card-subtitle" style="margin-bottom:6px;" id="reg-detail-subtitle"></div>
+      <div id="reg-detail-live-badge" style="margin-bottom:14px;"></div>
+      <button class="btn-secondary" id="reg-site-new-btn" style="margin-bottom:14px;">+ Új telephely</button>
+      <div id="reg-detail-sites"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="reg-device-modal-backdrop" hidden>
+    <div class="modal">
+      <button class="modal-close" id="reg-device-modal-close">✕</button>
+      <div class="card-title" style="margin-bottom:16px;" id="reg-device-modal-title">Eszköz szerkesztése</div>
+      <form id="reg-device-form">
+        <input type="hidden" id="reg-device-id">
+        <input type="hidden" id="reg-device-site-id">
+        <label for="reg-device-uuid">Eszköz-azonosító (UUID)</label>
+        <input id="reg-device-uuid" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:12px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+          <div>
+            <label for="reg-device-progtip">Programtípus</label>
+            <input id="reg-device-progtip" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+          <div>
+            <label for="reg-device-verzio">Verzió</label>
+            <input id="reg-device-verzio" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+          <div>
+            <label for="reg-device-regdat">Regisztráció dátuma</label>
+            <input type="datetime-local" id="reg-device-regdat" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+          <div>
+            <label for="reg-device-ervdat">Lejárat dátuma</label>
+            <input type="datetime-local" id="reg-device-ervdat" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+        </div>
+        <label for="reg-device-kapcsnev">Kapcsolattartó neve</label>
+        <input id="reg-device-kapcsnev" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:12px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+          <div>
+            <label for="reg-device-email">Email</label>
+            <input type="email" id="reg-device-email" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+          <div>
+            <label for="reg-device-telefon">Telefon</label>
+            <input id="reg-device-telefon" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+          <div>
+            <label for="reg-device-regmodel">Eszköz modell</label>
+            <input id="reg-device-regmodel" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+          <div>
+            <label for="reg-device-regmanufacturer">Gyártó</label>
+            <input id="reg-device-regmanufacturer" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          </div>
+        </div>
+        <button type="submit" class="btn-primary" style="width:100%;">Mentés</button>
+        <div class="profile-form-msg" id="reg-device-msg"></div>
+      </form>
+      <button class="btn-secondary" id="reg-device-delete-btn" style="width:100%;margin-top:10px;color:var(--brick);">Eszköz törlése</button>
     </div>
   </div>
 

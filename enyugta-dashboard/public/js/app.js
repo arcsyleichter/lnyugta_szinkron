@@ -141,6 +141,7 @@ document.querySelectorAll('.admin-nav-item').forEach((btn) => {
     showAdminView(btn.dataset.adminView);
     if (btn.dataset.adminView === 'felhasznalok') loadAdminUsers();
     if (btn.dataset.adminView === 'licenc') loadLicenseData();
+    if (btn.dataset.adminView === 'regisztraciok') loadAdminRegistrations();
   });
 });
 
@@ -1234,6 +1235,204 @@ function renderAdminStatsGrid(s) {
     card('Fizetés e hónapban', `${s.paymentsThisMonthCount} db · ${fmtHuf(s.paymentsThisMonthTotal)}`),
   ].join('');
 }
+
+let adminRegCache = [];
+
+async function loadAdminRegistrations() {
+  try {
+    const data = await api('/api/admin/registrations');
+    adminRegCache = data.companies;
+    renderAdminRegTable();
+  } catch (e) {
+    document.querySelector('#admin-reg-table tbody').innerHTML = `<tr><td colspan="6" class="muted">Nem sikerült betölteni: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderAdminRegTable() {
+  const q = (document.getElementById('reg-search-input').value || '').toLowerCase().trim();
+  const filtered = adminRegCache.filter((c) =>
+    !q || (c.nev || '').toLowerCase().includes(q) || (c.adoszam || '').toLowerCase().includes(q)
+  );
+  const tbody = document.querySelector('#admin-reg-table tbody');
+  if (!filtered.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">Nincs találat.</td></tr>'; return; }
+  tbody.innerHTML = filtered.map((c) => {
+    const siteCount = c.sites.length;
+    const deviceCount = c.sites.reduce((s, site) => s + site.devices.length, 0);
+    const liveBadge = c.hasLiveSync
+      ? '<span class="licenc-badge licenc-badge--ok">él</span>'
+      : '<span class="licenc-badge licenc-badge--none">nincs</span>';
+    return `
+    <tr data-adoszam="${escapeHtml(c.adoszam)}">
+      <td>${escapeHtml(c.nev || '(névtelen)')}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${siteCount}</td>
+      <td>${deviceCount}</td>
+      <td>${liveBadge}</td>
+      <td><button class="btn-tiny btn-reg-detail" data-adoszam="${escapeHtml(c.adoszam)}">Részletek</button></td>
+    </tr>`;
+  }).join('');
+  tbody.querySelectorAll('.btn-reg-detail').forEach((btn) => {
+    btn.addEventListener('click', () => openRegDetailModal(btn.dataset.adoszam));
+  });
+}
+document.getElementById('reg-search-input').addEventListener('input', renderAdminRegTable);
+
+function openRegDetailModal(adoszam) {
+  const c = adminRegCache.find((x) => x.adoszam === adoszam);
+  if (!c) return;
+  document.getElementById('reg-detail-title').textContent = c.nev || '(névtelen cég)';
+  document.getElementById('reg-detail-subtitle').textContent = c.adoszam;
+  const badgeBox = document.getElementById('reg-detail-live-badge');
+  badgeBox.innerHTML = c.hasLiveSync
+    ? `<span class="licenc-badge licenc-badge--ok">Van élő L-NYUGTA szinkron (${c.liveSites.length} telephely)</span>`
+    : '<span class="licenc-badge licenc-badge--none">Nincs élő L-NYUGTA szinkron ehhez az adószámhoz</span>';
+
+  document.getElementById('reg-site-new-btn').onclick = async () => {
+    const varos = prompt('Telephely városa:');
+    if (varos === null) return;
+    const cim = prompt('Telephely címe (utca, házszám):') || '';
+    try {
+      let companyId = c.id;
+      if (!companyId) {
+        const res = await api('/api/admin/registrations/company/add', { method: 'POST', body: JSON.stringify({ adoszam: c.adoszam, nev: c.nev }) });
+        companyId = res.id;
+      }
+      await api('/api/admin/registrations/site/add', { method: 'POST', body: JSON.stringify({ companyId, varos, cim }) });
+      await loadAdminRegistrations();
+      openRegDetailModal(adoszam);
+    } catch (e) { alert('Nem sikerült: ' + e.message); }
+  };
+
+  renderRegSites(c);
+  document.getElementById('reg-detail-modal-backdrop').hidden = false;
+}
+document.getElementById('reg-detail-modal-close').addEventListener('click', () => {
+  document.getElementById('reg-detail-modal-backdrop').hidden = true;
+});
+document.getElementById('reg-detail-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'reg-detail-modal-backdrop') e.target.hidden = true;
+});
+
+function renderRegSites(c) {
+  const box = document.getElementById('reg-detail-sites');
+  if (!c.sites.length) { box.innerHTML = '<p class="muted">Még nincs telephely felvéve ehhez a céghez.</p>'; return; }
+  box.innerHTML = c.sites.map((s) => `
+    <div class="card" style="background:var(--paper-dim);margin-bottom:12px;padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div>
+          <div style="font-weight:600;font-size:13.5px;">${escapeHtml(s.nev || 'Telephely')}</div>
+          <div class="card-subtitle" style="margin:0;">${escapeHtml([s.varos, s.cim].filter(Boolean).join(', ') || 'nincs cím megadva')}</div>
+        </div>
+        <button class="btn-tiny reg-device-new-btn" data-site-id="${s.id}">+ Új eszköz</button>
+      </div>
+      ${s.devices.length ? s.devices.map((d) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:12.5px;">
+          <div>
+            <b>${escapeHtml(d.progtip || '(ismeretlen típus)')}</b>${d.verzio ? ` · v${escapeHtml(d.verzio)}` : ''}
+            <div class="card-subtitle" style="margin:2px 0 0;">lejárat: ${escapeHtml((d.ervdat || '—').slice(0, 10))} · ${escapeHtml(d.kapcsnev || 'nincs kapcsolattartó')}</div>
+          </div>
+          <button class="btn-tiny reg-device-edit-btn" data-device-id="${d.id}">Szerkesztés</button>
+        </div>
+      `).join('') : '<p class="muted" style="margin:8px 0 0;">Nincs eszköz ezen a telephelyen.</p>'}
+    </div>
+  `).join('');
+
+  box.querySelectorAll('.reg-device-new-btn').forEach((btn) => {
+    btn.addEventListener('click', () => openRegDeviceModal(null, Number(btn.dataset.siteId)));
+  });
+  box.querySelectorAll('.reg-device-edit-btn').forEach((btn) => {
+    const deviceId = Number(btn.dataset.deviceId);
+    let device = null;
+    for (const s of c.sites) { const found = s.devices.find((d) => d.id === deviceId); if (found) { device = found; break; } }
+    btn.addEventListener('click', () => openRegDeviceModal(device, null));
+  });
+}
+
+function toDatetimeLocal(v) {
+  if (!v) return '';
+  return v.replace(' ', 'T').slice(0, 16);
+}
+function fromDatetimeLocal(v) {
+  if (!v) return null;
+  return v.replace('T', ' ') + ':00';
+}
+
+function openRegDeviceModal(device, siteIdForNew) {
+  document.getElementById('reg-device-modal-title').textContent = device ? 'Eszköz szerkesztése' : 'Új eszköz felvétele';
+  document.getElementById('reg-device-id').value = device ? device.id : '';
+  document.getElementById('reg-device-site-id').value = device ? '' : siteIdForNew;
+  document.getElementById('reg-device-uuid').value = device ? (device.uuid || '') : '';
+  document.getElementById('reg-device-progtip').value = device ? (device.progtip || '') : '';
+  document.getElementById('reg-device-verzio').value = device ? (device.verzio || '') : '';
+  document.getElementById('reg-device-regdat').value = toDatetimeLocal(device ? device.regdat : '');
+  document.getElementById('reg-device-ervdat').value = toDatetimeLocal(device ? device.ervdat : '');
+  document.getElementById('reg-device-kapcsnev').value = device ? (device.kapcsnev || '') : '';
+  document.getElementById('reg-device-email').value = device ? (device.email || '') : '';
+  document.getElementById('reg-device-telefon').value = device ? (device.telefon || '') : '';
+  document.getElementById('reg-device-regmodel').value = device ? (device.regmodel || '') : '';
+  document.getElementById('reg-device-regmanufacturer').value = device ? (device.regmanufacturer || '') : '';
+  document.getElementById('reg-device-msg').textContent = '';
+  document.getElementById('reg-device-delete-btn').hidden = !device;
+  document.getElementById('reg-device-modal-backdrop').hidden = false;
+}
+document.getElementById('reg-device-modal-close').addEventListener('click', () => {
+  document.getElementById('reg-device-modal-backdrop').hidden = true;
+});
+document.getElementById('reg-device-modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'reg-device-modal-backdrop') e.target.hidden = true;
+});
+document.getElementById('reg-device-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('reg-device-msg');
+  msg.textContent = '';
+  const id = document.getElementById('reg-device-id').value;
+  const body = {
+    uuid: document.getElementById('reg-device-uuid').value.trim(),
+    progtip: document.getElementById('reg-device-progtip').value.trim(),
+    verzio: document.getElementById('reg-device-verzio').value.trim(),
+    regdat: fromDatetimeLocal(document.getElementById('reg-device-regdat').value),
+    ervdat: fromDatetimeLocal(document.getElementById('reg-device-ervdat').value),
+    kapcsnev: document.getElementById('reg-device-kapcsnev').value.trim(),
+    email: document.getElementById('reg-device-email').value.trim(),
+    telefon: document.getElementById('reg-device-telefon').value.trim(),
+    regmodel: document.getElementById('reg-device-regmodel').value.trim(),
+    regmanufacturer: document.getElementById('reg-device-regmanufacturer').value.trim(),
+  };
+  try {
+    if (id) {
+      await api('/api/admin/registrations/device/save', { method: 'POST', body: JSON.stringify({ id: Number(id), ...body }) });
+    } else {
+      body.siteId = Number(document.getElementById('reg-device-site-id').value);
+      await api('/api/admin/registrations/device/add', { method: 'POST', body: JSON.stringify(body) });
+    }
+    document.getElementById('reg-device-modal-backdrop').hidden = true;
+    const adoszam = document.getElementById('reg-detail-subtitle').textContent;
+    await loadAdminRegistrations();
+    openRegDetailModal(adoszam);
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+document.getElementById('reg-device-delete-btn').addEventListener('click', async () => {
+  if (!confirm('Biztosan törlöd ezt az eszközt a regisztrációk közül?')) return;
+  const id = document.getElementById('reg-device-id').value;
+  try {
+    await api('/api/admin/registrations/device/delete', { method: 'POST', body: JSON.stringify({ id: Number(id) }) });
+    document.getElementById('reg-device-modal-backdrop').hidden = true;
+    const adoszam = document.getElementById('reg-detail-subtitle').textContent;
+    await loadAdminRegistrations();
+    openRegDetailModal(adoszam);
+  } catch (e) { alert('Nem sikerült: ' + e.message); }
+});
+document.getElementById('reg-company-new-btn').addEventListener('click', async () => {
+  const adoszam = prompt('Az új cég adószáma:');
+  if (!adoszam) return;
+  const nev = prompt('A cég neve:') || '';
+  try {
+    await api('/api/admin/registrations/company/add', { method: 'POST', body: JSON.stringify({ adoszam, nev }) });
+    await loadAdminRegistrations();
+  } catch (e) { alert('Nem sikerült: ' + e.message); }
+});
 
 async function loadAdminOverview() {
   const data = await api('/api/admin/overview');

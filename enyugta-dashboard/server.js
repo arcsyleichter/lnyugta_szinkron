@@ -442,6 +442,46 @@ licenseDb.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_license_payments_ceg ON license_payments(ceg_kulcs);
 
+  -- Regisztrációk — a régi LSZAMLA rendszerből átvett, cégenkénti eszköz-
+  -- nyilvántartás (programtípus, verzió, reg./lejárat dátum, kapcsolattartó).
+  -- Mivel a forrásadatban nincs explicit "telephely" fogalom, a "reg_sites"
+  -- a cím alapján csoportosít — ez egy legjobb-tudás szerinti közelítés,
+  -- amit az admin utólag át tud nevezni.
+  CREATE TABLE IF NOT EXISTS reg_companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    adoszam TEXT NOT NULL UNIQUE,
+    nev TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS reg_sites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    nev TEXT,
+    varos TEXT,
+    cim TEXT
+  );
+  CREATE TABLE IF NOT EXISTS reg_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL,
+    uuid TEXT,
+    progtip TEXT,
+    verzio TEXT,
+    regdat TEXT,
+    ervdat TEXT,
+    email TEXT,
+    telefon TEXT,
+    kapcsnev TEXT,
+    regmodel TEXT,
+    regmanufacturer TEXT,
+    statusz TEXT,
+    szszelotag TEXT,
+    legacy_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reg_sites_company ON reg_sites(company_id);
+  CREATE INDEX IF NOT EXISTS idx_reg_devices_site ON reg_devices(site_id);
+
   -- ALAP REGISZTRÁLTSÁG — külön, önálló fogalom a funkciónkénti
   -- kapcsolóktól. Ez azt válaszolja meg: fizeti-e a cég egyáltalán az
   -- alap havidíjat? Ha nincs sor egy cégre, ALAPÉRTELMEZETTEN AKTÍV
@@ -495,6 +535,52 @@ licenseDb.exec(`
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE company_devices ADD COLUMN ${name} ${def}`);
     }
+  }
+}
+// A régi LSZAMLA rendszerből átvett regisztrációs adatok EGYSZERI importja
+// — csak akkor fut le, ha a reg_companies tábla még üres (első indításkor,
+// vagy ha valaki szándékosan törölte az összeset). Ha az admin utólag
+// szerkeszt/töröl egy bejegyzést, ez az import SOHA nem írja felül —
+// nem fut le újra, amint egyszer megtörtént.
+{
+  const already = licenseDb.prepare('SELECT COUNT(*) AS c FROM reg_companies').get().c;
+  const seedPath = path.join(__dirname, 'data-seed', 'registrations.json');
+  if (already === 0 && fs.existsSync(seedPath)) {
+    const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+    const now = new Date().toISOString();
+    const insertCompany = licenseDb.prepare('INSERT INTO reg_companies (adoszam, nev, created_at) VALUES (?, ?, ?)');
+    const insertSite = licenseDb.prepare('INSERT INTO reg_sites (company_id, nev, varos, cim) VALUES (?, ?, ?, ?)');
+    const insertDevice = licenseDb.prepare(`
+      INSERT INTO reg_devices (site_id, uuid, progtip, verzio, regdat, ervdat, email, telefon, kapcsnev, regmodel, regmanufacturer, statusz, szszelotag, legacy_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    let companyCount = 0, deviceCount = 0;
+    licenseDb.exec('BEGIN');
+    try {
+      for (const c of seed) {
+        const companyResult = insertCompany.run(c.adoszam, c.nev, now);
+        const companyId = Number(companyResult.lastInsertRowid);
+        companyCount++;
+        c.sites.forEach((s, idx) => {
+          const siteNev = c.sites.length > 1 ? (s.varos || s.cim || `Telephely ${idx + 1}`) : 'Fő telephely';
+          const siteResult = insertSite.run(companyId, siteNev, s.varos || null, s.cim || null);
+          const siteId = Number(siteResult.lastInsertRowid);
+          for (const d of s.devices) {
+            insertDevice.run(
+              siteId, d.uuid || null, d.progtip || null, d.verzio || null, d.regdat || null, d.ervdat || null,
+              d.email || null, d.telefon || null, d.kapcsnev || null, d.regmodel || null, d.regmanufacturer || null,
+              d.statusz || null, d.szszelotag || null, d.legacyId || null, now
+            );
+            deviceCount++;
+          }
+        });
+      }
+      licenseDb.exec('COMMIT');
+    } catch (e) {
+      licenseDb.exec('ROLLBACK');
+      throw e;
+    }
+    console.log(`[info] Regisztrációk importálva a régi LSZAMLA rendszerből: ${companyCount} cég, ${deviceCount} eszköz.`);
   }
 }
 // A ténylegesen Androidban hardkódolt, VALÓS funkció-azonosítók listája —
@@ -2328,6 +2414,151 @@ route('GET', '/api/admin/payments', async (req, res, query) => {
       allapot: p.allapot, myposTrnref: p.mypos_trnref, letrehozva: p.letrehozva, lezarva: p.lezarva,
     })),
   });
+});
+
+// ---------------------------------------------------------------------------
+// REGISZTRÁCIÓK — Cég → Telephely(ek) → Eszköz(ök) hierarchia, a régi
+// LSZAMLA rendszerből importált adatokból, a saját L-NYUGTA cég-
+// nyilvántartással összefésülve. Azok a cégek is megjelennek, akiknek MÉG
+// nincs egyetlen regisztrációjuk sem (üresen) — és fordítva, azok a
+// regisztrációk is, amikhez (még) nincs tényleges L-NYUGTA szinkron.
+// ---------------------------------------------------------------------------
+route('GET', '/api/admin/registrations', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+
+  const companies = licenseDb.prepare('SELECT * FROM reg_companies ORDER BY nev').all();
+  const sites = licenseDb.prepare('SELECT * FROM reg_sites').all();
+  const devices = licenseDb.prepare('SELECT * FROM reg_devices').all();
+  const sitesByCompany = new Map();
+  sites.forEach((s) => {
+    if (!sitesByCompany.has(s.company_id)) sitesByCompany.set(s.company_id, []);
+    sitesByCompany.get(s.company_id).push(s);
+  });
+  const devicesBySite = new Map();
+  devices.forEach((d) => {
+    if (!devicesBySite.has(d.site_id)) devicesBySite.set(d.site_id, []);
+    devicesBySite.get(d.site_id).push(d);
+  });
+
+  // Melyik adószámokhoz van TÉNYLEGES, élő L-NYUGTA szinkron (companyIndex)?
+  const liveByAdoszam = new Map();
+  for (const [key, entry] of companyIndex) {
+    if (!liveByAdoszam.has(entry.adoszam)) liveByAdoszam.set(entry.adoszam, []);
+    liveByAdoszam.get(entry.adoszam).push({ key, telephelyKod: entry.telephelyKod, nev: entry.nev });
+  }
+
+  const result = companies.map((c) => ({
+    id: c.id, adoszam: c.adoszam, nev: c.nev,
+    hasLiveSync: liveByAdoszam.has(c.adoszam),
+    liveSites: liveByAdoszam.get(c.adoszam) || [],
+    sites: (sitesByCompany.get(c.id) || []).map((s) => ({
+      id: s.id, nev: s.nev, varos: s.varos, cim: s.cim,
+      devices: (devicesBySite.get(s.id) || []).map((d) => ({
+        id: d.id, uuid: d.uuid, progtip: d.progtip, verzio: d.verzio,
+        regdat: d.regdat, ervdat: d.ervdat, email: d.email, telefon: d.telefon,
+        kapcsnev: d.kapcsnev, regmodel: d.regmodel, regmanufacturer: d.regmanufacturer,
+        statusz: d.statusz, szszelotag: d.szszelotag,
+      })),
+    })),
+  }));
+
+  // Azok az élő L-NYUGTA cégek is bekerülnek (üres regisztrációval), amikhez
+  // MÉG nincs egyetlen reg_companies bejegyzés sem.
+  const knownAdoszamok = new Set(companies.map((c) => c.adoszam));
+  const seenEmpty = new Set();
+  for (const [, entry] of companyIndex) {
+    if (knownAdoszamok.has(entry.adoszam) || seenEmpty.has(entry.adoszam)) continue;
+    seenEmpty.add(entry.adoszam);
+    result.push({
+      id: null, adoszam: entry.adoszam, nev: entry.nev,
+      hasLiveSync: true, liveSites: liveByAdoszam.get(entry.adoszam) || [],
+      sites: [],
+    });
+  }
+
+  result.sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
+  sendJson(res, 200, { companies: result });
+});
+
+route('POST', '/api/admin/registrations/company/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { adoszam, nev } = await readJsonBody(req);
+  const cleanAdoszam = String(adoszam || '').trim();
+  if (!cleanAdoszam) return sendJson(res, 400, { error: 'Az adószám megadása kötelező.' });
+  const existing = licenseDb.prepare('SELECT id FROM reg_companies WHERE adoszam = ?').get(cleanAdoszam);
+  if (existing) return sendJson(res, 409, { error: 'Ez az adószám már szerepel a nyilvántartásban.' });
+  const result = licenseDb.prepare('INSERT INTO reg_companies (adoszam, nev, created_at) VALUES (?, ?, ?)')
+    .run(cleanAdoszam, String(nev || '').trim() || null, new Date().toISOString());
+  logActivity({ type: 'reg_company_add', ok: true, companyKey: null, nev: 'admin', detail: `Regisztrációs cég felvéve: ${nev} (${cleanAdoszam})` });
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/site/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { companyId, nev, varos, cim } = await readJsonBody(req);
+  const company = licenseDb.prepare('SELECT id FROM reg_companies WHERE id = ?').get(companyId);
+  if (!company) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
+  const result = licenseDb.prepare('INSERT INTO reg_sites (company_id, nev, varos, cim) VALUES (?, ?, ?, ?)')
+    .run(companyId, String(nev || '').trim() || 'Telephely', String(varos || '').trim() || null, String(cim || '').trim() || null);
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/site/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id, nev, varos, cim } = await readJsonBody(req);
+  const site = licenseDb.prepare('SELECT id FROM reg_sites WHERE id = ?').get(id);
+  if (!site) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  licenseDb.prepare('UPDATE reg_sites SET nev = ?, varos = ?, cim = ? WHERE id = ?')
+    .run(String(nev || '').trim() || null, String(varos || '').trim() || null, String(cim || '').trim() || null, id);
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/registrations/device/add', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const b = await readJsonBody(req);
+  const site = licenseDb.prepare('SELECT id FROM reg_sites WHERE id = ?').get(b.siteId);
+  if (!site) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
+  const now = new Date().toISOString();
+  const result = licenseDb.prepare(`
+    INSERT INTO reg_devices (site_id, uuid, progtip, verzio, regdat, ervdat, email, telefon, kapcsnev, regmodel, regmanufacturer, statusz, szszelotag, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    b.siteId, b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
+    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
+    b.statusz || 'I', b.szszelotag || null, now, now
+  );
+  sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
+});
+
+route('POST', '/api/admin/registrations/device/save', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const b = await readJsonBody(req);
+  const device = licenseDb.prepare('SELECT id FROM reg_devices WHERE id = ?').get(b.id);
+  if (!device) return sendJson(res, 404, { error: 'Ismeretlen eszköz.' });
+  licenseDb.prepare(`
+    UPDATE reg_devices SET uuid = ?, progtip = ?, verzio = ?, regdat = ?, ervdat = ?, email = ?, telefon = ?,
+      kapcsnev = ?, regmodel = ?, regmanufacturer = ?, statusz = ?, szszelotag = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
+    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
+    b.statusz || null, b.szszelotag || null, new Date().toISOString(), b.id
+  );
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/admin/registrations/device/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { id } = await readJsonBody(req);
+  licenseDb.prepare('DELETE FROM reg_devices WHERE id = ?').run(id);
+  sendJson(res, 200, { ok: true });
 });
 
 // Licenc kiosztása / módosítása egy cégnek egy adott funkcióra — upsert.
