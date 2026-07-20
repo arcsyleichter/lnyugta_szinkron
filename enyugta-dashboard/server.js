@@ -482,6 +482,16 @@ licenseDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_reg_sites_company ON reg_sites(company_id);
   CREATE INDEX IF NOT EXISTS idx_reg_devices_site ON reg_devices(site_id);
 
+  -- Általános, webről állítható szerver-beállítások (kulcs -> érték) — ide
+  -- kerülnek azok a kapcsolók, amik eddig csak env-változóval, a szerver
+  -- konfigurációjában voltak elérhetők, de admin számára a webről kell
+  -- tudni kapcsolni őket, szerver-újraindítás/SSH nélkül.
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   -- ALAP REGISZTRÁLTSÁG — külön, önálló fogalom a funkciónkénti
   -- kapcsolóktól. Ez azt válaszolja meg: fizeti-e a cég egyáltalán az
   -- alap havidíjat? Ha nincs sor egy cégre, ALAPÉRTELMEZETTEN AKTÍV
@@ -4224,11 +4234,11 @@ route('GET', '/api/sync/companies', async (req, res) => {
   sendJson(res, 200, { count: list.length, companies: list });
 });
 
-// Élesedés előtt (LICENSE_ENFORCE nincs beállítva / "0"): minden aktív
-// katalógus-funkció mindenkinek engedélyezett, a company_licenses tábla
-// tartalmától függetlenül — ez a jelenlegi, bevezetés előtti állapot.
-// Élesedéskor egyetlen env-változóval (LICENSE_ENFORCE=1) kapcsoljuk be a
-// tényleges érvényesítést, kódmódosítás és újracsomagolás nélkül.
+// Élesedés előtt (kikapcsolt állapotban): minden aktív katalógus-funkció
+// mindenkinek engedélyezett, a company_licenses tábla tartalmától
+// függetlenül. Élesedéskor az admin a webről, egyetlen kapcsolóval
+// bekapcsolhatja a tényleges érvényesítést — nincs szükség szerver-
+// konfigurációhoz vagy újraindításhoz.
 //
 // Bekapcsolt érvényesítés esetén minden cég kap egy LICENSE_TRIAL_DAYS
 // (alapértelmezetten 7) napos ingyenes próbaidőt, az első szinkronjától
@@ -4239,7 +4249,22 @@ route('GET', '/api/sync/companies', async (req, res) => {
 // technikailag nem más, mint egy ideiglenes, mindenre kiterjedő "engedély".
 // A próba lejárta UTÁN kizárólag a ténylegesen kiosztott (company_licenses)
 // funkciók maradnak engedélyezve.
-const LICENSE_ENFORCE = process.env.LICENSE_ENFORCE === '1';
+{
+  // Egyszeri, kompatibilitási átállás: ha korábban env-változóval volt
+  // beállítva (LICENSE_ENFORCE=1), az ELSŐ induláskor ezt vesszük át
+  // kezdőértéknek az adatbázisba — utána viszont MÁR CSAK a webes
+  // kapcsoló számít, az env-változó figyelmen kívül marad.
+  const existing = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
+  if (!existing) {
+    const initial = process.env.LICENSE_ENFORCE === '1' ? '1' : '0';
+    licenseDb.prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES ('license_enforce', ?, ?)`)
+      .run(initial, new Date().toISOString());
+  }
+}
+function isLicenseEnforceOn() {
+  const row = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
+  return row ? row.value === '1' : false;
+}
 const LICENSE_TRIAL_DAYS = parseInt(process.env.LICENSE_TRIAL_DAYS || '7', 10);
 
 // ---------------------------------------------------------------------------
@@ -4397,8 +4422,8 @@ function computeEffectiveLicense(cegKulcs, eszkoz) {
   const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
   const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
   const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
-  const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
-  const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
+  const trialEnd = isLicenseEnforceOn() ? companyTrialEnd(cegKulcs) : null;
+  const inTrial = isLicenseEnforceOn() ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
 
   let funkciok = [];
   if (!alapElofizetesAktiv) {
@@ -4456,6 +4481,32 @@ route('GET', '/api/admin/license/effective', async (req, res, query) => {
     inTrial: effective.inTrial,
     funkciok: effective.funkciok,
   });
+});
+
+// A licenc-kikényszerítés webről kapcsolható be/ki — amíg ki van kapcsolva
+// (alapállapot), mindenki mindent lát, az admin által kiosztott funkcióktól
+// függetlenül. Bekapcsolás után a valóban kiosztott funkciók számítanak
+// (a próbaidőszak lejárta után).
+route('GET', '/api/admin/settings/license-enforce', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  sendJson(res, 200, { enforce: isLicenseEnforceOn() });
+});
+
+route('POST', '/api/admin/settings/license-enforce', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { enforce } = await readJsonBody(req);
+  const value = enforce ? '1' : '0';
+  licenseDb.prepare(`
+    INSERT INTO app_settings (key, value, updated_at) VALUES ('license_enforce', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(value, new Date().toISOString());
+  logActivity({
+    type: 'license_enforce_toggle', ok: true, companyKey: null, nev: 'admin',
+    detail: enforce ? 'Licenc-kikényszerítés BEKAPCSOLVA — mostantól a tényleges kiosztás számít.' : 'Licenc-kikényszerítés KIKAPCSOLVA — mindenki mindent lát.',
+  });
+  sendJson(res, 200, { ok: true, enforce: !!enforce });
 });
 
 // ---------------------------------------------------------------------------

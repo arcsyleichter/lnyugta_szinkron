@@ -169,8 +169,40 @@ let licenseCompaniesCache = [];
 let licensePackagesCache = [];
 
 async function loadLicenseData() {
-  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages(), loadAdminPayments()]);
+  await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages(), loadAdminPayments(), loadLicenseEnforceToggle()]);
 }
+
+async function loadLicenseEnforceToggle() {
+  const checkbox = document.getElementById('license-enforce-toggle');
+  const desc = document.getElementById('license-enforce-desc');
+  try {
+    const data = await api('/api/admin/settings/license-enforce');
+    checkbox.checked = data.enforce;
+    updateLicenseEnforceDesc(data.enforce);
+  } catch (e) {
+    desc.textContent = 'Nem sikerült betölteni: ' + e.message;
+  }
+}
+function updateLicenseEnforceDesc(enforce) {
+  const desc = document.getElementById('license-enforce-desc');
+  desc.innerHTML = enforce
+    ? '<b>Bekapcsolva</b> — a tényleges, kiosztott funkciók számítanak (a próbaidőszak lejárta után). Amit itt beállítasz, azt fogja látni az app.'
+    : '<b>Kikapcsolva</b> — mindenki mindent lát, függetlenül attól, mit osztasz ki. A lenti beállítások NEM érvényesülnek, amíg ez ki van kapcsolva.';
+}
+document.getElementById('license-enforce-toggle').addEventListener('change', async (e) => {
+  const checkbox = e.target;
+  const newValue = checkbox.checked;
+  checkbox.disabled = true;
+  try {
+    await api('/api/admin/settings/license-enforce', { method: 'POST', body: JSON.stringify({ enforce: newValue }) });
+    updateLicenseEnforceDesc(newValue);
+  } catch (err) {
+    alert('Nem sikerült menteni: ' + err.message);
+    checkbox.checked = !newValue;
+  } finally {
+    checkbox.disabled = false;
+  }
+});
 
 async function loadAdminPayments() {
   const statusBox = document.getElementById('admin-payments-status');
