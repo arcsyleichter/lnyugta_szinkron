@@ -2,7 +2,7 @@
 <html lang="hu">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><!-- a zoom letiltása akadálymentességi hiba volt; az iOS input-ráközelítést a 16px-es mobilos betűméret oldja meg, nem a zoom-tiltás -->
 <title>L-NYUGTA — élő értékesítési nézegető</title>
 <link rel="icon" type="image/svg+xml" href="/img/logo.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1074,9 +1074,8 @@
 
   <main class="main admin-main">
     <div class="admin-view" data-admin-view="overview">
-      <div class="card">
-        <div class="card-title">Áttekintés</div>
-        <div class="compare-overview-grid" id="admin-stats-grid"></div>
+      <div id="admin-overview-root">
+        <div class="card"><div class="empty-state">Áttekintés betöltése…</div></div>
       </div>
 
       <div class="admin-email-warning" id="admin-email-warning" hidden>

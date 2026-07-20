@@ -159,6 +159,11 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 /* ============================================================ App shell ============================================================ */
 .app-shell{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; }
+/* A rács-gyerekek alapból nem mehetnek a tartalmuk min-szélessége alá
+   (min-width:auto) — széles táblázatnál ez az egész oldalt kifeszítené a
+   viewportnál szélesebbre. min-width:0-val a belső, overflow-x:auto
+   konténerek görgetnek, az oldal nem törik el. */
+.app-shell > *, .admin-shell > *{ min-width:0; }
 .sidebar{
   background:var(--ink); color:var(--paper); padding:22px 16px; display:flex; flex-direction:column;
   position:sticky; top:0; height:100vh;
@@ -513,19 +518,6 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .login-toggle-row a{ color:var(--jade-deep); text-decoration:none; font-weight:600; }
 .login-toggle-row a:hover{ text-decoration:underline; }
 
-.reg-sortable{ cursor:pointer; user-select:none; white-space:nowrap; }
-.reg-sortable:hover{ color:var(--jade-deep); }
-.reg-sortable .sort-arrow{ font-size:10px; margin-left:3px; opacity:0.6; }
-
-.pagination-bar{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:10px 2px; font-size:12.5px; color:var(--text-dim); }
-.pagination-info{ white-space:nowrap; }
-.pagination-controls{ display:flex; align-items:center; gap:4px; }
-.pagination-controls button{ min-width:30px; height:30px; border:1.5px solid var(--line); background:#fff; border-radius:6px; cursor:pointer; font-size:12.5px; color:var(--text); }
-.pagination-controls button:hover:not(:disabled){ border-color:var(--jade); }
-.pagination-controls button:disabled{ opacity:0.4; cursor:default; }
-.pagination-controls button.is-active{ background:var(--jade); color:#fff; border-color:var(--jade); }
-.pagination-size-select{ padding:5px 8px; border:1.5px solid var(--line); border-radius:6px; font-size:12.5px; color:var(--text); background:#fff; }
-
 /* ============================================================
    Kezdőoldal — gazdag, kétpaneles bejelentkező (ügyfél-belépés
    közvetlenül, választás nélkül)
@@ -730,8 +722,30 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .admin-shell .card{ overflow-x:auto; }
 
 @media (max-width:880px){
+  /* KRITIKUS: az admin/viszonteladói shell rácsa egyoszlopos mobilon.
+     Enélkül a grid fenntart egy üres 224px-es első sávot a (mobilon a
+     rácsból kikerülő) sidebar helyén, és minden tartalom egy keskeny
+     csíkba préselődik. FONTOS: ennek a szabálynak az .admin-shell
+     alap-definíciója UTÁN kell állnia — azonos specificitásnál a
+     későbbi forrássorrend nyer, media query ezen nem változtat. */
+  .admin-shell{ grid-template-columns:1fr; }
   .admin-topbar{ padding:14px 16px; }
-  .admin-main{ padding:18px 14px 110px; }
+  /* margin:0 auto grid-elemen kikapcsolja a stretch-et (fit-content
+     szélesség lesz) → széles táblázatnál a teljes oldal túlcsordulna. */
+  .admin-main{ padding:18px 14px 110px; margin:0; width:100%; }
+
+  /* Viszonteladói felület mobilon: nincs alsó tabbar és nincs hamburger,
+     ezért a sidebar nem csúszó panelként, hanem sima fejlécként viselkedik —
+     különben a navigáció ÉS a Kilépés gomb elérhetetlen lenne. */
+  #reseller-screen .sidebar{
+    position:static; transform:none; height:auto; width:auto;
+    flex-direction:row; align-items:center; justify-content:space-between;
+    padding:12px 16px; box-shadow:none;
+  }
+  #reseller-screen .sidebar-topline{ margin-bottom:0; }
+  #reseller-screen .nav{ display:none; } /* egyetlen, mindig aktív menüpontja van — fejlécben felesleges */
+  #reseller-screen .sidebar-footer{ flex-direction:row; }
+  #reseller-screen .main{ padding:16px 14px 40px; }
 }
 .pager{ display:flex; gap:6px; }
 .btn-tiny{ background:var(--paper-dim); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; }
@@ -754,10 +768,79 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .modal-backdrop[hidden]{ display:none; }
 .modal{ background:#fff; border-radius:12px; padding:20px 18px; max-width:480px; width:100%; max-height:85vh; overflow:auto; position:relative; }
 @media (min-width:521px){ .modal{ padding:26px; } }
-.modal-close{ position:absolute; top:14px; right:14px; background:var(--paper-dim); border:none; width:28px; height:28px; border-radius:50%; font-size:13px; }
+.modal-close{ position:absolute; top:10px; right:10px; background:var(--paper-dim); border:none; width:36px; height:36px; border-radius:50%; font-size:14px; } /* 36px = biztonságos érintési felület mobilon */
 .receipt-modal h3{ font-family:var(--font-mono); font-size:16px; margin:0 0 4px; }
 .receipt-modal .receipt-meta{ color:var(--text-dim); font-size:12.5px; margin-bottom:16px; }
 .receipt-line{ display:flex; justify-content:space-between; gap:10px; font-size:13px; padding:6px 0; border-bottom:1px dashed var(--line); font-family:var(--font-mono); }
 .receipt-total{ display:flex; justify-content:space-between; font-weight:700; font-size:15px; margin-top:12px; padding-top:10px; border-top:2px solid var(--ink); font-family:var(--font-mono); }
 
 .empty-state{ color:var(--text-dim); font-size:13px; padding:24px 0; text-align:center; }
+
+/* ============================================================
+   Admin — Áttekintés (újratervezett)
+   Négy számkártya → szinkron-egészség sáv → teendőlista.
+   A cél: a belépő admin 3 másodperc alatt lássa, (1) mekkora az
+   ügyfélállomány, (2) él-e minden eszköz, (3) van-e teendője.
+   ============================================================ */
+.ov-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; }
+.ov-grid .card{ margin-bottom:0; }
+.ov-stat{ display:flex; flex-direction:column; gap:2px; }
+.ov-label{ font-size:11.5px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em; }
+.ov-big{ font-family:var(--font-display); font-weight:700; font-size:30px; line-height:1.15; color:var(--text); }
+.ov-big .ov-big-unit{ font-size:16px; font-weight:600; color:var(--text-dim); margin-left:2px; }
+.ov-sub{ font-size:12.5px; color:var(--text-dim); }
+.ov-sub.warn{ color:var(--brick); font-weight:600; }
+
+.syncbar{ display:flex; height:14px; border-radius:8px; overflow:hidden; background:var(--paper-dim); margin:12px 0 12px; }
+.syncbar-seg{ height:100%; min-width:0; }
+.syncbar-seg--fresh{ background:#5FBF8F; }
+.syncbar-seg--week{ background:var(--amber); }
+.syncbar-seg--stale{ background:var(--brick); }
+.syncbar-seg--never{ background:#7E2E3F; }
+.syncbar-legend{ display:flex; flex-wrap:wrap; gap:8px 18px; font-size:12.5px; color:var(--text-dim); }
+.syncbar-legend span{ display:flex; align-items:center; gap:6px; }
+.syncbar-legend i{ width:10px; height:10px; border-radius:3px; display:inline-block; flex:none; }
+
+.issue-list{ display:flex; flex-direction:column; gap:8px; }
+.issue-row{
+  display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%;
+  text-align:left; border:1px solid rgba(192,89,107,0.35); background:rgba(192,89,107,0.07);
+  border-radius:9px; padding:12px 14px; font-size:13.5px; color:var(--text); font-weight:500;
+  transition:background .15s, border-color .15s;
+}
+.issue-row:hover{ background:rgba(192,89,107,0.13); }
+.issue-row .issue-count{
+  font-family:var(--font-mono); font-weight:700; color:var(--brick); font-size:15px; flex:none;
+  min-width:26px; text-align:center;
+}
+.issue-row .issue-open{ flex:none; font-size:12.5px; font-weight:600; color:var(--jade-deep); white-space:nowrap; }
+.issue-row--ok{
+  border-color:rgba(95,191,143,0.4); background:rgba(95,191,143,0.09); cursor:default;
+  color:#2E7D5C; font-weight:600;
+}
+.issue-row--ok:hover{ background:rgba(95,191,143,0.09); }
+
+/* ============================================================
+   Hozzáférhetőség — minden interaktív elemen látható billentyűzet-
+   fókusz, és animációk kikapcsolása, ha a rendszer ezt kéri.
+   ============================================================ */
+:focus-visible{ outline:2px solid var(--jade-deep); outline-offset:2px; }
+.sidebar :focus-visible, .mobile-tabbar :focus-visible{ outline-color:var(--amber); }
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{ animation-duration:0.01ms !important; transition-duration:0.01ms !important; }
+}
+
+/* ============================================================
+   Lapozó — újrahasznosítható vezérlő minden admin lista-nézethez
+   ============================================================ */
+.pagination-bar{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:10px 2px; font-size:12.5px; color:var(--text-dim); }
+.pagination-info{ white-space:nowrap; }
+.pagination-controls{ display:flex; align-items:center; gap:4px; }
+.pagination-controls button{ min-width:30px; height:30px; border:1.5px solid var(--line); background:#fff; border-radius:6px; cursor:pointer; font-size:12.5px; color:var(--text); }
+.pagination-controls button:hover:not(:disabled){ border-color:var(--jade); }
+.pagination-controls button:disabled{ opacity:0.4; cursor:default; }
+.pagination-controls button.is-active{ background:var(--jade); color:#fff; border-color:var(--jade); }
+.pagination-size-select{ padding:5px 8px; border:1.5px solid var(--line); border-radius:6px; font-size:12.5px; color:var(--text); background:#fff; }
+.reg-sortable{ cursor:pointer; user-select:none; white-space:nowrap; }
+.reg-sortable:hover{ color:var(--jade-deep); }
+.reg-sortable .sort-arrow{ font-size:10px; margin-left:3px; opacity:0.6; }

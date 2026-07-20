@@ -5,7 +5,56 @@
 // se tudja véletlenül a deklaráció elé csúsztatni a felhasználást
 // (ami "Cannot access before initialization" hibát okozna).
 let stockProductsLoaded = false;
+let loggedIn = false;
 const stockFilter = { q: '', csoport: '' };
+
+/* ============================================================
+   Globális hibafogó — minden nem kezelt JS-hibát (beleértve a
+   top-level szkripthibákat és az elkapatlan Promise-hibákat)
+   elküld a szervernek (/api/client-error), hogy ne a felhasználó
+   képernyőfotójából derüljön ki, ha valami eltört.
+   Védelem: laponként max. 5 riport, azonos üzenet csak egyszer,
+   és a riportolás saját hibája sosem dobódik tovább.
+   ============================================================ */
+const _errSent = new Set();
+let _errCount = 0;
+function reportClientError(message, source, line, stack) {
+  try {
+    const key = String(message).slice(0, 200);
+    if (_errCount >= 5 || _errSent.has(key)) return;
+    _errSent.add(key);
+    _errCount += 1;
+    fetch('/api/client-error', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({
+        message: String(message).slice(0, 500),
+        source: String(source || '').slice(0, 200),
+        line: Number(line) || 0,
+        stack: String(stack || '').slice(0, 1000),
+        url: location.pathname + location.search,
+      }),
+    }).catch(() => {});
+  } catch (_) { /* a hibariport sosem okozhat újabb hibát */ }
+}
+window.addEventListener('error', (e) => {
+  reportClientError(e.message, e.filename, e.lineno, e.error && e.error.stack);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason || {};
+  reportClientError(r.message || String(e.reason), '', 0, r.stack);
+});
+
+/* Null-biztos eseménykezelő-regisztráció. Ha az elem hiányzik a DOM-ból
+   (pl. régi cache-elt index.html új app.js-sel), NEM dobunk hibát — ami
+   megölné az egész top-level szkriptet és minden utána következő
+   regisztrációt —, hanem riportoljuk és megyünk tovább. */
+function listen(id, event, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener(event, fn);
+  else reportClientError(`Hiányzó DOM elem: #${id} (${event} kezelő nem lett regisztrálva)`);
+}
 
 /* ============================================================
    Segédfüggvények
@@ -221,7 +270,7 @@ document.querySelectorAll('.mobile-tab-btn[data-forward-admin-view]').forEach((b
     document.querySelector(`.admin-nav-item[data-admin-view="${btn.dataset.forwardAdminView}"]`).click();
   });
 });
-document.getElementById('admin-mobile-tab-more').addEventListener('click', () => {
+listen('admin-mobile-tab-more', 'click', () => {
   const sidebar = document.getElementById('admin-sidebar');
   if (sidebar.classList.contains('is-open')) closeAdminMobileSidebar(); else openAdminMobileSidebar();
 });
@@ -256,7 +305,7 @@ function updateLicenseEnforceDesc(enforce) {
     ? '<b>Bekapcsolva</b> — a tényleges, kiosztott funkciók számítanak (a próbaidőszak lejárta után). Amit itt beállítasz, azt fogja látni az app.'
     : '<b>Kikapcsolva</b> — mindenki mindent lát, függetlenül attól, mit osztasz ki. A lenti beállítások NEM érvényesülnek, amíg ez ki van kapcsolva.';
 }
-document.getElementById('license-enforce-toggle').addEventListener('change', async (e) => {
+listen('license-enforce-toggle', 'change', async (e) => {
   const checkbox = e.target;
   const newValue = checkbox.checked;
   checkbox.disabled = true;
@@ -362,14 +411,14 @@ function openLicensePackageModal(p) {
     </label>`).join('') || '<span class="muted">Előbb vegyél fel legalább egy funkciót a katalógusba.</span>';
   document.getElementById('license-package-modal-backdrop').hidden = false;
 }
-document.getElementById('license-package-new-btn').addEventListener('click', () => openLicensePackageModal(null));
-document.getElementById('license-package-modal-close').addEventListener('click', () => {
+listen('license-package-new-btn', 'click', () => openLicensePackageModal(null));
+listen('license-package-modal-close', 'click', () => {
   document.getElementById('license-package-modal-backdrop').hidden = true;
 });
-document.getElementById('license-package-modal-backdrop').addEventListener('click', (e) => {
+listen('license-package-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'license-package-modal-backdrop') e.target.hidden = true;
 });
-document.getElementById('license-package-form').addEventListener('submit', async (e) => {
+listen('license-package-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('license-package-msg');
   msg.textContent = '';
@@ -449,8 +498,8 @@ function openLicenseFeatureModal(f) {
   document.getElementById('license-feature-msg').textContent = '';
   document.getElementById('license-feature-modal-backdrop').hidden = false;
 }
-document.getElementById('license-feature-new-btn').addEventListener('click', () => openLicenseFeatureModal(null));
-document.getElementById('license-feature-remove-fake-btn').addEventListener('click', async () => {
+listen('license-feature-new-btn', 'click', () => openLicenseFeatureModal(null));
+listen('license-feature-remove-fake-btn', 'click', async () => {
   if (!confirm('Törlöd a katalógusból mindazt, ami nem a 12 valós Android-azonosító egyike? Csak azokat törli, amik SEHOL nincsenek kiosztva egyetlen cégnél sem.')) return;
   const btn = document.getElementById('license-feature-remove-fake-btn');
   btn.disabled = true; btn.textContent = 'Törlés…';
@@ -466,7 +515,7 @@ document.getElementById('license-feature-remove-fake-btn').addEventListener('cli
     btn.disabled = false; btn.textContent = 'Kamu funkciók törlése';
   }
 });
-document.getElementById('license-feature-seed-real-btn').addEventListener('click', async () => {
+listen('license-feature-seed-real-btn', 'click', async () => {
   const btn = document.getElementById('license-feature-seed-real-btn');
   btn.disabled = true; btn.textContent = 'Pótlás…';
   try {
@@ -481,13 +530,13 @@ document.getElementById('license-feature-seed-real-btn').addEventListener('click
     btn.disabled = false; btn.textContent = 'Hiányzó valós funkciók pótlása';
   }
 });
-document.getElementById('license-feature-modal-close').addEventListener('click', () => {
+listen('license-feature-modal-close', 'click', () => {
   document.getElementById('license-feature-modal-backdrop').hidden = true;
 });
-document.getElementById('license-feature-modal-backdrop').addEventListener('click', (e) => {
+listen('license-feature-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'license-feature-modal-backdrop') e.target.hidden = true;
 });
-document.getElementById('license-feature-form').addEventListener('submit', async (e) => {
+listen('license-feature-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('license-feature-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -761,10 +810,10 @@ function openLicenseGrantModal(c) {
   });
   document.getElementById('license-grant-modal-backdrop').hidden = false;
 }
-document.getElementById('license-grant-modal-close').addEventListener('click', () => {
+listen('license-grant-modal-close', 'click', () => {
   document.getElementById('license-grant-modal-backdrop').hidden = true;
 });
-document.getElementById('license-grant-modal-backdrop').addEventListener('click', (e) => {
+listen('license-grant-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'license-grant-modal-backdrop') e.target.hidden = true;
 });
 
@@ -779,27 +828,6 @@ let adminCompaniesCache = [];
 let adminNtakCache = [];
 const adminCompaniesPaginator = new Paginator();
 const adminNtakPaginator = new Paginator();
-
-function renderAdminCompaniesTable() {
-  const compTbody = document.querySelector('#admin-companies-table tbody');
-  const pageData = adminCompaniesPaginator.slice(adminCompaniesCache);
-  compTbody.innerHTML = '';
-  pageData.forEach((c) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${escapeHtml(c.nev)}</td>
-      <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
-      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
-      <td><button class="btn-tiny btn-company-detail" data-key="${escapeHtml(c.key)}">Részletek</button></td>`;
-    compTbody.appendChild(tr);
-  });
-  compTbody.querySelectorAll('.btn-company-detail').forEach((btn) => {
-    btn.addEventListener('click', () => openCompanyDetailModal(btn.dataset.key));
-  });
-  adminCompaniesPaginator.renderControls(document.getElementById('admin-companies-pagination'), renderAdminCompaniesTable);
-}
-
 let adminResellersCache = [];
 let adminUsersRoleFilter = '';
 const adminUsersPaginator = new Paginator();
@@ -911,13 +939,13 @@ document.getElementById('admin-users-role-filter').addEventListener('change', (e
 });
 
 
-document.getElementById('user-edit-modal-close').addEventListener('click', () => {
+listen('user-edit-modal-close', 'click', () => {
   document.getElementById('user-edit-modal-backdrop').hidden = true;
 });
-document.getElementById('user-edit-modal-backdrop').addEventListener('click', (e) => {
+listen('user-edit-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'user-edit-modal-backdrop') e.target.hidden = true;
 });
-document.getElementById('user-edit-form').addEventListener('submit', async (e) => {
+listen('user-edit-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('user-edit-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -940,10 +968,10 @@ function updateAdminInviteFields() {
   document.getElementById('admin-invite-ceg-fields').hidden = (role === 'reseller');
   document.getElementById('admin-invite-telephely-field').hidden = (role !== 'manager');
 }
-document.getElementById('admin-invite-role').addEventListener('change', updateAdminInviteFields);
+listen('admin-invite-role', 'change', updateAdminInviteFields);
 updateAdminInviteFields();
 
-document.getElementById('admin-invite-form').addEventListener('submit', async (e) => {
+listen('admin-invite-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('admin-invite-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -993,13 +1021,13 @@ function handleLoginSuccess(data) {
   boot();
 }
 
-document.getElementById('logout-btn').addEventListener('click', async () => {
+listen('logout-btn', 'click', async () => {
   await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
   loggedIn = false;
   state.viaAdmin = false;
   showLandingScreen();
 });
-document.getElementById('back-to-admin-btn').addEventListener('click', () => {
+listen('back-to-admin-btn', 'click', () => {
   showAdmin();
   loadAdminOverview();
   loadAdminActivity();
@@ -1008,15 +1036,15 @@ document.getElementById('back-to-admin-btn').addEventListener('click', () => {
 /* ============================================================
    Admin belépés + panel
    ============================================================ */
-document.getElementById('show-admin-login').addEventListener('click', (e) => { e.preventDefault(); showAdminLogin(); });
+listen('show-admin-login', 'click', (e) => { e.preventDefault(); showAdminLogin(); });
 
 /* ============================================================
    Kezdőoldal — 2 csempe
    ============================================================ */
 function showLandingScreen() { hideAllScreens(); landingScreen.hidden = false; }
-document.getElementById('show-reseller-login-link').addEventListener('click', (e) => { e.preventDefault(); showResellerLogin(); });
+listen('show-reseller-login-link', 'click', (e) => { e.preventDefault(); showResellerLogin(); });
 
-document.getElementById('user-login-form').addEventListener('submit', async (e) => {
+listen('user-login-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('user-login-btn');
   const err = document.getElementById('user-login-error');
@@ -1039,7 +1067,7 @@ document.getElementById('user-login-form').addEventListener('submit', async (e) 
    Viszonteladói bejelentkezés
    ============================================================ */
 function showResellerLogin() { hideAllScreens(); document.getElementById('reseller-login-screen').hidden = false; }
-document.getElementById('reseller-back-link').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
+listen('reseller-back-link', 'click', (e) => { e.preventDefault(); showLandingScreen(); });
 
 function showResellerDashboard() { hideAllScreens(); resellerScreen.hidden = false; }
 
@@ -1062,12 +1090,12 @@ async function loadResellerOverview() {
   }
 }
 
-document.getElementById('reseller-logout-btn').addEventListener('click', async () => {
+listen('reseller-logout-btn', 'click', async () => {
   await api('/api/auth/reseller-logout', { method: 'POST' }).catch(() => {});
   showResellerLogin();
 });
 
-document.getElementById('reseller-invite-form').addEventListener('submit', async (e) => {
+listen('reseller-invite-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('reseller-invite-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -1087,7 +1115,7 @@ document.getElementById('reseller-invite-form').addEventListener('submit', async
   }
 });
 
-document.getElementById('reseller-login-form').addEventListener('submit', async (e) => {
+listen('reseller-login-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('reseller-login-btn');
   const err = document.getElementById('reseller-login-error');
@@ -1125,7 +1153,7 @@ async function checkInviteLink() {
     document.getElementById('invite-accept-form').hidden = true;
     return true;
   }
-  document.getElementById('invite-accept-form').addEventListener('submit', async (e) => {
+  listen('invite-accept-form', 'submit', async (e) => {
     e.preventDefault();
     const err = document.getElementById('invite-accept-error');
     err.hidden = true;
@@ -1146,22 +1174,22 @@ async function checkInviteLink() {
   return true;
 }
 
-document.getElementById('show-company-login').addEventListener('click', (e) => { e.preventDefault(); showLandingScreen(); });
+listen('show-company-login', 'click', (e) => { e.preventDefault(); showLandingScreen(); });
 
 function openForgotPasswordModal() {
   document.getElementById('forgot-password-email').value = '';
   document.getElementById('forgot-password-msg').textContent = '';
   document.getElementById('forgot-password-modal-backdrop').hidden = false;
 }
-document.getElementById('user-forgot-password-link').addEventListener('click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
-document.getElementById('reseller-forgot-password-link').addEventListener('click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
-document.getElementById('forgot-password-modal-close').addEventListener('click', () => {
+listen('user-forgot-password-link', 'click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
+listen('reseller-forgot-password-link', 'click', (e) => { e.preventDefault(); openForgotPasswordModal(); });
+listen('forgot-password-modal-close', 'click', () => {
   document.getElementById('forgot-password-modal-backdrop').hidden = true;
 });
-document.getElementById('forgot-password-modal-backdrop').addEventListener('click', (e) => {
+listen('forgot-password-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'forgot-password-modal-backdrop') e.target.hidden = true;
 });
-document.getElementById('forgot-password-form').addEventListener('submit', async (e) => {
+listen('forgot-password-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('forgot-password-msg');
   const email = document.getElementById('forgot-password-email').value.trim();
@@ -1197,7 +1225,7 @@ async function checkResetPasswordLink() {
     document.getElementById('invite-accept-form').hidden = true;
     return true;
   }
-  document.getElementById('invite-accept-form').addEventListener('submit', async (e) => {
+  listen('invite-accept-form', 'submit', async (e) => {
     e.preventDefault();
     const err = document.getElementById('invite-accept-error');
     err.hidden = true;
@@ -1268,7 +1296,7 @@ async function selectTelephely(kod) {
   }
 }
 
-document.getElementById('telephely-waiting-back-btn').addEventListener('click', () => {
+listen('telephely-waiting-back-btn', 'click', () => {
   showTelephelyScreen();
   loadTelephelyPicker();
 });
@@ -1284,7 +1312,7 @@ function updateTelephelyBadge(telephelyNev) {
   }
 }
 
-document.getElementById('telephely-new-form').addEventListener('submit', async (e) => {
+listen('telephely-new-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('telephely-new-btn');
   const err = document.getElementById('telephely-new-error');
@@ -1305,20 +1333,20 @@ document.getElementById('telephely-new-form').addEventListener('submit', async (
   }
 });
 
-document.getElementById('telephely-switch-link').addEventListener('click', (e) => {
+listen('telephely-switch-link', 'click', (e) => {
   e.preventDefault();
   showTelephelyScreen();
   loadTelephelyPicker();
 });
 
-document.getElementById('telephely-logout-link').addEventListener('click', async (e) => {
+listen('telephely-logout-link', 'click', async (e) => {
   e.preventDefault();
   try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) {}
   loggedIn = false;
   showLandingScreen();
 });
 
-document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
+listen('admin-login-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('admin-login-btn');
   const err = document.getElementById('admin-login-error');
@@ -1338,7 +1366,7 @@ document.getElementById('admin-login-form').addEventListener('submit', async (e)
   }
 });
 
-document.getElementById('admin-logout-btn').addEventListener('click', async () => {
+listen('admin-logout-btn', 'click', async () => {
   await api('/api/admin/logout', { method: 'POST' }).catch(() => {});
   showLandingScreen();
 });
@@ -1347,29 +1375,92 @@ const NTAK_ADMIN_STATUS_LABELS = { TELJESEN_HIBAS: 'Teljesen hibás', RESZBEN_SI
 
 // Informatív, sok-mutatós áttekintő rács az admin kezdőoldalára — minden
 // kártya egy-egy önmagában értelmezhető, azonnal hasznos szám.
-function renderAdminStatsGrid(s) {
-  if (!s) return '';
-  const card = (label, value, warn) => `
-    <div class="compare-overview-card${warn ? ' is-focus' : ''}">
-      <div class="compare-overview-label">${label}</div>
-      <div class="compare-overview-value">${value}</div>
+function renderAdminOverview(s) {
+  if (!s) return;
+  const root = document.getElementById('admin-overview-root');
+
+  /* --- 1. sor: a négy legfontosabb szám, alárendelt kontextussal --- */
+  const roleParts = [];
+  if (s.usersByRole.owner) roleParts.push(`${s.usersByRole.owner} tulajdonos`);
+  if (s.usersByRole.manager) roleParts.push(`${s.usersByRole.manager} üzletvezető`);
+  if (s.usersByRole.reseller) roleParts.push(`${s.usersByRole.reseller} viszonteladó`);
+  const statCards = `
+    <div class="ov-grid">
+      <div class="card ov-stat">
+        <div class="ov-label">Cégek</div>
+        <div class="ov-big">${s.totalCompanies}</div>
+        <div class="ov-sub">${s.totalSites} telephely</div>
+      </div>
+      <div class="card ov-stat">
+        <div class="ov-label">Aktív előfizetés</div>
+        <div class="ov-big">${s.activeSubscriptions}</div>
+        <div class="ov-sub${s.pausedSubscriptions > 0 ? ' warn' : ''}">${s.pausedSubscriptions > 0 ? `${s.pausedSubscriptions} szüneteltetve` : 'nincs szüneteltetett'}</div>
+      </div>
+      <div class="card ov-stat">
+        <div class="ov-label">Bevétel e hónapban</div>
+        <div class="ov-big">${fmtHuf(s.paymentsThisMonthTotal)}</div>
+        <div class="ov-sub">${s.paymentsThisMonthCount} sikeres fizetés</div>
+      </div>
+      <div class="card ov-stat">
+        <div class="ov-label">Felhasználók</div>
+        <div class="ov-big">${s.totalUsers}</div>
+        <div class="ov-sub">${roleParts.join(' · ') || '—'}</div>
+      </div>
     </div>`;
-  return [
-    card('Regisztrált cégek', s.totalCompanies),
-    card('Telephelyek összesen', s.totalSites),
-    card('Szinkronizált (24 órán belül)', s.syncedLast24h),
-    card('Szinkronizált (7 napon belül)', s.syncedLast7d),
-    card('Soha nem szinkronizált', s.neverSynced, s.neverSynced > 0),
-    card('Felhasználók összesen', s.totalUsers),
-    card('— ebből tulajdonos', s.usersByRole.owner || 0),
-    card('— ebből üzletvezető', s.usersByRole.manager || 0),
-    card('— ebből viszonteladó', s.usersByRole.reseller || 0),
-    card('Aktív előfizetés', s.activeSubscriptions),
-    card('Szüneteltetett előfizetés', s.pausedSubscriptions, s.pausedSubscriptions > 0),
-    card('Sikertelen szinkron (napló)', s.failedSyncCount, s.failedSyncCount > 0),
-    card('NTAK probléma', s.ntakProblems, s.ntakProblems > 0),
-    card('Fizetés e hónapban', `${s.paymentsThisMonthCount} db · ${fmtHuf(s.paymentsThisMonthTotal)}`),
-  ].join('');
+
+  /* --- 2. sor: telephelyek szinkron-egészsége egyetlen sávban --- */
+  const total = s.totalSites;
+  const fresh = s.syncedLast24h;
+  const week = Math.max(0, s.syncedLast7d - s.syncedLast24h);
+  const never = s.neverSynced;
+  const stale = Math.max(0, total - s.syncedLast7d - never);
+  const pct = (n) => (total ? (n / total) * 100 : 0);
+  const seg = (n, cls) => (n > 0 ? `<div class="syncbar-seg syncbar-seg--${cls}" style="width:${pct(n)}%"></div>` : '');
+  const leg = (n, cls, label) => `<span><i class="syncbar-seg--${cls}"></i>${n} ${label}</span>`;
+  const syncCard = `
+    <div class="card">
+      <div class="card-title">Telephelyek szinkron-állapota</div>
+      ${total === 0 ? '<div class="empty-state">Még nincs szinkronizáló telephely.</div>' : `
+      <div class="ov-sub">${fresh} / ${total} telephely szinkronizált az elmúlt 24 órában</div>
+      <div class="syncbar">${seg(fresh, 'fresh')}${seg(week, 'week')}${seg(stale, 'stale')}${seg(never, 'never')}</div>
+      <div class="syncbar-legend">
+        ${leg(fresh, 'fresh', '24 órán belül')}
+        ${leg(week, 'week', '1–7 napja')}
+        ${leg(stale, 'stale', '7 napnál régebben')}
+        ${leg(never, 'never', 'soha')}
+      </div>`}
+    </div>`;
+
+  /* --- 3. sor: teendők — csak az, ami tényleg beavatkozást kér.
+         Minden sor egy gomb, ami a releváns admin nézetre visz. --- */
+  const issues = [];
+  if (s.neverSynced > 0) issues.push({ count: s.neverSynced, label: 'telephely soha nem szinkronizált', goto: 'companies' });
+  if (s.failedSyncCount > 0) issues.push({ count: s.failedSyncCount, label: 'sikertelen szinkron-feltöltés a naplóban', goto: 'activity' });
+  if (s.ntakProblems > 0) issues.push({ count: s.ntakProblems, label: 'NTAK-beküldési probléma', goto: 'ntak' });
+  if (s.pausedSubscriptions > 0) issues.push({ count: s.pausedSubscriptions, label: 'szüneteltetett előfizetés', goto: 'licenc' });
+  if ((s.usersByStatus.pending || 0) > 0) issues.push({ count: s.usersByStatus.pending, label: 'függőben lévő felhasználói meghívó', goto: 'felhasznalok' });
+  const issueCard = `
+    <div class="card">
+      <div class="card-title">Figyelmet igényel</div>
+      <div class="issue-list">
+        ${issues.length === 0
+          ? '<div class="issue-row issue-row--ok">✓ Minden rendben — nincs beavatkozást igénylő tétel.</div>'
+          : issues.map((i) => `
+            <button class="issue-row" data-goto="${i.goto}">
+              <span class="issue-count">${i.count}</span>
+              <span style="flex:1">${i.label}</span>
+              <span class="issue-open">Megnyitás ›</span>
+            </button>`).join('')}
+      </div>
+    </div>`;
+
+  root.innerHTML = statCards + syncCard + issueCard;
+  root.querySelectorAll('[data-goto]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = document.querySelector(`.admin-nav-item[data-admin-view="${btn.dataset.goto}"]`);
+      if (target) target.click();
+    });
+  });
 }
 
 let adminRegCache = [];
@@ -1466,8 +1557,8 @@ function renderAdminRegTable() {
   });
   adminRegPaginator.renderControls(document.getElementById('admin-reg-pagination'), renderAdminRegTable);
 }
-document.getElementById('reg-search-input').addEventListener('input', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
-document.getElementById('reg-status-filter').addEventListener('change', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
+listen('reg-search-input', 'input', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
+listen('reg-status-filter', 'change', () => { adminRegPaginator.page = 1; renderAdminRegTable(); });
 document.querySelectorAll('#admin-reg-table .reg-sortable').forEach((th) => {
   th.addEventListener('click', () => {
     if (adminRegSort.key === th.dataset.sort) {
@@ -1508,10 +1599,10 @@ function openRegDetailModal(adoszam) {
   renderRegSites(c);
   document.getElementById('reg-detail-modal-backdrop').hidden = false;
 }
-document.getElementById('reg-detail-modal-close').addEventListener('click', () => {
+listen('reg-detail-modal-close', 'click', () => {
   document.getElementById('reg-detail-modal-backdrop').hidden = true;
 });
-document.getElementById('reg-detail-modal-backdrop').addEventListener('click', (e) => {
+listen('reg-detail-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'reg-detail-modal-backdrop') e.target.hidden = true;
 });
 
@@ -1577,13 +1668,13 @@ function openRegDeviceModal(device, siteIdForNew) {
   document.getElementById('reg-device-delete-btn').hidden = !device;
   document.getElementById('reg-device-modal-backdrop').hidden = false;
 }
-document.getElementById('reg-device-modal-close').addEventListener('click', () => {
+listen('reg-device-modal-close', 'click', () => {
   document.getElementById('reg-device-modal-backdrop').hidden = true;
 });
-document.getElementById('reg-device-modal-backdrop').addEventListener('click', (e) => {
+listen('reg-device-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'reg-device-modal-backdrop') e.target.hidden = true;
 });
-document.getElementById('reg-device-form').addEventListener('submit', async (e) => {
+listen('reg-device-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('reg-device-msg');
   msg.textContent = '';
@@ -1615,7 +1706,7 @@ document.getElementById('reg-device-form').addEventListener('submit', async (e) 
     msg.textContent = e2.message; msg.className = 'profile-form-msg error';
   }
 });
-document.getElementById('reg-device-delete-btn').addEventListener('click', async () => {
+listen('reg-device-delete-btn', 'click', async () => {
   if (!confirm('Biztosan törlöd ezt az eszközt a regisztrációk közül?')) return;
   const id = document.getElementById('reg-device-id').value;
   try {
@@ -1626,7 +1717,7 @@ document.getElementById('reg-device-delete-btn').addEventListener('click', async
     openRegDetailModal(adoszam);
   } catch (e) { alert('Nem sikerült: ' + e.message); }
 });
-document.getElementById('reg-company-new-btn').addEventListener('click', async () => {
+listen('reg-company-new-btn', 'click', async () => {
   const adoszam = prompt('Az új cég adószáma:');
   if (!adoszam) return;
   const nev = prompt('A cég neve:') || '';
@@ -1639,7 +1730,7 @@ document.getElementById('reg-company-new-btn').addEventListener('click', async (
 async function loadAdminOverview() {
   const data = await api('/api/admin/overview');
 
-  document.getElementById('admin-stats-grid').innerHTML = renderAdminStatsGrid(data.stats);
+  renderAdminOverview(data.stats);
 
   document.getElementById('admin-email-warning').hidden = !!data.emailReady;
 
@@ -1649,6 +1740,26 @@ async function loadAdminOverview() {
   renderAdminCompaniesTable();
   adminNtakCache = data.ntak;
   renderAdminNtakTable();
+}
+
+function renderAdminCompaniesTable() {
+  const compTbody = document.querySelector('#admin-companies-table tbody');
+  const pageData = adminCompaniesPaginator.slice(adminCompaniesCache);
+  compTbody.innerHTML = '';
+  pageData.forEach((c) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(c.nev)}</td>
+      <td>${escapeHtml(c.telephelyNev || c.telephelyKod || '—')}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
+      <td><button class="btn-tiny btn-company-detail" data-key="${escapeHtml(c.key)}">Részletek</button></td>`;
+    compTbody.appendChild(tr);
+  });
+  compTbody.querySelectorAll('.btn-company-detail').forEach((btn) => {
+    btn.addEventListener('click', () => openCompanyDetailModal(btn.dataset.key));
+  });
+  adminCompaniesPaginator.renderControls(document.getElementById('admin-companies-pagination'), renderAdminCompaniesTable);
 }
 
 function renderAdminNtakTable() {
@@ -1726,10 +1837,10 @@ function openCompanyDetailModal(key) {
   };
   document.getElementById('company-detail-modal-backdrop').hidden = false;
 }
-document.getElementById('company-detail-modal-close').addEventListener('click', () => {
+listen('company-detail-modal-close', 'click', () => {
   document.getElementById('company-detail-modal-backdrop').hidden = true;
 });
-document.getElementById('company-detail-modal-backdrop').addEventListener('click', (e) => {
+listen('company-detail-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'company-detail-modal-backdrop') e.target.hidden = true;
 });
 
@@ -1737,6 +1848,7 @@ document.getElementById('company-detail-modal-backdrop').addEventListener('click
    Tevékenység-napló (admin)
    ============================================================ */
 const ACTIVITY_TYPE_LABELS = {
+  client_error: 'Frontend hiba',
   company_login: 'Céges belépés',
   company_logout: 'Céges kilépés',
   admin_login: 'Admin belépés',
@@ -1848,22 +1960,18 @@ function renderActivityLog(data) {
   activityLogPaginator.renderControls(document.getElementById('activity-log-pagination'), () => renderActivityLog(data));
 }
 
-document.getElementById('activity-company-select').addEventListener('change', (e) => {
+listen('activity-company-select', 'change', (e) => {
   activityFilter.company = e.target.value;
   activityLogPaginator.page = 1;
   loadAdminActivity();
 });
 
-/* IDEIGLENES, TESZT CÉLÚ — a bejelentkező oldalon megmutatja, milyen teszt-
-   fiókokkal lehet éppen belépni. Töröld ezt a függvényt és a hívását,
-   mielőtt nyilvánosan élesítesz (lásd megjegyzés az index.html-ben és a
-   server.js /api/auth/test-users-hint végpontjánál is). */
-
 /* induláskor: mindig a bejelentkező képernyő jelenjen meg, még akkor is, ha
    a böngészőben van érvényes session-cookie egy korábbi belépésből. A link
    megnyitásakor tehát sosem ugrunk automatikusan a dashboardra — csak a
-   ténylegesen beküldött belépési űrlap után. */
-let loggedIn = false;
+   ténylegesen beküldött belépési űrlap után.
+   (A loggedIn deklaráció a fájl LEGELEJÉN van a többi globális state-tel —
+   ha itt lenne, egy korábbi top-level hiba TDZ-hibát okozna belépéskor.) */
 checkInviteLink().then((wasInvite) => {
   if (wasInvite) return;
   checkResetPasswordLink().then((wasReset) => { if (!wasReset) showLandingScreen(); });
@@ -1883,12 +1991,12 @@ function openMobileSidebar() {
   // a hamburgert elrejtjük nyitott állapotban, hogy ne fedje a sidebar saját logóját
   document.getElementById('hamburger-btn').classList.add('is-hidden');
 }
-document.getElementById('hamburger-btn').addEventListener('click', () => {
+listen('hamburger-btn', 'click', () => {
   const sidebar = document.getElementById('sidebar');
   if (sidebar.classList.contains('is-open')) closeMobileSidebar(); else openMobileSidebar();
 });
-document.getElementById('sidebar-overlay').addEventListener('click', closeMobileSidebar);
-document.getElementById('sidebar-close-btn').addEventListener('click', closeMobileSidebar);
+listen('sidebar-overlay', 'click', closeMobileSidebar);
+listen('sidebar-close-btn', 'click', closeMobileSidebar);
 
 function closeAdminMobileSidebar() {
   document.getElementById('admin-sidebar').classList.remove('is-open');
@@ -1900,12 +2008,12 @@ function openAdminMobileSidebar() {
   document.getElementById('admin-sidebar-overlay').hidden = false;
   document.getElementById('admin-hamburger-btn').classList.add('is-hidden');
 }
-document.getElementById('admin-hamburger-btn').addEventListener('click', () => {
+listen('admin-hamburger-btn', 'click', () => {
   const sidebar = document.getElementById('admin-sidebar');
   if (sidebar.classList.contains('is-open')) closeAdminMobileSidebar(); else openAdminMobileSidebar();
 });
-document.getElementById('admin-sidebar-overlay').addEventListener('click', closeAdminMobileSidebar);
-document.getElementById('admin-sidebar-close-btn').addEventListener('click', closeAdminMobileSidebar);
+listen('admin-sidebar-overlay', 'click', closeAdminMobileSidebar);
+listen('admin-sidebar-close-btn', 'click', closeAdminMobileSidebar);
 
 /* ============================================================
    Navigáció / nézetváltás
@@ -1932,10 +2040,10 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     });
   });
 });
-document.getElementById('stock-goto-receipt-btn').addEventListener('click', () => {
+listen('stock-goto-receipt-btn', 'click', () => {
   document.querySelector('.nav-item[data-view="stock-receipt"]').click();
 });
-document.getElementById('stock-reset-btn').addEventListener('click', async () => {
+listen('stock-reset-btn', 'click', async () => {
   if (!confirm('Biztosan nullázod MINDEN cikk készletét? Ez minden termékhez egy korrekciós bevételezési tételt ad hozzá, ami nullára hozza az egyenleget — a korábbi bevételezési/eladási előzmény nem törlődik, de ez a művelet a Bevételezési naplóban is látszani fog. Nem vonható vissza automatikusan.')) return;
   const btn = document.getElementById('stock-reset-btn');
   btn.disabled = true; btn.textContent = 'Nullázás…';
@@ -1960,7 +2068,7 @@ document.querySelectorAll('.mobile-tab-btn[data-forward-view]').forEach((btn) =>
     document.querySelector(`.nav-item[data-view="${btn.dataset.forwardView}"]`).click();
   });
 });
-document.getElementById('mobile-tab-more').addEventListener('click', () => {
+listen('mobile-tab-more', 'click', () => {
   const sidebar = document.getElementById('sidebar');
   if (sidebar.classList.contains('is-open')) closeMobileSidebar(); else openMobileSidebar();
 });
@@ -1980,7 +2088,7 @@ document.querySelectorAll('.range-pill[data-range-value]').forEach((pill) => {
     select.dispatchEvent(new Event('change'));
   });
 });
-document.getElementById('range-pill-more').addEventListener('click', () => {
+listen('range-pill-more', 'click', () => {
   document.querySelectorAll('.range-pill').forEach((p) => p.classList.remove('is-active'));
   document.getElementById('range-select').classList.toggle('is-mobile-visible');
 });
@@ -2003,7 +2111,7 @@ function applyRange(range) {
   updateRangeLabel();
   refreshAll();
 }
-document.getElementById('range-select').addEventListener('change', (e) => {
+listen('range-select', 'change', (e) => {
   const key = e.target.value;
   document.getElementById('range-custom-inputs').hidden = key !== 'custom';
   document.getElementById('range-single-input').hidden = key !== 'single-day';
@@ -2018,16 +2126,16 @@ document.getElementById('range-select').addEventListener('change', (e) => {
   }
   applyRange({ ...resolvePreset(key), preset: key });
 });
-document.getElementById('apply-range-btn').addEventListener('click', () => {
+listen('apply-range-btn', 'click', () => {
   const from = document.getElementById('from-input').value;
   const to = document.getElementById('to-input').value;
   if (from && to) applyRange({ from, to, preset: 'custom' });
 });
-document.getElementById('apply-single-day-btn').addEventListener('click', () => {
+listen('apply-single-day-btn', 'click', () => {
   const day = document.getElementById('single-day-input').value;
   if (day) applyRange({ from: day, to: day, preset: 'single-day' });
 });
-document.getElementById('refresh-btn').addEventListener('click', () => refreshAll(true));
+listen('refresh-btn', 'click', () => refreshAll(true));
 
 /* ============================================================
    Boot / élő frissítés
@@ -2324,7 +2432,7 @@ document.getElementById('analysis-type-row').querySelectorAll('.chip').forEach((
   document.getElementById('hours-from').value = from;
 })();
 
-document.getElementById('hours-run-btn').addEventListener('click', async () => {
+listen('hours-run-btn', 'click', async () => {
   const btn = document.getElementById('hours-run-btn');
   const msg = document.getElementById('hours-msg');
   msg.textContent = ''; msg.className = 'stock-form-msg';
@@ -2505,7 +2613,7 @@ function renderHoursDayDetail(wd) {
   container.addEventListener('click', (e) => { if (!e.target.classList.contains('hours-bar')) tooltip.hidden = true; });
 }
 
-document.getElementById('products-an-run-btn').addEventListener('click', async () => {
+listen('products-an-run-btn', 'click', async () => {
   const btn = document.getElementById('products-an-run-btn');
   const msg = document.getElementById('products-an-msg');
   msg.textContent = ''; msg.className = 'stock-form-msg';
@@ -2695,7 +2803,7 @@ function renderProductsDayDetail(wd) {
   document.getElementById('report-an-from').value = from;
 })();
 
-document.getElementById('report-an-run-btn').addEventListener('click', async () => {
+listen('report-an-run-btn', 'click', async () => {
   const btn = document.getElementById('report-an-run-btn');
   const msg = document.getElementById('report-an-msg');
   msg.textContent = ''; msg.className = 'stock-form-msg';
@@ -2800,7 +2908,7 @@ document.getElementById('compare-mode-row').querySelectorAll('.chip').forEach((c
 });
 
 let compareCikkTimer = null;
-document.getElementById('compare-cikk-input').addEventListener('input', () => {
+listen('compare-cikk-input', 'input', () => {
   clearTimeout(compareCikkTimer);
   const q = document.getElementById('compare-cikk-input').value.trim();
   compareCikkTimer = setTimeout(async () => {
@@ -2812,7 +2920,7 @@ document.getElementById('compare-cikk-input').addEventListener('input', () => {
   }, 250);
 });
 
-document.getElementById('compare-run-btn').addEventListener('click', async () => {
+listen('compare-run-btn', 'click', async () => {
   const btn = document.getElementById('compare-run-btn');
   const msg = document.getElementById('compare-msg');
   msg.textContent = ''; msg.className = 'stock-form-msg';
@@ -3078,14 +3186,14 @@ async function loadRevenueView() {
    Cikk eladások nézet
    ============================================================ */
 let productsSearchTimer;
-document.getElementById('products-search').addEventListener('input', (e) => {
+listen('products-search', 'input', (e) => {
   clearTimeout(productsSearchTimer);
   productsSearchTimer = setTimeout(() => {
     state.products.q = e.target.value; state.products.offset = 0; loadProductsView(false);
   }, 300);
 });
-document.getElementById('products-prev').addEventListener('click', () => { state.products.offset = Math.max(0, state.products.offset - state.products.limit); loadProductsView(false); });
-document.getElementById('products-next').addEventListener('click', () => { state.products.offset += state.products.limit; loadProductsView(false); });
+listen('products-prev', 'click', () => { state.products.offset = Math.max(0, state.products.offset - state.products.limit); loadProductsView(false); });
+listen('products-next', 'click', () => { state.products.offset += state.products.limit; loadProductsView(false); });
 
 async function loadProductsView() {
   const { from, to } = state.range;
@@ -3109,19 +3217,19 @@ async function loadProductsView() {
    Nyugták nézet
    ============================================================ */
 let receiptsSearchTimer;
-document.getElementById('receipts-search').addEventListener('input', (e) => {
+listen('receipts-search', 'input', (e) => {
   clearTimeout(receiptsSearchTimer);
   receiptsSearchTimer = setTimeout(() => { state.receipts.q = e.target.value; state.receipts.offset = 0; loadReceiptsView(false); }, 300);
 });
-document.getElementById('receipts-filter-btn').addEventListener('click', () => {
+listen('receipts-filter-btn', 'click', () => {
   state.receipts.fizmod = document.getElementById('receipts-fizmod').value;
   state.receipts.min = document.getElementById('receipts-min').value;
   state.receipts.max = document.getElementById('receipts-max').value;
   state.receipts.offset = 0;
   loadReceiptsView(false);
 });
-document.getElementById('receipts-prev').addEventListener('click', () => { state.receipts.offset = Math.max(0, state.receipts.offset - state.receipts.limit); loadReceiptsView(false); });
-document.getElementById('receipts-next').addEventListener('click', () => { state.receipts.offset += state.receipts.limit; loadReceiptsView(false); });
+listen('receipts-prev', 'click', () => { state.receipts.offset = Math.max(0, state.receipts.offset - state.receipts.limit); loadReceiptsView(false); });
+listen('receipts-next', 'click', () => { state.receipts.offset += state.receipts.limit; loadReceiptsView(false); });
 
 async function loadReceiptsView() {
   const { from, to } = state.range;
@@ -3163,8 +3271,8 @@ async function openReceiptModal(bsz) {
     <div class="receipt-total"><span>Összesen</span><span>${fmtHuf(total)}</span></div>`;
   document.getElementById('receipt-modal-backdrop').hidden = false;
 }
-document.getElementById('receipt-modal-close').addEventListener('click', () => { document.getElementById('receipt-modal-backdrop').hidden = true; });
-document.getElementById('receipt-modal-backdrop').addEventListener('click', (e) => { if (e.target.id === 'receipt-modal-backdrop') e.currentTarget.hidden = true; });
+listen('receipt-modal-close', 'click', () => { document.getElementById('receipt-modal-backdrop').hidden = true; });
+listen('receipt-modal-backdrop', 'click', (e) => { if (e.target.id === 'receipt-modal-backdrop') e.currentTarget.hidden = true; });
 
 /* ============================================================
    NTAK nézet
@@ -3357,7 +3465,7 @@ async function loadStockView() {
 }
 
 let stockSearchTimer = null;
-document.getElementById('stock-search-input').addEventListener('input', (e) => {
+listen('stock-search-input', 'input', (e) => {
   clearTimeout(stockSearchTimer);
   stockSearchTimer = setTimeout(() => { stockFilter.q = e.target.value.trim(); loadStockView(); }, 300);
 });
@@ -3397,7 +3505,7 @@ async function loadStockReceiptLog() {
   makeSortableTable('stock-log-table');
 }
 
-document.getElementById('stock-szamla-input').addEventListener('change', () => {
+listen('stock-szamla-input', 'change', () => {
   const file = document.getElementById('stock-szamla-input').files[0];
   const preview = document.getElementById('stock-szamla-preview');
   if (!file) { preview.hidden = true; preview.innerHTML = ''; return; }
@@ -3419,7 +3527,7 @@ function readFileAsBase64(file) {
   });
 }
 
-document.getElementById('stock-receipt-form').addEventListener('submit', async (e) => {
+listen('stock-receipt-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('stock-add-btn');
   const msg = document.getElementById('stock-form-msg');
@@ -3475,7 +3583,7 @@ async function loadMasterdataGroups() {
   } catch (_) { /* nem kritikus */ }
 }
 
-document.getElementById('new-group-btn').addEventListener('click', async () => {
+listen('new-group-btn', 'click', async () => {
   const input = document.getElementById('new-group-input');
   const msg = document.getElementById('new-group-msg');
   const nev = input.value.trim();
@@ -3519,7 +3627,7 @@ function resetMasterdataForm() {
   document.getElementById('masterdata-form-title').textContent = 'Új cikk / módosítás';
   document.getElementById('md-cancel-btn').hidden = true;
 }
-document.getElementById('md-cancel-btn').addEventListener('click', resetMasterdataForm);
+listen('md-cancel-btn', 'click', resetMasterdataForm);
 
 async function loadMasterdataView() {
   loadMasterdataGroups();
@@ -3575,12 +3683,12 @@ async function loadMasterdataView() {
 }
 
 let masterdataSearchTimer = null;
-document.getElementById('masterdata-search-input').addEventListener('input', (e) => {
+listen('masterdata-search-input', 'input', (e) => {
   clearTimeout(masterdataSearchTimer);
   masterdataSearchTimer = setTimeout(() => { masterdataFilter.q = e.target.value.trim(); loadMasterdataView(); }, 300);
 });
 
-document.getElementById('masterdata-form').addEventListener('submit', async (e) => {
+listen('masterdata-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('md-save-btn');
   const msg = document.getElementById('masterdata-form-msg');
@@ -3613,7 +3721,7 @@ document.getElementById('masterdata-form').addEventListener('submit', async (e) 
   }
 });
 
-document.getElementById('bulk-price-form').addEventListener('submit', async (e) => {
+listen('bulk-price-form', 'submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('bp-submit-btn');
   const msg = document.getElementById('bulk-price-msg');
@@ -3633,8 +3741,8 @@ document.getElementById('bulk-price-form').addEventListener('submit', async (e) 
   }
 });
 
-document.getElementById('md-import-btn').addEventListener('click', () => document.getElementById('md-import-file').click());
-document.getElementById('md-import-file').addEventListener('change', async (e) => {
+listen('md-import-btn', 'click', () => document.getElementById('md-import-file').click());
+listen('md-import-file', 'change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const msg = document.getElementById('md-import-msg');
@@ -3666,7 +3774,7 @@ async function loadSyncView() {
       : 'Még nem történt élő szinkronizáció.';
   } catch (_) { box.textContent = 'Nem sikerült lekérni a szinkron állapotát.'; }
 }
-document.getElementById('sync-request-btn').addEventListener('click', async () => {
+listen('sync-request-btn', 'click', async () => {
   const out = document.getElementById('sync-request-result');
   out.textContent = 'Kérdezés…';
   try {
@@ -3810,7 +3918,7 @@ async function loadProfilDeviceList() {
   }
 }
 
-document.getElementById('profil-invite-manager-form').addEventListener('submit', async (e) => {
+listen('profil-invite-manager-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('profil-invite-manager-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -3870,7 +3978,7 @@ function renderProfilTelephelyek(telephelyek, isManager) {
   });
 }
 
-document.getElementById('profil-email-form').addEventListener('submit', async (e) => {
+listen('profil-email-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('profil-email-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';
@@ -3882,7 +3990,7 @@ document.getElementById('profil-email-form').addEventListener('submit', async (e
   }
 });
 
-document.getElementById('profil-telephely-new-form').addEventListener('submit', async (e) => {
+listen('profil-telephely-new-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('profil-telephely-new-msg');
   msg.textContent = ''; msg.className = 'profile-form-msg';

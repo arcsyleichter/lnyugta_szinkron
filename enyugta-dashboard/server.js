@@ -1196,6 +1196,60 @@ function notStorno(alias) { return `(IFNULL(${alias}.storno,'N') != 'I' AND IFNU
 const routes = [];
 function route(method, pattern, handler) { routes.push({ method, pattern, handler }); }
 
+/* ---------------------------------------------------------------------------
+   Kliensoldali (böngésző) hibák fogadása — /api/client-error
+
+   Szándékosan NEM igényel bejelentkezést: a legfontosabb hibák (pl. a
+   szkript elszállása a login képernyőn) pont belépés előtt történnek.
+   Emiatt viszont szigorúan védjük:
+     - max. 8 KB-os body (readBody limit),
+     - per-IP rate limit: legfeljebb 10 riport / 10 perc, felette csendben
+       eldobjuk (nem 429 — a támadónak ne adjunk visszajelzést),
+     - minden mezőt fix hosszra vágunk, csak string-eket fogadunk el,
+     - a riport csak a tevékenység-naplóba kerül (admin felületen látszik),
+       soha nem értelmezzük/futtatjuk a tartalmát.
+--------------------------------------------------------------------------- */
+const clientErrorReports = new Map(); // ip -> { count, windowStart }
+const CLIENT_ERROR_WINDOW_MS = 10 * 60 * 1000;
+const CLIENT_ERROR_MAX_PER_WINDOW = 10;
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of clientErrorReports.entries()) {
+    if (now - e.windowStart > CLIENT_ERROR_WINDOW_MS) clientErrorReports.delete(ip);
+  }
+}, 60 * 60 * 1000).unref();
+
+route('POST', '/api/client-error', async (req, res) => {
+  // A kliensnek mindig ok:true-t válaszolunk (kivéve érvénytelen JSON) —
+  // a hibariportolás soha nem okozhat további hibát a felhasználónál.
+  const ip = getClientIp(req);
+  const now = Date.now();
+  let entry = clientErrorReports.get(ip);
+  if (!entry || now - entry.windowStart > CLIENT_ERROR_WINDOW_MS) {
+    entry = { count: 0, windowStart: now };
+  }
+  entry.count += 1;
+  clientErrorReports.set(ip, entry);
+  if (entry.count > CLIENT_ERROR_MAX_PER_WINDOW) return sendJson(res, 200, { ok: true });
+
+  let body;
+  try { body = JSON.parse(await readBody(req, 8 * 1024)); } catch (_) { return sendJson(res, 400, { error: 'Érvénytelen kérés.' }); }
+  const cut = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const msg = cut(body.message, 500);
+  if (!msg) return sendJson(res, 200, { ok: true });
+  const session = requireAuth(req); // ha épp be van lépve, kössük a céghez
+  logActivity({
+    type: 'client_error',
+    ok: false,
+    companyKey: session ? session.companyKey : null,
+    nev: session ? session.nev : null,
+    detail: `${msg} @ ${cut(body.source, 200)}:${cut(String(body.line || ''), 10)} | url: ${cut(body.url, 200)} | ua: ${cut(req.headers['user-agent'] || '', 200)}${body.stack ? ' | stack: ' + cut(body.stack, 1000) : ''}`,
+    ip,
+  });
+  sendJson(res, 200, { ok: true });
+});
+
+
 // A korábbi, adószám+kód alapú bejelentkezés megszűnt — mostantól minden
 // nem-admin felhasználó (cégtulajdonos, üzletvezető) kizárólag egyéni,
 // email+jelszó alapú fiókkal léphet be (ld. POST /api/auth/user-login).
@@ -2167,18 +2221,9 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       };
     });
     const sub = subscriptionByCeg.get(cegKulcs);
-
-    // A TÉNYLEGES próbaidő-állapot — ugyanaz a logika, mint amit az
-    // androidos végpont is használ, FÜGGETLENÜL attól, hogy automatikus
-    // (első szinkrontól számított) vagy admin által kézzel felülírt.
-    // Ha a kikényszerítés ki van kapcsolva, ez a mező technikailag
-    // mindig "true" lenne, de azt a felület már külön, a nagy
-    // figyelmeztető kártyán jelzi — itt csak akkor mutatjuk relevánsnak,
-    // ha a kikényszerítés TÉNYLEGESEN be van kapcsolva.
     const trialEnd = enforceOn ? companyTrialEnd(cegKulcs) : null;
     const effectiveInTrial = enforceOn && !!(trialEnd && Date.now() < trialEnd.getTime());
     const effectiveTrialDaysLeft = effectiveInTrial ? Math.max(0, Math.ceil((trialEnd.getTime() - Date.now()) / 86400000)) : null;
-
     return {
       cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
       eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
@@ -2196,6 +2241,7 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
 
   sendJson(res, 200, { companies, enforceOn, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
 });
+
 
 // Az alap regisztráltság (a havidíj fizetve van-e) be/kikapcsolása egy
 // cégnek — ettől FÜGGETLEN minden funkció-kiosztás, hogy az admin ne
@@ -4264,10 +4310,6 @@ route('GET', '/api/sync/companies', async (req, res) => {
 // A próba lejárta UTÁN kizárólag a ténylegesen kiosztott (company_licenses)
 // funkciók maradnak engedélyezve.
 {
-  // Egyszeri, kompatibilitási átállás: ha korábban env-változóval volt
-  // beállítva (LICENSE_ENFORCE=1), az ELSŐ induláskor ezt vesszük át
-  // kezdőértéknek az adatbázisba — utána viszont MÁR CSAK a webes
-  // kapcsoló számít, az env-változó figyelmen kívül marad.
   const existing = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
   if (!existing) {
     const initial = process.env.LICENSE_ENFORCE === '1' ? '1' : '0';
@@ -4765,7 +4807,14 @@ function serveStatic(req, res, pathname) {
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Nem található'); }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    // no-cache = a böngésző tárolhatja, de MINDEN betöltéskor revalidál (ETag).
+    // Ha a fájl nem változott → 304, nincs újraletöltés. Ha változott (deploy) →
+    // azonnal az új verziót kapja. Így soha nem fordulhat elő, hogy régi
+    // index.html új app.js-sel (vagy fordítva) fut együtt — ez okozta a
+    // "Cannot access 'loggedIn' before initialization" hibát egyes eszközökön.
+    const etag = `"${crypto.createHash('sha1').update(data).digest('hex')}"`;
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag });
     res.end(data);
   });
 }
