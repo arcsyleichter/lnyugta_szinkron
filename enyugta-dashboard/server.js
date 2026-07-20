@@ -482,6 +482,16 @@ licenseDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_reg_sites_company ON reg_sites(company_id);
   CREATE INDEX IF NOT EXISTS idx_reg_devices_site ON reg_devices(site_id);
 
+  -- Általános, webről állítható szerver-beállítások (kulcs -> érték) — ide
+  -- kerülnek azok a kapcsolók, amik eddig csak env-változóval, a szerver
+  -- konfigurációjában voltak elérhetők, de admin számára a webről kell
+  -- tudni kapcsolni őket, szerver-újraindítás/SSH nélkül.
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   -- ALAP REGISZTRÁLTSÁG — külön, önálló fogalom a funkciónkénti
   -- kapcsolóktól. Ez azt válaszolja meg: fizeti-e a cég egyáltalán az
   -- alap havidíjat? Ha nincs sor egy cégre, ALAPÉRTELMEZETTEN AKTÍV
@@ -2143,6 +2153,7 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
     licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes, proba_vege, proba_kezi FROM company_subscription').all()
       .map((r) => [r.ceg_kulcs, r])
   );
+  const enforceOn = isLicenseEnforceOn();
 
   const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
     const grants = grantsByCeg.get(cegKulcs) || new Map();
@@ -2156,6 +2167,18 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       };
     });
     const sub = subscriptionByCeg.get(cegKulcs);
+
+    // A TÉNYLEGES próbaidő-állapot — ugyanaz a logika, mint amit az
+    // androidos végpont is használ, FÜGGETLENÜL attól, hogy automatikus
+    // (első szinkrontól számított) vagy admin által kézzel felülírt.
+    // Ha a kikényszerítés ki van kapcsolva, ez a mező technikailag
+    // mindig "true" lenne, de azt a felület már külön, a nagy
+    // figyelmeztető kártyán jelzi — itt csak akkor mutatjuk relevánsnak,
+    // ha a kikényszerítés TÉNYLEGESEN be van kapcsolva.
+    const trialEnd = enforceOn ? companyTrialEnd(cegKulcs) : null;
+    const effectiveInTrial = enforceOn && !!(trialEnd && Date.now() < trialEnd.getTime());
+    const effectiveTrialDaysLeft = effectiveInTrial ? Math.max(0, Math.ceil((trialEnd.getTime() - Date.now()) / 86400000)) : null;
+
     return {
       cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
       eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
@@ -2167,10 +2190,11 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       probaNapokHatra: sub && sub.proba_kezi
         ? (sub.proba_vege ? Math.max(0, Math.ceil((new Date(sub.proba_vege + 'T23:59:59') - new Date()) / 86400000)) : 0)
         : null,
+      effectiveInTrial, effectiveTrialDaysLeft,
     };
   }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
 
-  sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
+  sendJson(res, 200, { companies, enforceOn, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
 });
 
 // Az alap regisztráltság (a havidíj fizetve van-e) be/kikapcsolása egy
@@ -4224,11 +4248,11 @@ route('GET', '/api/sync/companies', async (req, res) => {
   sendJson(res, 200, { count: list.length, companies: list });
 });
 
-// Élesedés előtt (LICENSE_ENFORCE nincs beállítva / "0"): minden aktív
-// katalógus-funkció mindenkinek engedélyezett, a company_licenses tábla
-// tartalmától függetlenül — ez a jelenlegi, bevezetés előtti állapot.
-// Élesedéskor egyetlen env-változóval (LICENSE_ENFORCE=1) kapcsoljuk be a
-// tényleges érvényesítést, kódmódosítás és újracsomagolás nélkül.
+// Élesedés előtt (kikapcsolt állapotban): minden aktív katalógus-funkció
+// mindenkinek engedélyezett, a company_licenses tábla tartalmától
+// függetlenül. Élesedéskor az admin a webről, egyetlen kapcsolóval
+// bekapcsolhatja a tényleges érvényesítést — nincs szükség szerver-
+// konfigurációhoz vagy újraindításhoz.
 //
 // Bekapcsolt érvényesítés esetén minden cég kap egy LICENSE_TRIAL_DAYS
 // (alapértelmezetten 7) napos ingyenes próbaidőt, az első szinkronjától
@@ -4239,7 +4263,22 @@ route('GET', '/api/sync/companies', async (req, res) => {
 // technikailag nem más, mint egy ideiglenes, mindenre kiterjedő "engedély".
 // A próba lejárta UTÁN kizárólag a ténylegesen kiosztott (company_licenses)
 // funkciók maradnak engedélyezve.
-const LICENSE_ENFORCE = process.env.LICENSE_ENFORCE === '1';
+{
+  // Egyszeri, kompatibilitási átállás: ha korábban env-változóval volt
+  // beállítva (LICENSE_ENFORCE=1), az ELSŐ induláskor ezt vesszük át
+  // kezdőértéknek az adatbázisba — utána viszont MÁR CSAK a webes
+  // kapcsoló számít, az env-változó figyelmen kívül marad.
+  const existing = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
+  if (!existing) {
+    const initial = process.env.LICENSE_ENFORCE === '1' ? '1' : '0';
+    licenseDb.prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES ('license_enforce', ?, ?)`)
+      .run(initial, new Date().toISOString());
+  }
+}
+function isLicenseEnforceOn() {
+  const row = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
+  return row ? row.value === '1' : false;
+}
 const LICENSE_TRIAL_DAYS = parseInt(process.env.LICENSE_TRIAL_DAYS || '7', 10);
 
 // ---------------------------------------------------------------------------
@@ -4389,41 +4428,21 @@ function registerOrCheckDevice(cegKulcs, eszkozAzonosito) {
 // session). Ez váltja ki a korábbi lszamla-alapú licenc-lekérdezést: az
 // app mostantól a saját szerverünktől kérdezi le, melyik funkciókhoz fér
 // hozzá az adott cég, és meddig érvényesen.
-route('GET', '/api/license/status', async (req, res, query) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
-  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
-  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
-
-  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
-  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
-  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
-  // mező a válaszban).
-  const eszkoz = String(query.eszkoz || '').trim();
+// A ténylegesen érvényes (effektív) funkció-lista kiszámítása egy cégre —
+// EZ a közös, egyetlen forrás, amit MIND az androidos /api/license/status,
+// MIND az admin felület "tényleges állapot" lekérdezése használ, hogy a
+// kettő SOHA ne térhessen el egymástól.
+function computeEffectiveLicense(cegKulcs, eszkoz) {
   const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
-
-  // ALAP REGISZTRÁLTSÁG — ez egy, a funkció-kapcsolóktól teljesen külön,
-  // elsődleges kérdés: fizeti-e a cég az alap havidíjat? Ha nem, az APP
-  // ebből egyértelműen, azonnal látja, hogy ez az ok — nem kell
-  // funkciónként találgatnia, miért van minden letiltva.
   const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
-
   const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();
-  const trialEnd = LICENSE_ENFORCE ? companyTrialEnd(cegKulcs) : null;
-  const inTrial = LICENSE_ENFORCE ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
+  const trialEnd = isLicenseEnforceOn() ? companyTrialEnd(cegKulcs) : null;
+  const inTrial = isLicenseEnforceOn() ? !!(trialEnd && Date.now() < trialEnd.getTime()) : true;
 
-  // Csak az ENGEDÉLYEZETT funkciók kulcsait listázzuk — ha egy kulcs
-  // NINCS benne, az pontosan azt jelenti, hogy nincs engedélyezve
-  // (ugyanaz, mint a false lenne) — nincs értelme kiírni.
   let funkciok = [];
   if (!alapElofizetesAktiv) {
-    // Az alap havidíj nincs fizetve — ETTŐL FÜGGETLENÜL, hogy egyébként
-    // milyen funkció-kiosztásai vannak a cégnek, minden funkció le van
-    // tiltva. Ez a legmagasabb prioritású, elsődleges kapcsoló.
     funkciok = [];
   } else if (eszkozRegisztralva === false) {
-    // Betelt az eszközkorlát, és ez egy még ismeretlen eszköz — nincs neki
-    // hely, minden funkció letiltva, ugyanúgy, mint egy nem fizető cégnél.
     funkciok = [];
   } else if (inTrial) {
     funkciok = catalog.map((f) => f.key);
@@ -4437,9 +4456,71 @@ route('GET', '/api/license/status', async (req, res, query) => {
       return !!row && !!row.aktiv && status.allapot !== 'expired';
     }).map((f) => f.key);
   }
-  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv, funkciok };
-  if (eszkoz) payload.eszkozRegisztralva = eszkozRegisztralva;
+  return { alapElofizetesAktiv, funkciok, eszkozRegisztralva, inTrial };
+}
+
+route('GET', '/api/license/status', async (req, res, query) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!verifySyncApiKey(apiKey)) return sendJson(res, 401, { error: 'Érvénytelen vagy hiányzó x-api-key.' });
+  const cegKulcs = companyKeyFromAdoszam(query.adoszam || '');
+  if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+
+  // Eszközazonosító — opcionális, hogy a régebbi app-verziók (amik még
+  // nem küldik) ne törjenek el. Ha nincs megadva, a régi, eszközfüggetlen
+  // viselkedés marad (nincs korlát-ellenőrzés, nincs eszkozRegisztralva
+  // mező a válaszban).
+  const eszkoz = String(query.eszkoz || '').trim();
+  const effective = computeEffectiveLicense(cegKulcs, eszkoz);
+  const payload = { adoszam: query.adoszam || '', alapElofizetesAktiv: effective.alapElofizetesAktiv, funkciok: effective.funkciok };
+  if (eszkoz) payload.eszkozRegisztralva = effective.eszkozRegisztralva;
   sendJson(res, 200, payload);
+});
+
+// Admin-oldali lekérdezés: mit látna PONTOSAN az androidos app, ha MOST
+// kérdezné le a licenc-állapotot ehhez a céghez? Eddig az admin felület
+// csak a kiosztott (grant) rekordokat mutatta — ez viszont eltérhet a
+// TÉNYLEGES állapottól (pl. próbaidőszakban minden funkció engedélyezett,
+// kiosztástól függetlenül). Ez a végpont pontosan ugyanazt a logikát
+// futtatja le, mint az androidos végpont — csak admin-hitelesítéssel, nem
+// a szinkron API-kulccsal.
+route('GET', '/api/admin/license/effective', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const cegKulcs = String(query.cegKulcs || '').trim();
+  if (!cegKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+  const effective = computeEffectiveLicense(cegKulcs, null);
+  sendJson(res, 200, {
+    cegKulcs,
+    alapElofizetesAktiv: effective.alapElofizetesAktiv,
+    inTrial: effective.inTrial,
+    funkciok: effective.funkciok,
+  });
+});
+
+// A licenc-kikényszerítés webről kapcsolható be/ki — amíg ki van kapcsolva
+// (alapállapot), mindenki mindent lát, az admin által kiosztott funkcióktól
+// függetlenül. Bekapcsolás után a valóban kiosztott funkciók számítanak
+// (a próbaidőszak lejárta után).
+route('GET', '/api/admin/settings/license-enforce', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  sendJson(res, 200, { enforce: isLicenseEnforceOn() });
+});
+
+route('POST', '/api/admin/settings/license-enforce', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { enforce } = await readJsonBody(req);
+  const value = enforce ? '1' : '0';
+  licenseDb.prepare(`
+    INSERT INTO app_settings (key, value, updated_at) VALUES ('license_enforce', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(value, new Date().toISOString());
+  logActivity({
+    type: 'license_enforce_toggle', ok: true, companyKey: null, nev: 'admin',
+    detail: enforce ? 'Licenc-kikényszerítés BEKAPCSOLVA — mostantól a tényleges kiosztás számít.' : 'Licenc-kikényszerítés KIKAPCSOLVA — mindenki mindent lát.',
+  });
+  sendJson(res, 200, { ok: true, enforce: !!enforce });
 });
 
 // ---------------------------------------------------------------------------

@@ -513,6 +513,19 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .login-toggle-row a{ color:var(--jade-deep); text-decoration:none; font-weight:600; }
 .login-toggle-row a:hover{ text-decoration:underline; }
 
+.reg-sortable{ cursor:pointer; user-select:none; white-space:nowrap; }
+.reg-sortable:hover{ color:var(--jade-deep); }
+.reg-sortable .sort-arrow{ font-size:10px; margin-left:3px; opacity:0.6; }
+
+.pagination-bar{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:10px 2px; font-size:12.5px; color:var(--text-dim); }
+.pagination-info{ white-space:nowrap; }
+.pagination-controls{ display:flex; align-items:center; gap:4px; }
+.pagination-controls button{ min-width:30px; height:30px; border:1.5px solid var(--line); background:#fff; border-radius:6px; cursor:pointer; font-size:12.5px; color:var(--text); }
+.pagination-controls button:hover:not(:disabled){ border-color:var(--jade); }
+.pagination-controls button:disabled{ opacity:0.4; cursor:default; }
+.pagination-controls button.is-active{ background:var(--jade); color:#fff; border-color:var(--jade); }
+.pagination-size-select{ padding:5px 8px; border:1.5px solid var(--line); border-radius:6px; font-size:12.5px; color:var(--text); background:#fff; }
+
 /* ============================================================
    Kezdőoldal — gazdag, kétpaneles bejelentkező (ügyfél-belépés
    közvetlenül, választás nélkül)
