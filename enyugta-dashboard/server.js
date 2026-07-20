@@ -2153,6 +2153,7 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
     licenseDb.prepare('SELECT ceg_kulcs, aktiv, megjegyzes, proba_vege, proba_kezi FROM company_subscription').all()
       .map((r) => [r.ceg_kulcs, r])
   );
+  const enforceOn = isLicenseEnforceOn();
 
   const companies = [...byCeg.entries()].map(([cegKulcs, entry]) => {
     const grants = grantsByCeg.get(cegKulcs) || new Map();
@@ -2166,6 +2167,18 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       };
     });
     const sub = subscriptionByCeg.get(cegKulcs);
+
+    // A TÉNYLEGES próbaidő-állapot — ugyanaz a logika, mint amit az
+    // androidos végpont is használ, FÜGGETLENÜL attól, hogy automatikus
+    // (első szinkrontól számított) vagy admin által kézzel felülírt.
+    // Ha a kikényszerítés ki van kapcsolva, ez a mező technikailag
+    // mindig "true" lenne, de azt a felület már külön, a nagy
+    // figyelmeztető kártyán jelzi — itt csak akkor mutatjuk relevánsnak,
+    // ha a kikényszerítés TÉNYLEGESEN be van kapcsolva.
+    const trialEnd = enforceOn ? companyTrialEnd(cegKulcs) : null;
+    const effectiveInTrial = enforceOn && !!(trialEnd && Date.now() < trialEnd.getTime());
+    const effectiveTrialDaysLeft = effectiveInTrial ? Math.max(0, Math.ceil((trialEnd.getTime() - Date.now()) / 86400000)) : null;
+
     return {
       cegKulcs, nev: entry.nev, adoszam: entry.adoszam, varos: entry.varos, licenses,
       eszkozSzam: deviceCountByCeg.get(cegKulcs) || 0,
@@ -2177,10 +2190,11 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
       probaNapokHatra: sub && sub.proba_kezi
         ? (sub.proba_vege ? Math.max(0, Math.ceil((new Date(sub.proba_vege + 'T23:59:59') - new Date()) / 86400000)) : 0)
         : null,
+      effectiveInTrial, effectiveTrialDaysLeft,
     };
   }).sort((a, b) => (a.nev || '').localeCompare(b.nev || '', 'hu'));
 
-  sendJson(res, 200, { companies, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
+  sendJson(res, 200, { companies, enforceOn, features: features.map((f) => ({ key: f.key, nev: f.nev, alapAr: f.alap_ar, aktiv: !!f.aktiv })) });
 });
 
 // Az alap regisztráltság (a havidíj fizetve van-e) be/kikapcsolása egy

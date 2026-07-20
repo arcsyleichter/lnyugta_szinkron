@@ -1098,6 +1098,7 @@
           <tbody></tbody>
         </table>
         </div>
+        <div id="admin-companies-pagination"></div>
       </div>
     </div>
 
@@ -1110,13 +1111,32 @@
           </div>
           <button class="btn-secondary" id="reg-company-new-btn">+ Új cég</button>
         </div>
-        <input type="text" id="reg-search-input" placeholder="Keresés cégnév vagy adószám szerint…" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+          <input type="text" id="reg-search-input" placeholder="Keresés cégnév vagy adószám szerint…" style="flex:2 1 220px;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+          <select id="reg-status-filter" style="flex:1 1 160px;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;">
+            <option value="">Minden állapot</option>
+            <option value="aktiv">Aktív</option>
+            <option value="lejart">Lejárt</option>
+            <option value="hamarosan">Hamarosan lejár (30 napon belül)</option>
+            <option value="nincs-eszkoz">Nincs eszköz</option>
+          </select>
+        </div>
         <div class="table-scroll">
         <table class="data-table" id="admin-reg-table">
-          <thead><tr><th>Cégnév</th><th>Adószám</th><th>Telephely</th><th>Eszköz</th><th>Élő L-NYUGTA szinkron</th><th></th></tr></thead>
+          <thead><tr>
+            <th data-sort="nev" class="reg-sortable">Cégnév</th>
+            <th data-sort="adoszam" class="reg-sortable">Adószám</th>
+            <th data-sort="telephely" class="reg-sortable">Telephely</th>
+            <th data-sort="progtip" class="reg-sortable">Programtípus</th>
+            <th data-sort="regdat" class="reg-sortable">Reg. dátum</th>
+            <th data-sort="ervdat" class="reg-sortable">Lejárat</th>
+            <th data-sort="allapot" class="reg-sortable">Állapot</th>
+            <th></th>
+          </tr></thead>
           <tbody></tbody>
         </table>
         </div>
+        <div id="admin-reg-pagination"></div>
       </div>
     </div>
 
@@ -1134,6 +1154,7 @@
           <tbody></tbody>
           </table>
         </div>
+        <div id="admin-ntak-pagination"></div>
       </div>
     </div>
 
@@ -1164,6 +1185,7 @@
           <tbody></tbody>
           </table>
         </div>
+        <div id="activity-log-pagination"></div>
       </div>
     </div>
 
@@ -1243,12 +1265,20 @@
             <div class="card-title">Felhasználók</div>
             <div class="card-subtitle"><span id="admin-users-count">0</span> fiók</div>
           </div>
-          <div class="activity-type-chips" id="admin-users-group-chips">
-            <button class="activity-type-chip is-active" data-group="szerepkor">Szerepkör szerint</button>
-            <button class="activity-type-chip" data-group="meghivo">Meghívó szerint</button>
-          </div>
+          <select id="admin-users-role-filter" style="padding:6px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:12.5px;">
+            <option value="">Minden szerepkör</option>
+            <option value="owner">Cégtulajdonos</option>
+            <option value="manager">Üzletvezető</option>
+            <option value="reseller">Viszonteladó</option>
+          </select>
         </div>
-        <div id="admin-users-groups"></div>
+        <div class="table-scroll">
+        <table class="data-table" id="admin-users-table">
+          <thead><tr><th>Név</th><th>Email</th><th>Szerepkör</th><th>Állapot</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+        <div id="admin-users-pagination"></div>
       </div>
 
       <div class="card">
