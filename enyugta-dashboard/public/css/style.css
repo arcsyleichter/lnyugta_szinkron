@@ -153,9 +153,14 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   padding:10px; border:none; border-radius:8px; background:var(--jade); color:#fff; font-weight:600; font-size:13.5px;
 }
 #telephely-new-btn:hover{ background:var(--jade-deep); }
-.telephely-current{ display:flex; align-items:center; gap:4px; }
-.telephely-current a{ color:var(--jade); text-decoration:none; font-weight:600; }
-.telephely-current a:hover{ text-decoration:underline; }
+.telephely-current{ display:flex; align-items:center; gap:6px; }
+.telephely-current a{
+  display:inline-flex; align-items:center; color:var(--amber); font-weight:700; font-size:11.5px;
+  text-decoration:none; padding:3px 10px; border-radius:14px;
+  border:1px solid rgba(240,169,62,0.4); background:rgba(240,169,62,0.1);
+  transition:background .15s, border-color .15s;
+}
+.telephely-current a:hover{ background:rgba(240,169,62,0.24); border-color:rgba(240,169,62,0.7); }
 
 /* ============================================================ App shell ============================================================ */
 .app-shell{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; }
@@ -192,8 +197,9 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .btn-ghost{
   background:transparent; border:1px solid rgba(250,249,245,0.2); color:rgba(250,249,245,0.85);
   padding:8px 10px; border-radius:7px; font-size:12.5px;
+  transition:background .15s, border-color .15s;
 }
-.btn-ghost:hover{ background:rgba(250,249,245,0.08); }
+.btn-ghost:hover{ background:rgba(240,169,62,0.12); border-color:rgba(240,169,62,0.45); }
 
 .main{ padding:22px 30px 60px; max-width:1180px; }
 .topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; flex-wrap:wrap; gap:12px; }
@@ -546,8 +552,14 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   background:var(--paper); padding:44px 32px;
 }
 .login-card--rich{ box-shadow:none; padding:0; max-width:360px; width:100%; }
-.login-secondary-links{ margin-top:22px; text-align:center; font-size:12.5px; }
-.login-secondary-links a{ color:var(--text-dim); text-decoration:underline; }
+.login-secondary-links{ margin-top:22px; text-align:center; font-size:12.5px; display:flex; justify-content:center; gap:10px; flex-wrap:wrap; }
+.login-secondary-links a{
+  display:inline-block; color:var(--jade-deep); font-weight:600; text-decoration:none;
+  padding:6px 14px; border-radius:16px; border:1px solid var(--line);
+  transition:background .15s, border-color .15s, color .15s;
+}
+.login-secondary-links a:hover{ background:#FEF6E9; border-color:var(--amber); color:#8A5A0F; }
+.login-secondary-sep{ display:none; }
 .login-secondary-sep{ color:var(--line); margin:0 8px; }
 @media (max-width:760px){
   .login-hero-wrap{ flex-direction:column; border-radius:14px; min-height:0; max-width:440px; }
@@ -569,8 +581,14 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 }
 .password-toggle-btn:hover{ background:var(--paper-dim); }
 
-.admin-entry a{ color:rgba(250,249,245,0.5); font-size:12px; text-decoration:underline; }
-.admin-entry a:hover{ color:rgba(250,249,245,0.8); }
+.admin-entry a{
+  display:inline-flex; align-items:center; gap:4px;
+  color:rgba(250,249,245,0.9); font-size:12px; font-weight:600;
+  text-decoration:none; padding:7px 14px; border-radius:20px;
+  border:1px solid rgba(240,169,62,0.35); background:rgba(240,169,62,0.08);
+  transition:background .15s, border-color .15s, color .15s;
+}
+.admin-entry a:hover{ background:rgba(240,169,62,0.2); border-color:rgba(240,169,62,0.65); color:#fff; }
 
 .admin-shell{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; background:var(--paper-dim); }
 .admin-nav-item{ } /* a .nav-item stílust örökli, ez csak egy elkülönített JS-hook */
