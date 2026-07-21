@@ -20,6 +20,17 @@ data/license.db
 # Feltöltés közbeni ideiglenes fájlok
 data/companies/*.db.uploading
 
+# A CÉGEK ÉLŐ, VALÓDI ADATBÁZISAI — ez SOHA nem tartozott verziókezelésbe.
+# EZ VOLT AZ ÖZÖKÉR-OK egy korábbi, komoly adatvesztésnek: mivel ez a sor
+# korábban hiányzott, ezek a folyamatosan változó, éles fájlok véletlenül
+# bekerülhettek a git-be, és egy git-művelet (stash/checkout/fresh clone)
+# összezavarta/felülírta őket. A VPS-en lévő data/companies/ mappa a
+# rendszer élő, elsődleges adata — kizárólag a szerveren, biztonsági
+# mentésekkel kezelendő, git-en KERESZTÜL SOHA nem mozgatható.
+data/companies/
+data/uploads/
+data/users.db
+
 # OS / szerkesztő
 .DS_Store
 node_modules/

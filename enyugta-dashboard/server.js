@@ -34,7 +34,12 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 // kívülről elérhetőnek lennie. Ha valamiért mégis szükség lenne rá (pl.
 // egy másik gépről futó reverse proxy), a HOST env-változóval felülírható.
 const HOST = process.env.HOST || '127.0.0.1';
-const DATA_DIR = path.join(__dirname, 'data');
+// A LNYUGTA_DATA_DIR env-változóval felülírható — ez teszi lehetővé, hogy
+// az automatizált tesztek egy elkülönített, ideiglenes adatkönyvtárral
+// fussanak, anélkül hogy a teljes alkalmazást le kellene másolni.
+const DATA_DIR = process.env.LNYUGTA_DATA_DIR
+  ? path.resolve(process.env.LNYUGTA_DATA_DIR)
+  : path.join(__dirname, 'data');
 const COMPANIES_DIR = path.join(DATA_DIR, 'companies');
 const SYNC_META_PATH = path.join(DATA_DIR, 'sync-meta.json');
 const SECRETS_PATH = path.join(DATA_DIR, '.secrets.json');
@@ -364,6 +369,9 @@ usersDb.exec(`
     ceg_kulcs TEXT,
     telephely_kod TEXT,
     nev TEXT NOT NULL,
+    telefon TEXT,
+    gdpr_elfogadva TEXT,
+    aszf_elfogadva TEXT,
     invited_by TEXT,
     invite_token TEXT,
     invite_expires TEXT,
@@ -390,6 +398,17 @@ usersDb.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_revoked_sessions_exp ON revoked_sessions(expires_at);
 `);
+
+// Migráció — a telefonszám és a GDPR/ÁSZF-elfogadás mezők régebbi, már
+// futó telepítéseknél még hiányozhatnak a users táblából.
+{
+  const cols = usersDb.prepare(`PRAGMA table_info(users)`).all();
+  for (const [name, def] of [['telefon', 'TEXT'], ['gdpr_elfogadva', 'TEXT'], ['aszf_elfogadva', 'TEXT']]) {
+    if (!cols.some((c) => c.name === name)) {
+      usersDb.exec(`ALTER TABLE users ADD COLUMN ${name} ${def}`);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Licenc-kezelés — az androidos L-NYUGTA GO app licencét ezután a mi
@@ -958,7 +977,6 @@ function createInvite({ email, nev, role, cegKulcs, telephelyKod, resellerId, in
   email = String(email || '').trim().toLowerCase();
   nev = String(nev || '').trim();
   if (!email || !email.includes('@')) throw new Error('Érvénytelen email cím.');
-  if (!nev) throw new Error('A név megadása kötelező.');
   const existing = usersDb.prepare('SELECT id, status FROM users WHERE email = ?').get(email);
   if (existing && existing.status === 'active') throw new Error('Ezzel az email címmel már van aktív fiók.');
   const token = generateInviteToken();
@@ -981,19 +999,26 @@ function buildInviteLink(req, token) {
   return `${baseUrl}/?meghivo=${token}`;
 }
 
-async function sendInviteEmail(link, { email, nev, role }) {
+async function sendInviteEmail(link, { email, nev, role, adoszam, cegNev }) {
   const roleLabel = ROLE_LABELS[role] || '';
-  const nevSafe = escapeHtmlServer(nev);
+  const nevSafe = nev ? escapeHtmlServer(nev) : '';
+  const greeting = nevSafe ? `Kedves ${nevSafe}!` : 'Kedves Leendő Felhasználónk!';
+  const cegSor = adoszam
+    ? `<p style="margin:14px 0;padding:10px 14px;background:#EAF3FB;border-radius:8px;">
+         <b>Cég adószáma:</b> ${escapeHtmlServer(adoszam)}${cegNev ? ` — ${escapeHtmlServer(cegNev)}` : ''}
+       </p>`
+    : '';
   const html = `
     <div style="font-family:Arial,sans-serif;font-size:14px;color:#1E3247;line-height:1.6;">
-      <p>Kedves ${nevSafe}!</p>
+      <p>${greeting}</p>
       <p>Meghívást kaptál az L-NYUGTA rendszerbe, ${roleLabel} jogosultsággal.</p>
-      <p>A fiókod aktiválásához és a jelszavad beállításához kattints az alábbi linkre
-         (48 óráig érvényes):</p>
+      ${cegSor}
+      <p>A fiókod aktiválásához kattints az alábbi linkre — ott tudod megadni a
+         neved, telefonszámod és az új jelszavad (48 óráig érvényes):</p>
       <p style="margin:20px 0;"><a href="${link}" style="background:#5A93C9;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Meghívó elfogadása</a></p>
       <p style="color:#6C8299;font-size:12.5px;">Ha nem te kérted ezt a meghívót, kérjük hagyd figyelmen kívül.</p>
     </div>`;
-  await sendBrevoEmail({ toEmail: email, toName: nev, subject: 'L-NYUGTA — meghívó', html });
+  await sendBrevoEmail({ toEmail: email, toName: nev || email, subject: 'L-NYUGTA — meghívó', html });
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,24 +1552,40 @@ route('POST', '/api/profile/email', async (req, res) => {
 route('GET', '/api/invite/info', async (req, res, query) => {
   const token = String(query.token || '');
   if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
-  const u = usersDb.prepare(`SELECT email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
+  const u = usersDb.prepare(`SELECT email, nev, role, ceg_kulcs, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
   if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
   if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
   if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
-  sendJson(res, 200, { email: u.email, nev: u.nev, role: u.role, roleLabel: ROLE_LABELS[u.role] || u.role });
+  let cegNev = null, adoszam = null;
+  if (u.ceg_kulcs) {
+    const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === u.ceg_kulcs);
+    cegNev = anySite?.nev || null;
+    adoszam = anySite?.adoszam || u.ceg_kulcs;
+  }
+  sendJson(res, 200, { email: u.email, nev: u.nev, role: u.role, roleLabel: ROLE_LABELS[u.role] || u.role, cegNev, adoszam });
 });
 
 route('POST', '/api/invite/accept', async (req, res) => {
-  const { token, password } = await readJsonBody(req);
+  const { token, nev, telefon, password, gdprAccepted, aszfAccepted } = await readJsonBody(req);
   if (!token) return sendJson(res, 400, { error: 'Hiányzó meghívó-token.' });
+  const cleanNev = clampStr(nev, 100);
+  const cleanTelefon = clampStr(telefon, 30);
+  if (!cleanNev) return sendJson(res, 400, { error: 'A név megadása kötelező.' });
+  if (!cleanTelefon) return sendJson(res, 400, { error: 'A telefonszám megadása kötelező.' });
   if (!password || String(password).length < 8) return sendJson(res, 400, { error: 'A jelszónak legalább 8 karakter hosszúnak kell lennie.' });
+  if (!gdprAccepted) return sendJson(res, 400, { error: 'Az adatkezelési tájékoztató elfogadása kötelező.' });
+  if (!aszfAccepted) return sendJson(res, 400, { error: 'Az Általános Szerződési Feltételek elfogadása kötelező.' });
   const u = usersDb.prepare(`SELECT id, email, nev, role, invite_expires, status FROM users WHERE invite_token = ?`).get(token);
   if (!u) return sendJson(res, 404, { error: 'Érvénytelen vagy már felhasznált meghívó.' });
   if (u.status !== 'pending') return sendJson(res, 400, { error: 'Ez a meghívó már fel lett használva.' });
   if (new Date(u.invite_expires) < new Date()) return sendJson(res, 400, { error: 'Ez a meghívó lejárt — kérj egy újat.' });
-  usersDb.prepare(`UPDATE users SET password_hash = ?, status = 'active', invite_token = NULL, invite_expires = NULL WHERE id = ?`)
-    .run(hashPassword(String(password)), u.id);
-  logActivity({ type: 'user_invite_accepted', ok: true, companyKey: null, nev: u.nev, detail: `${u.email} (${u.role}) aktiválta a fiókját.` });
+  const now = new Date().toISOString();
+  usersDb.prepare(`
+    UPDATE users SET nev = ?, telefon = ?, password_hash = ?, status = 'active',
+      gdpr_elfogadva = ?, aszf_elfogadva = ?, invite_token = NULL, invite_expires = NULL
+    WHERE id = ?
+  `).run(cleanNev, cleanTelefon, hashPassword(String(password)), now, now, u.id);
+  logActivity({ type: 'user_invite_accepted', ok: true, companyKey: null, nev: cleanNev, detail: `${u.email} (${u.role}) aktiválta a fiókját.` });
   sendJson(res, 200, { ok: true });
 });
 
@@ -1766,8 +1807,7 @@ route('POST', '/api/reseller/invite-owner', async (req, res) => {
   const cegKulcs = companyKeyFromAdoszam(body.adoszam);
   if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
   const email = String(body.email || '').trim();
-  const nev = clampStr(body.nev, 100);
-  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+  if (!email) return sendJson(res, 400, { error: 'Az email cím megadása kötelező.' });
 
   const codes = readAccessCodes();
   if (!codes[cegKulcs]) codes[cegKulcs] = { code: generateAccessCode(), email: '' };
@@ -1777,15 +1817,16 @@ route('POST', '/api/reseller/invite-owner', async (req, res) => {
 
   let token;
   try {
-    token = createInvite({ email, nev, role: 'owner', cegKulcs, resellerId: reseller.resellerId, invitedBy: reseller.email });
+    token = createInvite({ email, nev: '', role: 'owner', cegKulcs, resellerId: reseller.resellerId, invitedBy: reseller.email });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
   const link = buildInviteLink(req, token);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
   let emailWarning = null;
-  try { await sendInviteEmail(link, { email, nev, role: 'owner' }); }
+  try { await sendInviteEmail(link, { email, nev: '', role: 'owner', adoszam: body.adoszam, cegNev: anySite?.nev }); }
   catch (e) { emailWarning = e.message; } // a fiók/meghívó ettől még létrejött, csak az email nem ment ki
-  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: reseller.nev, detail: `Cégtulajdonos meghívva: ${email} (${nev}), adószám: ${cegKulcs}` });
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: reseller.nev, detail: `Cégtulajdonos meghívva: ${email}, adószám: ${cegKulcs}` });
   sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
 });
 
@@ -1800,21 +1841,21 @@ route('POST', '/api/profile/invite-manager', async (req, res) => {
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.telephelyKod);
   const email = String(body.email || '').trim();
-  const nev = clampStr(body.nev, 100);
-  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+  if (!email) return sendJson(res, 400, { error: 'Az email cím megadása kötelező.' });
   if (!listTelephelyek(session.cegKulcs).some((t) => t.kod === kod)) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
 
   let token;
   try {
-    token = createInvite({ email, nev, role: 'manager', cegKulcs: session.cegKulcs, telephelyKod: kod, invitedBy: session.nev });
+    token = createInvite({ email, nev: '', role: 'manager', cegKulcs: session.cegKulcs, telephelyKod: kod, invitedBy: session.nev });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
   const link = buildInviteLink(req, token);
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === session.cegKulcs);
   let emailWarning = null;
-  try { await sendInviteEmail(link, { email, nev, role: 'manager' }); }
+  try { await sendInviteEmail(link, { email, nev: '', role: 'manager', adoszam: session.adoszam, cegNev: anySite?.nev }); }
   catch (e) { emailWarning = e.message; }
-  logActivity({ type: 'user_invite_sent', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Üzletvezető meghívva: ${email} (${nev})` });
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Üzletvezető meghívva: ${email}` });
   sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
 });
 
@@ -1892,10 +1933,9 @@ route('POST', '/api/admin/invite-user', async (req, res) => {
   const role = String(body.role || '');
   if (!['reseller', 'owner', 'manager'].includes(role)) return sendJson(res, 400, { error: 'Érvénytelen szerepkör.' });
   const email = String(body.email || '').trim();
-  const nev = clampStr(body.nev, 100);
-  if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
+  if (!email) return sendJson(res, 400, { error: 'Az email cím megadása kötelező.' });
 
-  let cegKulcs = null, telephelyKod = null;
+  let cegKulcs = null, telephelyKod = null, cegNev = null;
   if (role === 'owner' || role === 'manager') {
     cegKulcs = companyKeyFromAdoszam(body.adoszam);
     if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
@@ -1906,19 +1946,21 @@ route('POST', '/api/admin/invite-user', async (req, res) => {
       telephelyKod = normalizeTelephelyKod(body.telephelyKod);
       if (!listTelephelyek(cegKulcs).some((t) => t.kod === telephelyKod)) return sendJson(res, 404, { error: 'Ismeretlen telephely ennél a cégnél.' });
     }
+    const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+    cegNev = anySite?.nev || null;
   }
 
   let token;
   try {
-    token = createInvite({ email, nev, role, cegKulcs, telephelyKod, invitedBy: 'admin' });
+    token = createInvite({ email, nev: '', role, cegKulcs, telephelyKod, invitedBy: 'admin' });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
   const link = buildInviteLink(req, token);
   let emailWarning = null;
-  try { await sendInviteEmail(link, { email, nev, role }); }
+  try { await sendInviteEmail(link, { email, nev: '', role, adoszam: body.adoszam, cegNev }); }
   catch (e) { emailWarning = e.message; }
-  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `${ROLE_LABELS[role]} meghívva: ${email} (${nev})` });
+  logActivity({ type: 'user_invite_sent', ok: true, companyKey: cegKulcs, nev: 'admin', detail: `${ROLE_LABELS[role]} meghívva: ${email}` });
   sendJson(res, 200, { ok: true, inviteLink: link, emailWarning });
 });
 

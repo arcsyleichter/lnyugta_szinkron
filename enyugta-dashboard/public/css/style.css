@@ -873,3 +873,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .acc-detail-row > span:last-child, .acc-detail-row input{ font-family:var(--font-mono); text-align:right; }
 .acc-detail-row input{ width:90px; padding:5px 8px; border:1.5px solid var(--line); border-radius:6px; }
 .acc-actions{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+
+/* Meghívó-elfogadás — GDPR/ÁSZF elfogadó sorok */
+.invite-legal-check{ display:flex; align-items:flex-start; gap:8px; font-size:12.5px; color:var(--text-dim); margin-bottom:10px; cursor:pointer; }
+.invite-legal-check input[type="checkbox"]{ margin-top:2px; flex:none; width:16px; height:16px; }
+.invite-legal-check a{ color:var(--jade-deep); text-decoration:underline; }

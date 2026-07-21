@@ -121,10 +121,26 @@
       </div>
     </div>
     <form id="invite-accept-form" autocomplete="on">
-      <label for="invite-password-input">Új jelszó</label>
+      <div id="invite-accept-extra-fields">
+        <label for="invite-nev-input">Teljes név</label>
+        <input id="invite-nev-input" autocomplete="name" required>
+        <label for="invite-telefon-input" style="margin-top:10px;">Telefonszám</label>
+        <input id="invite-telefon-input" type="tel" autocomplete="tel" placeholder="+36 30 123 4567" required>
+      </div>
+      <label for="invite-password-input" style="margin-top:10px;">Új jelszó</label>
       <input type="password" id="invite-password-input" autocomplete="new-password" placeholder="legalább 8 karakter" required minlength="8">
       <label for="invite-password-input2" style="margin-top:10px;">Jelszó mégegyszer</label>
       <input type="password" id="invite-password-input2" autocomplete="new-password" placeholder="ismételd meg" required minlength="8">
+      <div id="invite-accept-legal-fields" style="margin-top:14px;">
+        <label class="invite-legal-check">
+          <input type="checkbox" id="invite-gdpr-checkbox" required>
+          Elfogadom az <a href="#" id="invite-gdpr-link">Adatkezelési tájékoztatót</a>
+        </label>
+        <label class="invite-legal-check">
+          <input type="checkbox" id="invite-aszf-checkbox" required>
+          Elfogadom az <a href="#" id="invite-aszf-link">Általános Szerződési Feltételeket</a>
+        </label>
+      </div>
       <button type="submit" class="btn-primary" id="invite-accept-btn" style="width:100%;margin-top:16px;">Fiók aktiválása</button>
       <div class="login-error" id="invite-accept-error" hidden></div>
     </form>
@@ -133,6 +149,14 @@
     </div>
   </div>
 </section>
+
+<div class="modal-backdrop" id="legal-doc-modal-backdrop" hidden>
+  <div class="modal" style="max-width:620px;">
+    <button class="modal-close" id="legal-doc-modal-close">✕</button>
+    <div class="card-title" id="legal-doc-modal-title" style="margin-bottom:14px;">Dokumentum</div>
+    <div id="legal-doc-modal-body" style="max-height:60vh;overflow-y:auto;font-size:13.5px;line-height:1.6;color:var(--text-dim);"></div>
+  </div>
+</div>
 
 <!-- ===================== VISZONTELADÓ BEJELENTKEZÉS ===================== -->
 <section id="reseller-login-screen" class="login-screen" hidden>
@@ -872,6 +896,7 @@
           </table>
         </div>
         <div class="acc-list" id="stock-acc-list"></div>
+        <div id="stock-pagination"></div>
       </div>
     </section>
 
@@ -1004,11 +1029,11 @@
         </p>
         <form id="profil-invite-manager-form" class="telephely-new-form-grid" autocomplete="off">
           <select id="profil-invite-manager-telephely" required style="padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;"></select>
-          <input id="profil-invite-manager-nev" placeholder="Üzletvezető neve" required>
           <input id="profil-invite-manager-email" type="email" placeholder="Email címe" required>
           <button type="submit" class="btn-secondary">Meghívó küldése</button>
         </form>
         <div class="profile-form-msg" id="profil-invite-manager-msg"></div>
+        <p class="muted" style="margin-top:2px;font-size:12px;">A nevét és telefonszámát a meghívott adja meg a fiók aktiválásakor.</p>
         <p class="muted" style="margin-top:14px;font-size:12.5px;">
           Egyéb felhasználói szintek (viszonteladó, admin) az adott jogosultsággal
           rendelkező személy tudja létrehozni.
@@ -1307,10 +1332,9 @@
               <input id="admin-invite-telephely" placeholder="pl. 01" style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
             </div>
           </div>
-          <label for="admin-invite-nev">Név</label>
-          <input id="admin-invite-nev" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;">
           <label for="admin-invite-email">Email cím</label>
           <input id="admin-invite-email" type="email" required style="width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:14px;">
+          <p class="card-subtitle" style="margin:-6px 0 14px;">A nevét és telefonszámát a meghívott adja meg a fiók aktiválásakor.</p>
           <button type="submit" class="btn-secondary">Meghívó küldése</button>
         </form>
         <div class="profile-form-msg" id="admin-invite-msg"></div>
@@ -1585,10 +1609,9 @@
 
       <div class="card">
         <div class="card-title">+ Új ügyfél meghívása</div>
-        <p class="card-subtitle" style="margin-bottom:14px;">Előregisztrálja a céget (adószám alapján), és e-mailben meghívót küld a leendő cégtulajdonosnak.</p>
+        <p class="card-subtitle" style="margin-bottom:14px;">Előregisztrálja a céget (adószám alapján), és e-mailben meghívót küld a leendő cégtulajdonosnak — a nevét és telefonszámát a meghívott adja meg a fiók aktiválásakor.</p>
         <form id="reseller-invite-form" class="telephely-new-form-grid" autocomplete="off">
           <input id="reseller-invite-adoszam" placeholder="Adószám (pl. 12345678-1-42)" required>
-          <input id="reseller-invite-nev" placeholder="Tulajdonos neve" required>
           <input id="reseller-invite-email" type="email" placeholder="Tulajdonos email címe" required>
           <button type="submit" class="btn-secondary">Meghívó küldése</button>
         </form>

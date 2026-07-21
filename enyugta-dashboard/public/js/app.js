@@ -129,6 +129,7 @@ class Paginator {
     });
   }
 }
+const stockPaginator = new Paginator();
 
 const isoDaysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 
@@ -979,7 +980,6 @@ listen('admin-invite-form', 'submit', async (e) => {
     const role = document.getElementById('admin-invite-role').value;
     const body = {
       role,
-      nev: document.getElementById('admin-invite-nev').value.trim(),
       email: document.getElementById('admin-invite-email').value.trim(),
     };
     if (role !== 'reseller') body.adoszam = document.getElementById('admin-invite-adoszam').value.trim();
@@ -1139,9 +1139,8 @@ listen('reseller-invite-form', 'submit', async (e) => {
   msg.textContent = ''; msg.className = 'profile-form-msg';
   try {
     const adoszam = document.getElementById('reseller-invite-adoszam').value.trim();
-    const nev = document.getElementById('reseller-invite-nev').value.trim();
     const email = document.getElementById('reseller-invite-email').value.trim();
-    const res = await api('/api/reseller/invite-owner', { method: 'POST', body: JSON.stringify({ adoszam, nev, email }) });
+    const res = await api('/api/reseller/invite-owner', { method: 'POST', body: JSON.stringify({ adoszam, email }) });
     document.getElementById('reseller-invite-form').reset();
     msg.textContent = res.emailWarning
       ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`
@@ -1182,10 +1181,14 @@ async function checkInviteLink() {
   if (!token) return false;
   hideAllScreens();
   document.getElementById('invite-accept-screen').hidden = false;
+  document.getElementById('invite-accept-extra-fields').hidden = false;
+  document.getElementById('invite-accept-legal-fields').hidden = false;
   const sub = document.getElementById('invite-accept-sub');
   try {
     const info = await api(`/api/invite/info?token=${encodeURIComponent(token)}`);
-    sub.textContent = `Szia, ${info.nev}! (${info.roleLabel} jogosultság) — ${info.email}`;
+    sub.textContent = info.cegNev
+      ? `${info.roleLabel} jogosultság — ${info.cegNev} (${info.adoszam}) — ${info.email}`
+      : `${info.roleLabel} jogosultság — ${info.email}`;
   } catch (e) {
     sub.textContent = e.message;
     document.getElementById('invite-accept-form').hidden = true;
@@ -1195,13 +1198,18 @@ async function checkInviteLink() {
     e.preventDefault();
     const err = document.getElementById('invite-accept-error');
     err.hidden = true;
+    const nev = document.getElementById('invite-nev-input').value.trim();
+    const telefon = document.getElementById('invite-telefon-input').value.trim();
     const p1 = document.getElementById('invite-password-input').value;
     const p2 = document.getElementById('invite-password-input2').value;
+    const gdprAccepted = document.getElementById('invite-gdpr-checkbox').checked;
+    const aszfAccepted = document.getElementById('invite-aszf-checkbox').checked;
     if (p1 !== p2) { err.textContent = 'A két jelszó nem egyezik.'; err.hidden = false; return; }
+    if (!gdprAccepted || !aszfAccepted) { err.textContent = 'Az Adatkezelési tájékoztató és az ÁSZF elfogadása kötelező.'; err.hidden = false; return; }
     const btn = document.getElementById('invite-accept-btn');
     btn.disabled = true; btn.textContent = 'Mentés…';
     try {
-      await api('/api/invite/accept', { method: 'POST', body: JSON.stringify({ token, password: p1 }) });
+      await api('/api/invite/accept', { method: 'POST', body: JSON.stringify({ token, nev, telefon, password: p1, gdprAccepted, aszfAccepted }) });
       document.getElementById('invite-accept-form').hidden = true;
       document.getElementById('invite-accept-success').hidden = false;
     } catch (e2) {
@@ -1213,6 +1221,36 @@ async function checkInviteLink() {
 }
 
 listen('show-company-login', 'click', (e) => { e.preventDefault(); showLandingScreen(); });
+
+const LEGAL_DOCS = {
+  gdpr: {
+    title: 'Adatkezelési tájékoztató',
+    body: `<p><b>Ideiglenes szöveg — a végleges Adatkezelési tájékoztatót a jogi/adatvédelmi felülvizsgálat után kell ide betölteni.</b></p>
+      <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>
+      <p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>
+      <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>`,
+  },
+  aszf: {
+    title: 'Általános Szerződési Feltételek',
+    body: `<p><b>Ideiglenes szöveg — a végleges Általános Szerződési Feltételeket a jogi felülvizsgálat után kell ide betölteni.</b></p>
+      <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>
+      <p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>
+      <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>`,
+  },
+};
+function openLegalDocModal(key) {
+  const doc = LEGAL_DOCS[key];
+  if (!doc) return;
+  document.getElementById('legal-doc-modal-title').textContent = doc.title;
+  document.getElementById('legal-doc-modal-body').innerHTML = doc.body;
+  document.getElementById('legal-doc-modal-backdrop').hidden = false;
+}
+listen('invite-gdpr-link', 'click', (e) => { e.preventDefault(); openLegalDocModal('gdpr'); });
+listen('invite-aszf-link', 'click', (e) => { e.preventDefault(); openLegalDocModal('aszf'); });
+listen('legal-doc-modal-close', 'click', () => { document.getElementById('legal-doc-modal-backdrop').hidden = true; });
+listen('legal-doc-modal-backdrop', 'click', (e) => {
+  if (e.target.id === 'legal-doc-modal-backdrop') e.target.hidden = true;
+});
 
 function openForgotPasswordModal() {
   document.getElementById('forgot-password-email').value = '';
@@ -1252,6 +1290,8 @@ async function checkResetPasswordLink() {
   if (!token) return false;
   hideAllScreens();
   document.getElementById('invite-accept-screen').hidden = false;
+  document.getElementById('invite-accept-extra-fields').hidden = true;
+  document.getElementById('invite-accept-legal-fields').hidden = true;
   document.getElementById('invite-accept-title').textContent = 'Jelszó visszaállítása';
   document.getElementById('invite-accept-btn').textContent = 'Új jelszó mentése';
   const sub = document.getElementById('invite-accept-sub');
@@ -3482,6 +3522,7 @@ function renderStockGroupTiles(groups) {
   box.querySelectorAll('.stock-tile').forEach((btn) => {
     btn.addEventListener('click', () => {
       stockFilter.csoport = btn.dataset.csoport;
+      stockPaginator.page = 1;
       loadStockView();
     });
   });
@@ -3519,8 +3560,10 @@ async function loadStockView() {
   if (!stock.items.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a szűrésnek megfelelő cikk.</td></tr>';
     accList.innerHTML = '<p class="empty-state">Nincs a szűrésnek megfelelő cikk.</p>';
+    document.getElementById('stock-pagination').innerHTML = '';
   } else {
-    stock.items.forEach((it) => {
+    const pageData = stockPaginator.slice(stock.items);
+    pageData.forEach((it) => {
       const tr = document.createElement('tr');
       const keszletCls = it.keszlet < 0 ? 'stock-negative' : '';
       const alacsonyBadge = it.alacsony ? '<span class="ntak-badge warn">Alacsony!</span>' : '';
@@ -3567,6 +3610,7 @@ async function loadStockView() {
         details.hidden = !isOpen;
       });
     });
+    stockPaginator.renderControls(document.getElementById('stock-pagination'), () => loadStockView());
   }
   makeSortableTable('stock-table');
 }
@@ -3574,7 +3618,7 @@ async function loadStockView() {
 let stockSearchTimer = null;
 listen('stock-search-input', 'input', (e) => {
   clearTimeout(stockSearchTimer);
-  stockSearchTimer = setTimeout(() => { stockFilter.q = e.target.value.trim(); loadStockView(); }, 300);
+  stockSearchTimer = setTimeout(() => { stockFilter.q = e.target.value.trim(); stockPaginator.page = 1; loadStockView(); }, 300);
 });
 
 /* ============================================================
@@ -4091,9 +4135,8 @@ listen('profil-invite-manager-form', 'submit', async (e) => {
   msg.textContent = ''; msg.className = 'profile-form-msg';
   try {
     const telephelyKod = document.getElementById('profil-invite-manager-telephely').value;
-    const nev = document.getElementById('profil-invite-manager-nev').value.trim();
     const email = document.getElementById('profil-invite-manager-email').value.trim();
-    const res = await api('/api/profile/invite-manager', { method: 'POST', body: JSON.stringify({ telephelyKod, nev, email }) });
+    const res = await api('/api/profile/invite-manager', { method: 'POST', body: JSON.stringify({ telephelyKod, email }) });
     document.getElementById('profil-invite-manager-form').reset();
     msg.textContent = res.emailWarning
       ? `✓ Meghívó létrehozva, de az email küldése nem sikerült (${res.emailWarning}). Küldd el kézzel ezt a linket: ${res.inviteLink}`

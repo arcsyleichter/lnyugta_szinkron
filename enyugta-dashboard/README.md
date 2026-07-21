@@ -511,3 +511,89 @@ bővítésre szorul (pl. named admin accounts).
 - A `data/companies/*.db` fájlok az éles pillanatképek — érdemes
   időszakosan biztonsági mentést készíteni a teljes `data/companies/`
   mappáról.
+
+## Adatvédelem és biztonságos frissítés — OLVASD EL FELTELEPÍTÉS ELŐTT
+
+Egy korábbi, hibás telepítési folyamat miatt a `data/companies/` mappa
+(a cégek élő adatai) egyszer véletlenül elveszett a VPS-en. A gyökér-ok:
+a `.gitignore` régen NEM zárta ki ezeket az élő, folyamatosan változó
+fájlokat, így git-műveletek (stash, fresh clone) hozzájuk nyúlhattak.
+Ez mostantól javítva van, DE emellett három új, önálló védelmi eszköz is
+került a `scripts/` mappába:
+
+### 1. `scripts/backup-data.sh` — automatikus, git-től független mentés
+
+```bash
+chmod +x scripts/*.sh
+./scripts/backup-data.sh
+```
+
+Egy időbélyeges `.tar.gz` fájlba menti a TELJES `data/` mappát, egy a
+git-repótól teljesen külön helyre (`~/lnyugta_backups/`) — ez SOHA nem
+kerülhet konfliktusba git-parancsokkal. A 14 napnál régebbi mentéseket
+automatikusan törli.
+
+**Állítsd be automatikusra (naponta, hajnali 3-kor):**
+```bash
+crontab -e
+```
+Add hozzá ezt a sort (írd át a saját elérési útjaidra, ha eltérnek):
+```
+0 3 * * * /home/lnyugta/lnyugta_szinkron/enyugta-dashboard/scripts/backup-data.sh >> /home/lnyugta/lnyugta_backups/backup.log 2>&1
+```
+
+### 2. `scripts/restore-data.sh` — visszaállítás egy korábbi mentésből
+
+```bash
+./scripts/restore-data.sh                        # listázza az elérhető mentéseket
+./scripts/restore-data.sh data_backup_20260721_0300.tar.gz   # visszaállít egy konkrétat
+```
+
+Mielőtt bármit felülírna, a JELENLEGI `data/` mappát is elmenti egy
+"ELOTTE_visszaallitas_..." pillanatképként — egy rossz választás sem
+vész el véglegesen.
+
+### 3. `scripts/safe-update.sh` — HASZNÁLD EZT `git pull` HELYETT
+
+```bash
+./scripts/safe-update.sh
+```
+
+Ez a jövőbeli, biztonságos frissítési út: mindig előbb ment, csak utána
+frissíti a kódot — és SOHA nem törli a teljes mappát friss klónozás
+céljából (ez okozta a korábbi adatvesztést). Ha helyi, nem véglegesített
+kódmódosítást talál a VPS-en, megáll és figyelmeztet, mielőtt bármi
+elveszne.
+
+## Automatizált tesztelés
+
+```bash
+npm test
+```
+
+A beépített `node:test` futtatót használja — **nulla külső
+függőséggel**, összhangban a projekt alapelvével. Minden teszt egy
+ÚJ, ELKÜLÖNÍTETT szerver-példányt indít, saját, ideiglenes
+adatkönyvtárral (a valódi `data/` mappához soha nem nyúl), majd a
+végén automatikusan törli azt.
+
+Amit jelenleg lefed:
+- bejelentkezés (helyes/hibás jelszó), admin-belépés
+- **munkamenet-visszavonás** — kijelentkezés után a régi süti tényleg
+  érvénytelen-e
+- **sebesség-korlátozás** — a jelszó-visszaállítás tényleg leáll-e túl
+  sok próbálkozás után
+- **fájltípus-ellenőrzés** — egy nem-valódi képtartalom elutasításra
+  kerül-e feltöltéskor
+- **Cikktörzs átnevezés-tiltása** — szerkesztéskor a név tényleg nem
+  módosítható-e
+- a **teljes meghívási folyamat** — meghívástól a bejelentkezésig,
+  beleértve a kötelező GDPR/ÁSZF-elfogadást
+- alapvető adat-végpontok (nyugták rendezése, licenc-lekérdezés
+  API-kulccsal/anélkül)
+
+Új teszt hozzáadásához egyszerűen hozz létre egy új
+`tests/<valami>.test.js` fájlt, a meglévők mintájára — a
+`tests/helpers/test-server.js` és `tests/helpers/build-test-db.js`
+újrahasznosítható minden új teszthez.
+
