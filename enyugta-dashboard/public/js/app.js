@@ -193,8 +193,8 @@ async function apiSilent(path) {
 const state = {
   range: { from: todayIso(), to: todayIso(), preset: 'today' },
   group: 'hour',
-  products: { offset: 0, limit: 50, q: '' },
-  receipts: { offset: 0, limit: 25, q: '', fizmod: '', min: '', max: '' },
+  products: { offset: 0, limit: 15, q: '' },
+  receipts: { offset: 0, limit: 15, q: '', fizmod: '', min: '', max: '' },
   pollTimer: null,
 };
 
@@ -1071,24 +1071,62 @@ listen('reseller-back-link', 'click', (e) => { e.preventDefault(); showLandingSc
 
 function showResellerDashboard() { hideAllScreens(); resellerScreen.hidden = false; }
 
+let resellerCompaniesCache = [];
+const resellerCompaniesPaginator = new Paginator();
+let resellerCompaniesSort = { key: 'nev', dir: 'asc' };
+
 async function loadResellerOverview() {
   try {
     const data = await api('/api/reseller/overview');
     document.getElementById('reseller-name').textContent = data.reseller.nev;
     document.getElementById('reseller-company-count').textContent = data.companies.length;
-    const tbody = document.querySelector('#reseller-companies-table tbody');
-    tbody.innerHTML = data.companies.map((c) => `
-      <tr>
-        <td>${escapeHtml(c.nev)}</td>
-        <td>${escapeHtml(c.telephelyNev || c.telephelyKod)}</td>
-        <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
-        <td>${escapeHtml(c.varos || '—')}</td>
-        <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
-      </tr>`).join('') || '<tr><td colspan="5" class="muted">Még nincs egyetlen ügyfeled sem.</td></tr>';
+    resellerCompaniesCache = data.companies;
+    renderResellerCompaniesTable();
   } catch (e) {
     alert('Nem sikerült betölteni: ' + e.message);
   }
 }
+
+function renderResellerCompaniesTable() {
+  const { key, dir } = resellerCompaniesSort;
+  const sorted = [...resellerCompaniesCache].sort((a, b) => {
+    const av = a[key] ?? '', bv = b[key] ?? '';
+    const cmp = String(av).localeCompare(String(bv), 'hu', { numeric: true });
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  document.querySelectorAll('#reseller-companies-table .reg-sortable').forEach((th) => {
+    th.querySelector('.sort-arrow')?.remove();
+    if (th.dataset.sort === key) {
+      th.insertAdjacentHTML('beforeend', `<span class="sort-arrow">${dir === 'asc' ? '▲' : '▼'}</span>`);
+    }
+  });
+  const tbody = document.querySelector('#reseller-companies-table tbody');
+  if (!sorted.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">Még nincs egyetlen ügyfeled sem.</td></tr>';
+    document.getElementById('reseller-companies-pagination').innerHTML = '';
+    return;
+  }
+  const pageData = resellerCompaniesPaginator.slice(sorted);
+  tbody.innerHTML = pageData.map((c) => `
+    <tr>
+      <td>${escapeHtml(c.nev)}</td>
+      <td>${escapeHtml(c.telephelyNev || c.telephelyKod)}</td>
+      <td class="ntak-uuid">${escapeHtml(c.adoszam)}</td>
+      <td>${escapeHtml(c.varos || '—')}</td>
+      <td>${c.lastSync ? fmtDateTime(c.lastSync) : '—'}</td>
+    </tr>`).join('');
+  resellerCompaniesPaginator.renderControls(document.getElementById('reseller-companies-pagination'), renderResellerCompaniesTable);
+}
+document.querySelectorAll('#reseller-companies-table .reg-sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    if (resellerCompaniesSort.key === th.dataset.sort) {
+      resellerCompaniesSort.dir = resellerCompaniesSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      resellerCompaniesSort = { key: th.dataset.sort, dir: 'asc' };
+    }
+    renderResellerCompaniesTable();
+  });
+});
 
 listen('reseller-logout-btn', 'click', async () => {
   await api('/api/auth/reseller-logout', { method: 'POST' }).catch(() => {});
@@ -3192,13 +3230,15 @@ listen('products-search', 'input', (e) => {
     state.products.q = e.target.value; state.products.offset = 0; loadProductsView(false);
   }, 300);
 });
-listen('products-prev', 'click', () => { state.products.offset = Math.max(0, state.products.offset - state.products.limit); loadProductsView(false); });
-listen('products-next', 'click', () => { state.products.offset += state.products.limit; loadProductsView(false); });
+const productsPaginator = new Paginator({ pageSize: state.products.limit });
+let productsSort = { key: 'arbevetel', dir: 'desc' };
 
 async function loadProductsView() {
   const { from, to } = state.range;
-  const { q, limit, offset } = state.products;
-  const data = await api(`/api/products?from=${from}&to=${to}&q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`);
+  const q = state.products.q;
+  productsPaginator.pageSize = state.products.limit;
+  const offset = (productsPaginator.page - 1) * productsPaginator.pageSize;
+  const data = await api(`/api/products?from=${from}&to=${to}&q=${encodeURIComponent(q)}&limit=${productsPaginator.pageSize}&offset=${offset}&sort=${productsSort.key}&order=${productsSort.dir}`);
   const tbody = document.querySelector('#products-table tbody');
   tbody.innerHTML = '';
   if (!data.items.length) tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Nincs találat.</td></tr>';
@@ -3207,11 +3247,26 @@ async function loadProductsView() {
     tr.innerHTML = `<td>${escapeHtml(it.nev)}</td><td class="num">${it.mennyiseg} ${escapeHtml(it.me || '')}</td><td class="num">${it.nyugtaszam}</td><td class="num">${fmtHuf(it.arbevetel)}</td>`;
     tbody.appendChild(tr);
   });
-  document.getElementById('products-count').textContent = `${data.total} termék · ${offset + 1}–${Math.min(offset + limit, data.total)}`;
-  document.getElementById('products-prev').disabled = offset === 0;
-  document.getElementById('products-next').disabled = offset + limit >= data.total;
-  makeSortableTable('products-table');
+  productsPaginator.setTotal(data.total);
+  productsPaginator.renderControls(document.getElementById('products-pagination'), () => loadProductsView());
+  document.querySelectorAll('#products-table .reg-sortable').forEach((th) => {
+    th.querySelector('.sort-arrow')?.remove();
+    if (th.dataset.sort === productsSort.key) {
+      th.insertAdjacentHTML('beforeend', `<span class="sort-arrow">${productsSort.dir === 'asc' ? '▲' : '▼'}</span>`);
+    }
+  });
 }
+document.querySelectorAll('#products-table .reg-sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    if (productsSort.key === th.dataset.sort) {
+      productsSort.dir = productsSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      productsSort = { key: th.dataset.sort, dir: 'asc' };
+    }
+    productsPaginator.page = 1;
+    loadProductsView();
+  });
+});
 
 /* ============================================================
    Nyugták nézet
@@ -3219,22 +3274,25 @@ async function loadProductsView() {
 let receiptsSearchTimer;
 listen('receipts-search', 'input', (e) => {
   clearTimeout(receiptsSearchTimer);
-  receiptsSearchTimer = setTimeout(() => { state.receipts.q = e.target.value; state.receipts.offset = 0; loadReceiptsView(false); }, 300);
+  receiptsSearchTimer = setTimeout(() => { state.receipts.q = e.target.value; receiptsPaginator.page = 1; loadReceiptsView(false); }, 300);
 });
 listen('receipts-filter-btn', 'click', () => {
   state.receipts.fizmod = document.getElementById('receipts-fizmod').value;
   state.receipts.min = document.getElementById('receipts-min').value;
   state.receipts.max = document.getElementById('receipts-max').value;
-  state.receipts.offset = 0;
+  receiptsPaginator.page = 1;
   loadReceiptsView(false);
 });
-listen('receipts-prev', 'click', () => { state.receipts.offset = Math.max(0, state.receipts.offset - state.receipts.limit); loadReceiptsView(false); });
-listen('receipts-next', 'click', () => { state.receipts.offset += state.receipts.limit; loadReceiptsView(false); });
+
+const receiptsPaginator = new Paginator({ pageSize: state.receipts.limit });
+let receiptsSort = { key: 'id', dir: 'desc' };
 
 async function loadReceiptsView() {
   const { from, to } = state.range;
-  const { q, fizmod, min, max, limit, offset } = state.receipts;
-  const params = new URLSearchParams({ from, to, q, fizmod, limit, offset });
+  const { q, fizmod, min, max } = state.receipts;
+  receiptsPaginator.pageSize = state.receipts.limit;
+  const offset = (receiptsPaginator.page - 1) * receiptsPaginator.pageSize;
+  const params = new URLSearchParams({ from, to, q, fizmod, limit: receiptsPaginator.pageSize, offset, sort: receiptsSort.key, order: receiptsSort.dir });
   if (min) params.set('min', min);
   if (max) params.set('max', max);
   const data = await api(`/api/receipts?${params.toString()}`);
@@ -3245,15 +3303,30 @@ async function loadReceiptsView() {
   data.items.forEach((r) => {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
-    tr.innerHTML = `<td>${escapeHtml(r.bsz)}</td><td>${fmtDate(r.keltdat)}</td><td>${names[r.fizmod] || r.fizmod}</td><td class="num">${fmtHuf(r.osszeg)}</td>`;
+    tr.innerHTML = `<td>${escapeHtml(r.bsz)}</td><td>${fmtDate(r.keltdat)}</td><td class="num">${fmtHuf(r.osszeg)}</td><td>${names[r.fizmod] || r.fizmod}</td>`;
     tr.addEventListener('click', () => openReceiptModal(r.bsz));
     tbody.appendChild(tr);
   });
-  document.getElementById('receipts-count').textContent = `${data.total} nyugta · ${offset + 1}–${Math.min(offset + limit, data.total)}`;
-  document.getElementById('receipts-prev').disabled = offset === 0;
-  document.getElementById('receipts-next').disabled = offset + limit >= data.total;
-  makeSortableTable('receipts-table');
+  receiptsPaginator.setTotal(data.total);
+  receiptsPaginator.renderControls(document.getElementById('receipts-pagination'), () => loadReceiptsView());
+  document.querySelectorAll('#receipts-table .reg-sortable').forEach((th) => {
+    th.querySelector('.sort-arrow')?.remove();
+    if (th.dataset.sort === receiptsSort.key) {
+      th.insertAdjacentHTML('beforeend', `<span class="sort-arrow">${receiptsSort.dir === 'asc' ? '▲' : '▼'}</span>`);
+    }
+  });
 }
+document.querySelectorAll('#receipts-table .reg-sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    if (receiptsSort.key === th.dataset.sort) {
+      receiptsSort.dir = receiptsSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      receiptsSort = { key: th.dataset.sort, dir: 'asc' };
+    }
+    receiptsPaginator.page = 1;
+    loadReceiptsView();
+  });
+});
 
 async function openReceiptModal(bsz) {
   const data = await api(`/api/receipt?bsz=${encodeURIComponent(bsz)}`);
@@ -3440,15 +3513,19 @@ async function loadStockView() {
   renderStockGroupTiles(stock.groups);
 
   const tbody = document.querySelector('#stock-table tbody');
+  const accList = document.getElementById('stock-acc-list');
   tbody.innerHTML = '';
+  accList.innerHTML = '';
   if (!stock.items.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a szűrésnek megfelelő cikk.</td></tr>';
+    accList.innerHTML = '<p class="empty-state">Nincs a szűrésnek megfelelő cikk.</p>';
   } else {
     stock.items.forEach((it) => {
       const tr = document.createElement('tr');
       const keszletCls = it.keszlet < 0 ? 'stock-negative' : '';
+      const alacsonyBadge = it.alacsony ? '<span class="ntak-badge warn">Alacsony!</span>' : '';
       tr.innerHTML = `
-        <td>${escapeHtml(it.nev)} ${it.alacsony ? '<span class="ntak-badge warn">Alacsony!</span>' : ''}</td>
+        <td>${escapeHtml(it.nev)} ${alacsonyBadge}</td>
         <td>${escapeHtml(it.csoportNev)}</td>
         <td class="num">${it.bevetelezve} ${escapeHtml(it.me || '')}</td>
         <td class="num">${it.eladva} ${escapeHtml(it.me || '')}</td>
@@ -3456,9 +3533,39 @@ async function loadStockView() {
         <td>${it.utolsoBevetelezes ? fmtDate(it.utolsoBevetelezes) : '—'}</td>
         <td><input type="number" min="0" class="stock-threshold-input" value="${it.kuszob != null ? it.kuszob : ''}" placeholder="—" data-nev="${escapeHtml(it.nev)}"></td>`;
       tbody.appendChild(tr);
+
+      // Mobil, lenyíló kártyás sor — alapból csak a név és a készlet
+      // látszik, minden más adat a kártya kinyitásakor jelenik meg.
+      const row = document.createElement('div');
+      row.className = 'acc-row';
+      row.innerHTML = `
+        <button type="button" class="acc-summary">
+          <span class="acc-summary-name">${escapeHtml(it.nev)} ${alacsonyBadge}</span>
+          <span class="acc-summary-value ${keszletCls}">${it.keszlet} ${escapeHtml(it.me || '')}</span>
+          <span class="acc-chevron">▾</span>
+        </button>
+        <div class="acc-details" hidden>
+          <div class="acc-detail-row"><span>Csoport</span><span>${escapeHtml(it.csoportNev)}</span></div>
+          <div class="acc-detail-row"><span>Bevételezve</span><span>${it.bevetelezve} ${escapeHtml(it.me || '')}</span></div>
+          <div class="acc-detail-row"><span>Eladva</span><span>${it.eladva} ${escapeHtml(it.me || '')}</span></div>
+          <div class="acc-detail-row"><span>Utolsó bevételezés</span><span>${it.utolsoBevetelezes ? fmtDate(it.utolsoBevetelezes) : '—'}</span></div>
+          <div class="acc-detail-row">
+            <span>Riasztási küszöb</span>
+            <input type="number" min="0" class="stock-threshold-input" value="${it.kuszob != null ? it.kuszob : ''}" placeholder="—" data-nev="${escapeHtml(it.nev)}">
+          </div>
+        </div>`;
+      accList.appendChild(row);
     });
-    tbody.querySelectorAll('.stock-threshold-input').forEach((inp) => {
+    document.querySelectorAll('.stock-threshold-input').forEach((inp) => {
       inp.addEventListener('change', () => saveThreshold('cikk', inp.dataset.nev, inp.value, inp));
+    });
+    accList.querySelectorAll('.acc-summary').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = btn.closest('.acc-row');
+        const details = row.querySelector('.acc-details');
+        const isOpen = row.classList.toggle('is-open');
+        details.hidden = !isOpen;
+      });
     });
   }
   makeSortableTable('stock-table');
@@ -3489,7 +3596,7 @@ async function loadStockReceiptLog() {
       <td class="num">${r.mennyiseg} ${escapeHtml(r.me || '')}</td>
       <td>${escapeHtml(r.szallito || '—')}</td>
       <td>${escapeHtml(r.megjegyzes || '—')}</td>
-      <td data-no-sort>${r.szamlaFajl ? `<a href="/api/stock/receipt-file?id=${r.id}" target="_blank" class="btn-tiny">📎 Számla</a>` : '—'}</td>
+      <td data-no-sort>${r.szamlaFajl ? `<a href="/api/stock/receipt-file?file=${encodeURIComponent(r.szamlaFajl)}" target="_blank" class="btn-tiny">📎 Számla</a>` : '—'}</td>
       <td><button class="btn-delete-receipt" data-id="${r.id}" title="Törlés">✕</button></td>`;
     logTbody.appendChild(tr);
   });
@@ -3629,18 +3736,42 @@ function resetMasterdataForm() {
 }
 listen('md-cancel-btn', 'click', resetMasterdataForm);
 
+const masterdataPaginator = new Paginator();
+let masterdataSort = { key: 'nev', dir: 'asc' };
+
 async function loadMasterdataView() {
   loadMasterdataGroups();
   const data = await api('/api/products/master');
   const q = masterdataFilter.q.toLowerCase();
-  const items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
+  let items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
+
+  const { key, dir } = masterdataSort;
+  items = [...items].sort((a, b) => {
+    const av = a[key] ?? '', bv = b[key] ?? '';
+    const cmp = typeof av === 'number' && typeof bv === 'number'
+      ? av - bv
+      : String(av).localeCompare(String(bv), 'hu', { numeric: true });
+    return dir === 'asc' ? cmp : -cmp;
+  });
+
+  document.querySelectorAll('#masterdata-table .reg-sortable').forEach((th) => {
+    th.querySelector('.sort-arrow')?.remove();
+    if (th.dataset.sort === key) {
+      th.insertAdjacentHTML('beforeend', `<span class="sort-arrow">${dir === 'asc' ? '▲' : '▼'}</span>`);
+    }
+  });
 
   const tbody = document.querySelector('#masterdata-table tbody');
+  const accList = document.getElementById('masterdata-acc-list');
   tbody.innerHTML = '';
+  accList.innerHTML = '';
   if (!items.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a keresésnek megfelelő cikk.</td></tr>';
+    accList.innerHTML = '<p class="empty-state">Nincs a keresésnek megfelelő cikk.</p>';
+    document.getElementById('masterdata-pagination').innerHTML = '';
   } else {
-    items.forEach((it) => {
+    const pageData = masterdataPaginator.slice(items);
+    pageData.forEach((it) => {
       const tr = document.createElement('tr');
       let statusCell;
       if (it.isNewPending) statusCell = '<span class="ntak-badge pending">Új — függőben</span>';
@@ -3656,7 +3787,32 @@ async function loadMasterdataView() {
         <td><button class="btn-tiny md-edit-btn" data-nev="${escapeHtml(it.nev)}">Szerkesztés</button></td>`;
       tbody.appendChild(tr);
       tr.querySelector('.md-edit-btn').addEventListener('click', () => fillMasterdataForm(it));
+
+      // Mobil, lenyíló kártyás sor — alapból csak a név és az ár látszik.
+      const row = document.createElement('div');
+      row.className = 'acc-row';
+      row.innerHTML = `
+        <button type="button" class="acc-summary">
+          <span class="acc-summary-name">${escapeHtml(it.nev)}</span>
+          <span class="acc-summary-value">${fmtHuf(it.bruttoar)}</span>
+          <span class="acc-chevron">▾</span>
+        </button>
+        <div class="acc-details" hidden>
+          <div class="acc-detail-row"><span>Csoport</span><span>${escapeHtml(it.csoportNev)}</span></div>
+          <div class="acc-detail-row"><span>ÁFA kód</span><span>${escapeHtml(it.afakod)}</span></div>
+          <div class="acc-detail-row"><span>Vonalkód</span><span>${escapeHtml(it.vonalkod || '—')}</span></div>
+          <div class="acc-detail-row"><span>Állapot</span>${statusCell}</div>
+          <div class="acc-actions"><button class="btn-tiny acc-md-edit-btn">Szerkesztés</button></div>
+        </div>`;
+      accList.appendChild(row);
+      row.querySelector('.acc-md-edit-btn').addEventListener('click', () => fillMasterdataForm(it));
+      row.querySelector('.acc-summary').addEventListener('click', () => {
+        const details = row.querySelector('.acc-details');
+        const isOpen = row.classList.toggle('is-open');
+        details.hidden = !isOpen;
+      });
     });
+    masterdataPaginator.renderControls(document.getElementById('masterdata-pagination'), () => loadMasterdataView());
   }
 
   const chTbody = document.querySelector('#masterdata-changes-table tbody');
@@ -3678,14 +3834,24 @@ async function loadMasterdataView() {
       chTbody.appendChild(tr);
     });
   }
-  makeSortableTable('masterdata-table');
   makeSortableTable('masterdata-changes-table');
 }
+document.querySelectorAll('#masterdata-table .reg-sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    if (masterdataSort.key === th.dataset.sort) {
+      masterdataSort.dir = masterdataSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      masterdataSort = { key: th.dataset.sort, dir: 'asc' };
+    }
+    masterdataPaginator.page = 1;
+    loadMasterdataView();
+  });
+});
 
 let masterdataSearchTimer = null;
 listen('masterdata-search-input', 'input', (e) => {
   clearTimeout(masterdataSearchTimer);
-  masterdataSearchTimer = setTimeout(() => { masterdataFilter.q = e.target.value.trim(); loadMasterdataView(); }, 300);
+  masterdataSearchTimer = setTimeout(() => { masterdataFilter.q = e.target.value.trim(); masterdataPaginator.page = 1; loadMasterdataView(); }, 300);
 });
 
 listen('masterdata-form', 'submit', async (e) => {
@@ -3703,6 +3869,7 @@ listen('masterdata-form', 'submit', async (e) => {
   try {
     const body = {
       megnevezes: megnevezesValue,
+      originalMegnevezes: masterdataEditingOriginal || undefined,
       bruttoar: document.getElementById('md-ar-input').value,
       afakod: document.getElementById('md-afa-input').value.trim(),
       me: document.getElementById('md-me-input').value.trim(),

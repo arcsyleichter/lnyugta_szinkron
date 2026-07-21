@@ -642,17 +642,16 @@
         </div>
         <div class="table-scroll">
           <table class="data-table" id="products-table">
-          <thead><tr><th>Termék</th><th class="td-right">Mennyiség</th><th class="td-right">Nyugtákon</th><th class="td-right">Árbevétel</th></tr></thead>
+          <thead><tr>
+            <th data-sort="nev" class="reg-sortable">Termék</th>
+            <th data-sort="mennyiseg" class="reg-sortable td-right">Mennyiség</th>
+            <th data-sort="nyugtaszam" class="reg-sortable td-right">Nyugtákon</th>
+            <th data-sort="arbevetel" class="reg-sortable td-right">Árbevétel</th>
+          </tr></thead>
           <tbody></tbody>
           </table>
         </div>
-        <div class="table-footer">
-          <span id="products-count"></span>
-          <div class="pager">
-            <button class="btn-tiny" id="products-prev">‹ Előző</button>
-            <button class="btn-tiny" id="products-next">Következő ›</button>
-          </div>
-        </div>
+        <div id="products-pagination"></div>
       </div>
     </section>
 
@@ -673,12 +672,22 @@
           <span class="stock-form-msg" id="new-group-msg"></span>
         </div>
 
-        <div class="table-scroll">
+        <div class="table-scroll desktop-table-wrap">
           <table class="data-table" id="masterdata-table">
-          <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bruttó ár</th><th>ÁFA kód</th><th>Vonalkód</th><th>Állapot</th><th></th></tr></thead>
+          <thead><tr>
+            <th data-sort="nev" class="reg-sortable">Cikk</th>
+            <th data-sort="csoportNev" class="reg-sortable">Csoport</th>
+            <th data-sort="bruttoar" class="reg-sortable td-right">Bruttó ár</th>
+            <th data-sort="afakod" class="reg-sortable">ÁFA kód</th>
+            <th data-sort="vonalkod" class="reg-sortable">Vonalkód</th>
+            <th data-sort="status" class="reg-sortable">Állapot</th>
+            <th></th>
+          </tr></thead>
           <tbody></tbody>
           </table>
         </div>
+        <div class="acc-list" id="masterdata-acc-list"></div>
+        <div id="masterdata-pagination"></div>
       </div>
 
       <div class="card">
@@ -795,17 +804,16 @@
         </div>
         <div class="table-scroll">
           <table class="data-table" id="receipts-table">
-          <thead><tr><th>Nyugtaszám</th><th>Dátum</th><th>Fizetési mód</th><th class="td-right">Összeg</th></tr></thead>
+          <thead><tr>
+            <th data-sort="bsz" class="reg-sortable">Nyugtaszám</th>
+            <th data-sort="keltdat" class="reg-sortable">Dátum</th>
+            <th data-sort="osszeg" class="reg-sortable td-right">Összeg</th>
+            <th data-sort="fizmod" class="reg-sortable">Fizetési mód</th>
+          </tr></thead>
           <tbody></tbody>
           </table>
         </div>
-        <div class="table-footer">
-          <span id="receipts-count"></span>
-          <div class="pager">
-            <button class="btn-tiny" id="receipts-prev">‹ Előző</button>
-            <button class="btn-tiny" id="receipts-next">Következő ›</button>
-          </div>
-        </div>
+        <div id="receipts-pagination"></div>
       </div>
     </section>
 
@@ -857,12 +865,13 @@
 
         <div class="stock-group-tiles" id="stock-group-tiles"></div>
 
-        <div class="table-scroll">
+        <div class="table-scroll desktop-table-wrap">
           <table class="data-table" id="stock-table">
           <thead><tr><th>Cikk</th><th>Csoport</th><th class="td-right">Bevételezve</th><th class="td-right">Eladva</th><th class="td-right">Készlet</th><th>Utolsó bevételezés</th><th data-no-sort>Riasztási küszöb</th></tr></thead>
           <tbody></tbody>
           </table>
         </div>
+        <div class="acc-list" id="stock-acc-list"></div>
       </div>
     </section>
 
@@ -1561,10 +1570,17 @@
         </div>
         <div class="table-scroll">
         <table class="data-table" id="reseller-companies-table">
-          <thead><tr><th>Cégnév</th><th>Telephely</th><th>Adószám</th><th>Város</th><th>Utolsó szinkron</th></tr></thead>
+          <thead><tr>
+            <th data-sort="nev" class="reg-sortable">Cégnév</th>
+            <th data-sort="telephelyNev" class="reg-sortable">Telephely</th>
+            <th data-sort="adoszam" class="reg-sortable">Adószám</th>
+            <th data-sort="varos" class="reg-sortable">Város</th>
+            <th data-sort="lastSync" class="reg-sortable">Utolsó szinkron</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
         </div>
+        <div id="reseller-companies-pagination"></div>
       </div>
 
       <div class="card">

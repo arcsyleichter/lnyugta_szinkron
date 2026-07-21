@@ -27,6 +27,13 @@ const { DatabaseSync } = require('node:sqlite');
 // ---------------------------------------------------------------------------
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
+// Alapértelmezetten KIZÁRÓLAG a helyi gépről (localhost) fogad kapcsolatot —
+// ez egy védelmi réteg a tűzfal-szabályok MELLETT (nem helyette): az
+// Apache ugyanazon a gépen fut, és localhost-on keresztül proxyzza a
+// kéréseket ide, így a Node folyamatnak SOSEM kellene közvetlenül,
+// kívülről elérhetőnek lennie. Ha valamiért mégis szükség lenne rá (pl.
+// egy másik gépről futó reverse proxy), a HOST env-változóval felülírható.
+const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = path.join(__dirname, 'data');
 const COMPANIES_DIR = path.join(DATA_DIR, 'companies');
 const SYNC_META_PATH = path.join(DATA_DIR, 'sync-meta.json');
@@ -282,6 +289,25 @@ stockDb.exec(`
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
+// A fájl TARTALMA (mágikus bájtok) alapján dönti el, milyen típusú —
+// SOSEM a kliens által küldött fájlnévben/MIME-ben bízunk, mert azt
+// bárki tetszőlegesre írhatja. Csak a ténylegesen szükséges, ártalmatlan
+// formátumokat engedjük át; minden más (pl. futtatható fájlok, szkriptek,
+// HTML) elutasításra kerül. Visszatérési érték: a helyes kiterjesztés,
+// vagy null, ha egyik ismert típusnak sem felel meg.
+function detectSafeFileType(buf) {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return '.jpg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return '.png';
+  if (buf.slice(0, 4).toString('ascii') === '%PDF') return '.pdf';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return '.webp';
+  if (buf.slice(4, 8).toString('ascii') === 'ftyp') {
+    const brand = buf.slice(8, 12).toString('ascii');
+    if (['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1'].includes(brand)) return '.heic';
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Cikktörzs kétirányú szinkron — a webes felület (egyenként, tömegesen vagy
 // CSV/Excel importtal) tud terméktörzs-módosítást kezdeményezni, de ezt NEM
@@ -348,6 +374,21 @@ usersDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_invite_token ON users(invite_token);
   CREATE INDEX IF NOT EXISTS idx_users_ceg ON users(ceg_kulcs);
   CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
+
+  -- Valódi, szerver-oldali munkamenet-visszavonás. A session cookie-k
+  -- önmagukban érvényes, aláírt tokenek (nincs szerver-oldali "store"),
+  -- ezért kijelentkezéskor NEM elég a böngészőben törölni a sütit — ha
+  -- valaki korábban lemásolta a token értékét (megosztott gépen, stb.),
+  -- az önmagában a lejáratáig továbbra is érvényes maradna. Ez a tábla
+  -- ezt zárja ki: minden tokenhez egyedi azonosítót (jti) adunk, és
+  -- kijelentkezéskor ide kerül — az érvényesség-ellenőrzés mindig
+  -- megnézi, nincs-e itt.
+  CREATE TABLE IF NOT EXISTS revoked_sessions (
+    jti TEXT PRIMARY KEY,
+    revoked_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_revoked_sessions_exp ON revoked_sessions(expires_at);
 `);
 
 // ---------------------------------------------------------------------------
@@ -962,7 +1003,11 @@ async function sendInviteEmail(link, { email, nev, role }) {
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
 
 function signSession(payload) {
-  const body = b64url(JSON.stringify(payload));
+  // Minden tokenhez egyedi azonosító (jti) — ez teszi lehetővé, hogy
+  // kijelentkezéskor VALÓBAN, szerver-oldalon is érvényteleníthető
+  // legyen, ne csak a böngésző felejtse el.
+  const withJti = { ...payload, jti: payload.jti || crypto.randomBytes(12).toString('hex') };
+  const body = b64url(JSON.stringify(withJti));
   const sig = crypto.createHmac('sha256', SECRETS.sessionSecret).update(body).digest('base64url');
   return `${body}.${sig}`;
 }
@@ -974,8 +1019,25 @@ function verifySession(token) {
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     if (!payload.exp || Date.now() > payload.exp) return null;
+    if (payload.jti && isSessionRevoked(payload.jti)) return null;
     return payload;
   } catch (_) { return null; }
+}
+function isSessionRevoked(jti) {
+  return !!usersDb.prepare('SELECT 1 FROM revoked_sessions WHERE jti = ?').get(jti);
+}
+function revokeSession(token) {
+  if (!token || !token.includes('.')) return;
+  try {
+    const [body] = token.split('.');
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!payload.jti || !payload.exp) return;
+    // Alkalomszerű takarítás — a már úgyis lejárt bejegyzéseket
+    // eltávolítjuk, hogy a tábla ne nőjön a végtelenségig.
+    usersDb.prepare('DELETE FROM revoked_sessions WHERE expires_at < ?').run(Date.now());
+    usersDb.prepare('INSERT OR IGNORE INTO revoked_sessions (jti, revoked_at, expires_at) VALUES (?, ?, ?)')
+      .run(payload.jti, new Date().toISOString(), payload.exp);
+  } catch (_) { /* rosszul formázott token — nincs mit visszavonni */ }
 }
 function parseCookies(header) {
   const out = {};
@@ -1086,6 +1148,39 @@ function sendRateLimited(res, retryAfterSeconds) {
   sendJson(res, 429, { error: 'Túl sok sikertelen bejelentkezési kísérlet. Próbáld újra később.', retryAfterSeconds }, { 'Retry-After': String(retryAfterSeconds) });
 }
 
+// ---------------------------------------------------------------------------
+// ÁLTALÁNOS, újrahasznosítható sebesség-korlátozó — bármilyen érzékeny
+// végponthoz (email küldés, feltöltés, stb.), nem csak bejelentkezéshez.
+// Minden hívás egyszerre ELLENŐRIZ és RÖGZÍT is (a bejelentkezéssel
+// ellentétben itt nincs "sikeres próbálkozás törli a számlálót" logika —
+// egy jelszó-visszaállítási KÉRÉS attól még számít a korlátba, hogy
+// egyébként létező email címre irányult-e).
+// ---------------------------------------------------------------------------
+const genericRateLimits = new Map(); // "bucket::key" -> { count, windowStart }
+function checkGenericRateLimit(bucket, key, maxAttempts, windowMs) {
+  const mapKey = `${bucket}::${key}`;
+  const now = Date.now();
+  let entry = genericRateLimits.get(mapKey);
+  if (!entry || now - entry.windowStart > windowMs) {
+    entry = { count: 0, windowStart: now };
+  }
+  entry.count += 1;
+  genericRateLimits.set(mapKey, entry);
+  if (entry.count > maxAttempts) {
+    return { allowed: false, retryAfterSeconds: Math.ceil((entry.windowStart + windowMs - now) / 1000) };
+  }
+  return { allowed: true };
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of genericRateLimits.entries()) {
+    if (now - entry.windowStart > 24 * 60 * 60 * 1000) genericRateLimits.delete(key);
+  }
+}, 60 * 60 * 1000).unref();
+function sendGenericRateLimited(res, retryAfterSeconds, message) {
+  sendJson(res, 429, { error: message || 'Túl sok próbálkozás. Kérjük, próbáld újra később.', retryAfterSeconds }, { 'Retry-After': String(retryAfterSeconds) });
+}
+
 // Globális biztonsági HTTP-fejlécek — minden válaszra rákerülnek, mert a
 // kérés-kezelő legelején hívjuk meg (res.setHeader jelen esetben megelőzi és
 // összeolvad a későbbi res.writeHead / sendJson hívásokban átadott fejlécekkel).
@@ -1120,6 +1215,18 @@ async function readJsonBody(req) {
   if (!buf.length) return {};
   try { return JSON.parse(buf.toString('utf8')); } catch (_) { return {}; }
 }
+
+// Szöveges mezők hossz-korlátozása — enélkül bárki (akár csak véletlenül,
+// akár szándékosan) tetszőlegesen hosszú szöveget írhatna be minden egyes
+// mezőbe, ami adatbázis-duzzadáshoz, illetve az androidos szinkron
+// oldalán váratlan hibákhoz vezethet. A kliens-oldali `maxlength` önmagában
+// NEM elég, mert egy közvetlen API-hívással megkerülhető — ez itt a
+// tényleges, szerver-oldali korlát.
+function clampStr(value, maxLen) {
+  const s = String(value ?? '').trim();
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
 // A myPOS (és általában bármilyen klasszikus HTML-form) POST kéréseket
 // "application/x-www-form-urlencoded" formában küldi, nem JSON-t — erre
 // külön, egyszerű olvasót kell használni.
@@ -1257,6 +1364,8 @@ route('POST', '/api/client-error', async (req, res) => {
 route('POST', '/api/auth/logout', async (req, res) => {
   const session = requireAuth(req);
   if (session) logActivity({ type: 'company_logout', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Kijelentkezés.' });
+  const cookies = parseCookies(req.headers.cookie);
+  revokeSession(cookies.enysession);
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enysession=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
@@ -1329,7 +1438,7 @@ route('POST', '/api/telephely/create', async (req, res) => {
   if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hozhatsz létre új telephelyet.' });
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.kod);
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   const cim = String(body.cim || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
 
@@ -1356,7 +1465,7 @@ route('POST', '/api/telephely/update', async (req, res) => {
   if (session.role === 'manager' && kod !== session.telephelyKod) {
     return sendJson(res, 403, { error: 'Üzletvezetőként csak a saját telephelyed adatait szerkesztheted.' });
   }
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   const cim = String(body.cim || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
 
@@ -1466,6 +1575,20 @@ route('POST', '/api/auth/forgot-password', async (req, res) => {
   const { email } = await readJsonBody(req);
   const clean = String(email || '').trim().toLowerCase();
   const GENERIC_MSG = 'Ha ehhez az email címhez tartozik aktív fiók, hamarosan kapsz egy levelet a jelszó-visszaállításhoz.';
+
+  // Sebesség-korlátozás — KRITIKUS, mert ez a végpont ténylegesen emailt
+  // küld: enélkül bárki tömegesen tudná spamelni akár a saját
+  // felhasználóinkat, akár a Brevo email-küldési keretünket kimeríteni.
+  // Kettős védelem: (1) egy adott IP-ről összesen, akármilyen email
+  // címekkel próbálkozva is; (2) egy adott email címre célzottan.
+  const ip = getClientIp(req);
+  const ipLimit = checkGenericRateLimit('forgot-pw-ip', ip, 10, 15 * 60 * 1000);
+  if (!ipLimit.allowed) return sendGenericRateLimited(res, ipLimit.retryAfterSeconds);
+  if (clean) {
+    const emailLimit = checkGenericRateLimit('forgot-pw-email', clean, 3, 15 * 60 * 1000);
+    if (!emailLimit.allowed) return sendJson(res, 200, { ok: true, message: GENERIC_MSG }); // ne áruljuk el a korlátozást magának a célzott címnek
+  }
+
   if (!clean) return sendJson(res, 200, { ok: true, message: GENERIC_MSG });
 
   const u = usersDb.prepare(`SELECT id, email, nev, role, status FROM users WHERE email = ? AND role IN ('owner','manager','reseller')`).get(clean);
@@ -1602,6 +1725,8 @@ route('POST', '/api/auth/reseller-login', async (req, res) => {
 });
 
 route('POST', '/api/auth/reseller-logout', async (req, res) => {
+  const cookies = parseCookies(req.headers.cookie);
+  revokeSession(cookies.enyreseller);
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyreseller=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
@@ -1635,11 +1760,13 @@ route('GET', '/api/reseller/overview', async (req, res) => {
 route('POST', '/api/reseller/invite-owner', async (req, res) => {
   const reseller = requireReseller(req);
   if (!reseller) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rl = checkGenericRateLimit('invite-send', reseller.email, 20, 60 * 60 * 1000);
+  if (!rl.allowed) return sendGenericRateLimited(res, rl.retryAfterSeconds, 'Túl sok meghívó egy óra alatt. Próbáld újra később.');
   const body = await readJsonBody(req);
   const cegKulcs = companyKeyFromAdoszam(body.adoszam);
   if (cegKulcs.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
   const email = String(body.email || '').trim();
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
 
   const codes = readAccessCodes();
@@ -1668,10 +1795,12 @@ route('POST', '/api/profile/invite-manager', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   if (session.role === 'manager') return sendJson(res, 403, { error: 'Üzletvezetőként nem hívhatsz meg új felhasználót.' });
+  const rl = checkGenericRateLimit('invite-send', session.nev || session.companyKey, 20, 60 * 60 * 1000);
+  if (!rl.allowed) return sendGenericRateLimited(res, rl.retryAfterSeconds, 'Túl sok meghívó egy óra alatt. Próbáld újra később.');
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.telephelyKod);
   const email = String(body.email || '').trim();
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
   if (!listTelephelyek(session.cegKulcs).some((t) => t.kod === kod)) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
 
@@ -1757,11 +1886,13 @@ route('GET', '/api/profile/subscription', async (req, res) => {
 route('POST', '/api/admin/invite-user', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const rl = checkGenericRateLimit('invite-send', 'admin', 40, 60 * 60 * 1000);
+  if (!rl.allowed) return sendGenericRateLimited(res, rl.retryAfterSeconds, 'Túl sok meghívó egy óra alatt. Próbáld újra később.');
   const body = await readJsonBody(req);
   const role = String(body.role || '');
   if (!['reseller', 'owner', 'manager'].includes(role)) return sendJson(res, 400, { error: 'Érvénytelen szerepkör.' });
   const email = String(body.email || '').trim();
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   if (!email || !nev) return sendJson(res, 400, { error: 'A név és az email cím megadása kötelező.' });
 
   let cegKulcs = null, telephelyKod = null;
@@ -1995,7 +2126,7 @@ route('POST', '/api/admin/license/features/save', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   if (!nev) return sendJson(res, 400, { error: 'A funkció nevének megadása kötelező.' });
   const alapAr = Math.max(0, parseInt(body.alapAr, 10) || 0);
   const sorrend = parseInt(body.sorrend, 10) || 0;
@@ -2555,12 +2686,12 @@ route('POST', '/api/admin/registrations/company/add', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const { adoszam, nev } = await readJsonBody(req);
-  const cleanAdoszam = String(adoszam || '').trim();
+  const cleanAdoszam = clampStr(adoszam, 20);
   if (!cleanAdoszam) return sendJson(res, 400, { error: 'Az adószám megadása kötelező.' });
   const existing = licenseDb.prepare('SELECT id FROM reg_companies WHERE adoszam = ?').get(cleanAdoszam);
   if (existing) return sendJson(res, 409, { error: 'Ez az adószám már szerepel a nyilvántartásban.' });
   const result = licenseDb.prepare('INSERT INTO reg_companies (adoszam, nev, created_at) VALUES (?, ?, ?)')
-    .run(cleanAdoszam, String(nev || '').trim() || null, new Date().toISOString());
+    .run(cleanAdoszam, clampStr(nev, 150) || null, new Date().toISOString());
   logActivity({ type: 'reg_company_add', ok: true, companyKey: null, nev: 'admin', detail: `Regisztrációs cég felvéve: ${nev} (${cleanAdoszam})` });
   sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
 });
@@ -2572,7 +2703,7 @@ route('POST', '/api/admin/registrations/site/add', async (req, res) => {
   const company = licenseDb.prepare('SELECT id FROM reg_companies WHERE id = ?').get(companyId);
   if (!company) return sendJson(res, 404, { error: 'Ismeretlen cég.' });
   const result = licenseDb.prepare('INSERT INTO reg_sites (company_id, nev, varos, cim) VALUES (?, ?, ?, ?)')
-    .run(companyId, String(nev || '').trim() || 'Telephely', String(varos || '').trim() || null, String(cim || '').trim() || null);
+    .run(companyId, clampStr(nev, 100) || 'Telephely', clampStr(varos, 80) || null, clampStr(cim, 150) || null);
   sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
 });
 
@@ -2583,7 +2714,7 @@ route('POST', '/api/admin/registrations/site/save', async (req, res) => {
   const site = licenseDb.prepare('SELECT id FROM reg_sites WHERE id = ?').get(id);
   if (!site) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
   licenseDb.prepare('UPDATE reg_sites SET nev = ?, varos = ?, cim = ? WHERE id = ?')
-    .run(String(nev || '').trim() || null, String(varos || '').trim() || null, String(cim || '').trim() || null, id);
+    .run(clampStr(nev, 100) || null, clampStr(varos, 80) || null, clampStr(cim, 150) || null, id);
   sendJson(res, 200, { ok: true });
 });
 
@@ -2598,9 +2729,9 @@ route('POST', '/api/admin/registrations/device/add', async (req, res) => {
     INSERT INTO reg_devices (site_id, uuid, progtip, verzio, regdat, ervdat, email, telefon, kapcsnev, regmodel, regmanufacturer, statusz, szszelotag, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    b.siteId, b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
-    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
-    b.statusz || 'I', b.szszelotag || null, now, now
+    b.siteId, clampStr(b.uuid, 80) || null, clampStr(b.progtip, 40) || null, clampStr(b.verzio, 30) || null, clampStr(b.regdat, 30) || null, clampStr(b.ervdat, 30) || null,
+    clampStr(b.email, 150) || null, clampStr(b.telefon, 30) || null, clampStr(b.kapcsnev, 100) || null, clampStr(b.regmodel, 80) || null, clampStr(b.regmanufacturer, 80) || null,
+    clampStr(b.statusz, 5) || 'I', clampStr(b.szszelotag, 10) || null, now, now
   );
   sendJson(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
 });
@@ -2616,9 +2747,9 @@ route('POST', '/api/admin/registrations/device/save', async (req, res) => {
       kapcsnev = ?, regmodel = ?, regmanufacturer = ?, statusz = ?, szszelotag = ?, updated_at = ?
     WHERE id = ?
   `).run(
-    b.uuid || null, b.progtip || null, b.verzio || null, b.regdat || null, b.ervdat || null,
-    b.email || null, b.telefon || null, b.kapcsnev || null, b.regmodel || null, b.regmanufacturer || null,
-    b.statusz || null, b.szszelotag || null, new Date().toISOString(), b.id
+    clampStr(b.uuid, 80) || null, clampStr(b.progtip, 40) || null, clampStr(b.verzio, 30) || null, clampStr(b.regdat, 30) || null, clampStr(b.ervdat, 30) || null,
+    clampStr(b.email, 150) || null, clampStr(b.telefon, 30) || null, clampStr(b.kapcsnev, 100) || null, clampStr(b.regmodel, 80) || null, clampStr(b.regmanufacturer, 80) || null,
+    clampStr(b.statusz, 5) || null, clampStr(b.szszelotag, 10) || null, new Date().toISOString(), b.id
   );
   sendJson(res, 200, { ok: true });
 });
@@ -3448,6 +3579,9 @@ route('GET', '/api/products', async (req, res, query) => {
   const q = (query.q || '').trim();
   const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
   const offset = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
+  const sortCols = { nev: 'nt.megnevezes', mennyiseg: 'mennyiseg', nyugtaszam: 'nyugtaszam', arbevetel: 'arbevetel' };
+  const sortCol = sortCols[query.sort] || 'arbevetel';
+  const sortDir = query.order === 'asc' ? 'ASC' : 'DESC';
   const params = [from, to];
   let where = `nf.keltdat BETWEEN ? AND ? AND ${notStorno('nf')}`;
   if (q) { where += ' AND nt.megnevezes LIKE ?'; params.push(`%${q}%`); }
@@ -3457,7 +3591,7 @@ route('GET', '/api/products', async (req, res, query) => {
      FROM nytet nt JOIN nyfej nf ON nf.bsz = nt.bsz
      WHERE ${where}
      GROUP BY nt.megnevezes, nt.me
-     ORDER BY arbevetel DESC
+     ORDER BY ${sortCol} ${sortDir}
      LIMIT ? OFFSET ?`,
     [...params, limit, offset]
   );
@@ -3479,6 +3613,9 @@ route('GET', '/api/receipts', async (req, res, query) => {
   const max = query.max ? parseFloat(query.max) : null;
   const limit = Math.min(parseInt(query.limit || '25', 10) || 25, 200);
   const offset = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
+  const sortCols = { bsz: 'bsz', keltdat: 'keltdat', fizmod: 'fizmod', osszeg: 'osszeg' };
+  const sortCol = sortCols[query.sort] || 'id';
+  const sortDir = query.order === 'asc' ? 'ASC' : 'DESC';
 
   let where = `keltdat BETWEEN ? AND ? AND ${NOT_STORNO}`;
   const params = [from, to];
@@ -3489,7 +3626,7 @@ route('GET', '/api/receipts', async (req, res, query) => {
 
   const rows = all(k,
     `SELECT bsz, keltdat, fizmod, (bruttokp+bruttoafr+bruttokartya) AS osszeg
-     FROM nyfej WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+     FROM nyfej WHERE ${where} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`,
     [...params, limit, offset]
   );
   const totalRow = get(k, `SELECT COUNT(*) AS cnt FROM nyfej WHERE ${where}`, params);
@@ -3599,17 +3736,25 @@ route('POST', '/api/products/change', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
-  const megnevezes = String(body.megnevezes || '').trim();
+  const megnevezes = clampStr(body.megnevezes, 120);
   if (!megnevezes) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
+  // SZERVER-OLDALI kikényszerítés — a kliens is jelzi ezt, de az önmagában
+  // megkerülhető lenne (pl. közvetlen API-hívással); a cikk nevét a
+  // szinkron a NÉV alapján azonosítja, ezért egy szerkesztés közbeni
+  // átírás adatvesztéshez/duplikációhoz vezetne az androidos oldalon.
+  const originalMegnevezes = clampStr(body.originalMegnevezes, 120);
+  if (originalMegnevezes && originalMegnevezes !== megnevezes) {
+    return sendJson(res, 400, { error: 'A cikk neve szerkesztés közben nem módosítható — ez azonosítja a cikket a szinkronban. Törlés után vegyél fel új cikket, ha át szeretnéd nevezni.' });
+  }
   const bruttoar = parseFloat(body.bruttoar);
   if (!Number.isFinite(bruttoar) || bruttoar < 0) return sendJson(res, 400, { error: 'Érvénytelen bruttó ár.' });
-  const afakod = String(body.afakod || '').trim();
+  const afakod = clampStr(body.afakod, 10);
   if (!afakod) return sendJson(res, 400, { error: 'Az ÁFA kód kötelező.' });
   if (!VALID_AFA_CODES.includes(afakod)) return sendJson(res, 400, { error: `Érvénytelen ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
-  const me = String(body.me || '').trim() || 'Darab';
-  const csoportNev = String(body.csoportNev || '').trim() || null;
-  const vonalkod = String(body.vonalkod || '').trim() || null;
-  const afakodelv = String(body.afakodElviteli || '').trim() || null;
+  const me = clampStr(body.me, 20) || 'Darab';
+  const csoportNev = clampStr(body.csoportNev, 80) || null;
+  const vonalkod = clampStr(body.vonalkod, 40) || null;
+  const afakodelv = clampStr(body.afakodElviteli, 10) || null;
   if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
   addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
@@ -3621,7 +3766,7 @@ route('POST', '/api/products/group', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
-  const megnevezes = String(body.megnevezes || '').trim();
+  const megnevezes = clampStr(body.megnevezes, 80);
   if (!megnevezes) return sendJson(res, 400, { error: 'A csoport neve kötelező.' });
   addProductChange(session.companyKey, 'csoport_upsert', { megnevezes }, 'web_form');
   logActivity({ type: 'product_group_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: megnevezes });
@@ -3841,18 +3986,23 @@ route('POST', '/api/stock/receipt', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
-  const cikkNev = String(body.cikkNev || '').trim();
+  const cikkNev = clampStr(body.cikkNev, 120);
   const mennyiseg = parseFloat(body.mennyiseg);
   if (!cikkNev) return sendJson(res, 400, { error: 'A cikk neve kötelező.' });
   if (!Number.isFinite(mennyiseg) || mennyiseg <= 0) return sendJson(res, 400, { error: 'A mennyiségnek pozitív számnak kell lennie.' });
   const datum = /^\d{4}-\d{2}-\d{2}$/.test(body.datum || '') ? body.datum : todayIsoServer();
-  const me = String(body.me || '').trim() || null;
+  const me = clampStr(body.me, 20) || null;
   const beszerzesiAr = body.beszerzesiAr !== undefined && body.beszerzesiAr !== '' ? parseFloat(body.beszerzesiAr) : null;
-  const szallito = String(body.szallito || '').trim() || null;
-  const megjegyzes = String(body.megjegyzes || '').trim() || null;
+  const szallito = clampStr(body.szallito, 120) || null;
+  const megjegyzes = clampStr(body.megjegyzes, 500) || null;
 
   // Számla-fotó/fájl csatolása — opcionális, base64-ben érkezik (data URL
   // vagy nyers base64), a szerver menti fájlba, csak a fájlnevet tároljuk el.
+  // SZIGORÚ TÍPUS-ELLENŐRZÉS: csak a ténylegesen szükséges formátumok
+  // (kép + PDF) engedélyezettek, és nem a kiterjesztésnek/a kliens által
+  // állított MIME-nek hiszünk, hanem a fájl TARTALMÁT (mágikus bájtokat)
+  // is ellenőrizzük — enélkül bárki tetszőleges (pl. futtatható) fájlt
+  // tölthetne fel, csak átnevezve azt "kep.jpg"-re.
   let szamlaFajl = null;
   if (body.fajlAdat && body.fajlNev) {
     const MAX_BYTES = 8 * 1024 * 1024; // 8 MB — bőven elég egy telefonos fotóhoz/PDF-hez
@@ -3860,10 +4010,14 @@ route('POST', '/api/stock/receipt', async (req, res) => {
     const b64 = match ? match[2] : body.fajlAdat;
     const buf = Buffer.from(b64, 'base64');
     if (buf.length > MAX_BYTES) return sendJson(res, 400, { error: 'A csatolt fájl túl nagy (max. 8 MB).' });
-    const ext = (path.extname(String(body.fajlNev)) || '.jpg').slice(0, 6).replace(/[^a-zA-Z0-9.]/g, '');
+
+    const detectedExt = detectSafeFileType(buf);
+    if (!detectedExt) {
+      return sendJson(res, 400, { error: 'Csak kép (JPG, PNG, WEBP, HEIC) vagy PDF fájl csatolható.' });
+    }
     const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
     if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
-    szamlaFajl = `${crypto.randomBytes(12).toString('hex')}${ext}`;
+    szamlaFajl = `${crypto.randomBytes(12).toString('hex')}${detectedExt}`;
     fs.writeFileSync(path.join(safeDir, szamlaFajl), buf);
   }
 
@@ -3877,13 +4031,16 @@ route('POST', '/api/stock/receipt', async (req, res) => {
 });
 
 // A bevételezéshez csatolt számla-fájl (fotó/PDF) letöltése/megtekintése —
-// csak a saját cég munkamenete érheti el.
+// csak a saját cég munkamenete érheti el. SZÁNDÉKOSAN a véletlenszerű
+// fájlnevet (nem a sorszámozott adatbázis-id-t) használjuk keresési
+// kulcsként — egy egyszerű, növekvő szám tippelhető/végigpróbálható lenne,
+// a véletlenszerű fájlnév gyakorlatilag nem.
 route('GET', '/api/stock/receipt-file', async (req, res, query) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const id = parseInt(query.id, 10);
-  if (!id) return sendJson(res, 400, { error: 'Hiányzó id.' });
-  const row = stockDb.prepare(`SELECT szamla_fajl FROM bevetelezesek WHERE id = ? AND company_key = ?`).get(id, session.companyKey);
+  const file = String(query.file || '').replace(/[^a-zA-Z0-9.]/g, '');
+  if (!file) return sendJson(res, 400, { error: 'Hiányzó fájl-azonosító.' });
+  const row = stockDb.prepare(`SELECT szamla_fajl FROM bevetelezesek WHERE szamla_fajl = ? AND company_key = ?`).get(file, session.companyKey);
   if (!row || !row.szamla_fajl) return sendJson(res, 404, { error: 'Nincs csatolt fájl.' });
   const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'));
   const filePath = path.join(safeDir, row.szamla_fajl);
@@ -3964,7 +4121,7 @@ route('POST', '/api/stock/threshold', async (req, res) => {
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const body = await readJsonBody(req);
   const scope = body.scope === 'csoport' ? 'csoport' : 'cikk';
-  const nev = String(body.nev || '').trim();
+  const nev = clampStr(body.nev, 100);
   if (!nev) return sendJson(res, 400, { error: 'Hiányzó név.' });
   const kuszob = parseFloat(body.kuszob);
   if (!Number.isFinite(kuszob) || kuszob < 0) return sendJson(res, 400, { error: 'A küszöbnek nemnegatív számnak kell lennie.' });
@@ -4593,6 +4750,8 @@ route('POST', '/api/admin/login', async (req, res) => {
 route('POST', '/api/admin/logout', async (req, res) => {
   const admin = requireAdmin(req);
   if (admin) logActivity({ type: 'admin_logout', ok: true, companyKey: null, nev: null, detail: 'Admin kijelentkezett.' });
+  const cookies = parseCookies(req.headers.cookie);
+  revokeSession(cookies.enyadmin);
   sendJson(res, 200, { ok: true }, { 'Set-Cookie': `enyadmin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE ? '; Secure' : ''}` });
 });
 
@@ -4846,8 +5005,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`L-NYUGTA nézegető fut: http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`L-NYUGTA nézegető fut: http://${HOST}:${PORT}`);
 });
 
 // Rendezett leállás: minden nyitott céges adatbázis-kapcsolatot bezárunk.

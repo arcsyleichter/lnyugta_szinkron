@@ -844,3 +844,32 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .reg-sortable{ cursor:pointer; user-select:none; white-space:nowrap; }
 .reg-sortable:hover{ color:var(--jade-deep); }
 .reg-sortable .sort-arrow{ font-size:10px; margin-left:3px; opacity:0.6; }
+
+/* ============================================================
+   Lenyíló kártyás lista (mobilon) — Készlet és Cikktörzs nézeteknél.
+   Asztali gépen a teljes táblázat marad látható (van hozzá hely);
+   keskeny (≤880px) képernyőn ehelyett ez az összecsukható, csak a
+   legfontosabb 2 adatot alapból mutató lista jelenik meg.
+   ============================================================ */
+.acc-list{ display:none; }
+.desktop-table-wrap{ display:block; }
+@media (max-width:880px){
+  .acc-list{ display:block; }
+  .desktop-table-wrap{ display:none; }
+}
+.acc-row{ border:1.5px solid var(--line); border-radius:10px; margin-bottom:8px; overflow:hidden; background:#fff; }
+.acc-summary{
+  width:100%; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:12px 14px; background:none; border:none; cursor:pointer; text-align:left; font-family:inherit;
+}
+.acc-summary-name{ font-weight:600; font-size:14px; color:var(--text); flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
+.acc-summary-value{ font-family:var(--font-mono); font-weight:600; font-size:14.5px; color:var(--jade-deep); white-space:nowrap; }
+.acc-chevron{ color:var(--text-dim); font-size:12px; transition:transform .15s; flex:none; }
+.acc-row.is-open .acc-chevron{ transform:rotate(180deg); }
+.acc-details{ border-top:1px solid var(--line); padding:10px 14px 14px; background:var(--paper-dim); }
+.acc-detail-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; font-size:13px; border-bottom:1px dashed var(--line); }
+.acc-detail-row:last-child{ border-bottom:none; }
+.acc-detail-row > span:first-child{ color:var(--text-dim); }
+.acc-detail-row > span:last-child, .acc-detail-row input{ font-family:var(--font-mono); text-align:right; }
+.acc-detail-row input{ width:90px; padding:5px 8px; border:1.5px solid var(--line); border-radius:6px; }
+.acc-actions{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
