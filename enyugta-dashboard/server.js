@@ -568,6 +568,17 @@ licenseDb.exec(`
     updated_at TEXT NOT NULL
   );
 
+  -- Cégenként MAGA A CÉG (nem az admin) állítható, üzemeltetési jellegű
+  -- beállítások — ide kerül, hogy a Cikktörzs-szerkesztő megkövetelje-e az
+  -- NTAK-hoz szükséges kategória-mezőket. Alapból KI van kapcsolva (nem
+  -- minden cég NTAK-köteles vendéglátóhely), a cégtulajdonos a Profil
+  -- menüpontban egyetlen kapcsolóval be/ki tudja kapcsolni.
+  CREATE TABLE IF NOT EXISTS company_settings (
+    ceg_kulcs TEXT PRIMARY KEY,
+    ntak_aktiv INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+
   -- CSOMAGOK — egyes funkciók egy néven, egy áron, egyszerre adhatók ki
   -- ("csomagba kerülnek"), míg mások önállóan, külön fizetősek maradnak.
   -- Egy csomag csak egy KÉNYELMI GYŰJTŐNÉV — a tényleges hozzáférés
@@ -1920,6 +1931,28 @@ route('GET', '/api/profile/subscription', async (req, res) => {
     csomagok: packages,
     fizetesek: payments.map((p) => ({ orderId: p.order_id, cel: p.cel, osszeg: p.osszeg, penznem: p.penznem, allapot: p.allapot, letrehozva: p.letrehozva })),
   });
+});
+
+// A cég maga állítja be, NTAK-köteles vendéglátóhely-e — ha igen, a
+// Cikktörzs-szerkesztő innentől megköveteli az NTAK-kategória mezőket
+// minden cikknél (a rendszer nem tudja ezt automatikusan kitalálni).
+route('GET', '/api/profile/ntak-setting', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  sendJson(res, 200, { ntakAktiv: isCompanyNtakActive(session.cegKulcs) });
+});
+
+route('POST', '/api/profile/ntak-setting', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Csak a cégtulajdonos módosíthatja ezt a beállítást.' });
+  const { ntakAktiv } = await readJsonBody(req);
+  licenseDb.prepare(`
+    INSERT INTO company_settings (ceg_kulcs, ntak_aktiv, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET ntak_aktiv = excluded.ntak_aktiv, updated_at = excluded.updated_at
+  `).run(session.cegKulcs, ntakAktiv ? 1 : 0, new Date().toISOString());
+  logActivity({ type: 'ntak_setting_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: ntakAktiv ? 'NTAK-mezők bekapcsolva a Cikktörzsben.' : 'NTAK-mezők kikapcsolva a Cikktörzsben.' });
+  sendJson(res, 200, { ok: true, ntakAktiv: !!ntakAktiv });
 });
 
 // Admin: viszonteladó, cégtulajdonos vagy üzletvezető meghívása —
@@ -3698,8 +3731,19 @@ route('GET', '/api/vat-breakdown', async (req, res, query) => {
 route('GET', '/api/products/master', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const ntakAktiv = isCompanyNtakActive(session.cegKulcs);
+  // A "fokatjson"/"alkatjson"/"ntakszorzo"/"ntakme" oszlopok NEM léteznek
+  // minden cég cikkt-sémájában (régebbi androidos alkalmazás-verzióknál
+  // hiányozhatnak) — ha rájuk hivatkoznánk, amikor nincsenek ott, a teljes
+  // Cikktörzs-nézet egy szerverhibával elszállna. Ezért előbb ellenőrizzük.
+  const cikktColumns = all(session.companyKey, `PRAGMA table_info(cikkt)`);
+  const hasNtakCols = ['fokatjson', 'alkatjson', 'ntakszorzo', 'ntakme'].every((col) => cikktColumns.some((c) => c.name === col));
+  const ntakSelect = hasNtakCols
+    ? `c.fokatjson AS fokat, c.alkatjson AS alkat, c.ntakszorzo AS ntakSzorzo, c.ntakme AS ntakMe,`
+    : `NULL AS fokat, NULL AS alkat, NULL AS ntakSzorzo, NULL AS ntakMe,`;
   const rows = all(session.companyKey,
     `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status, c.afakodelv AS afakodElviteli,
+            ${ntakSelect}
             IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
      WHERE c.status = 'A' ORDER BY c.megnevezes`
@@ -3722,10 +3766,10 @@ route('GET', '/api/products/master', async (req, res) => {
   // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
   const existingNames = new Set(rows.map((r) => r.nev));
   for (const [nev, pl] of pendingMap) {
-    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, pendingChange: pl, isNewPending: true });
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, fokat: pl.fokatjson || null, alkat: pl.alkatjson || null, ntakSzorzo: pl.ntakszorzo ?? null, ntakMe: pl.ntakme || null, pendingChange: pl, isNewPending: true });
   }
   items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
-  sendJson(res, 200, { items });
+  sendJson(res, 200, { items, ntakAktiv });
 });
 
 route('GET', '/api/products/groups', async (req, res) => {
@@ -3768,9 +3812,19 @@ route('GET', '/api/products/groups', async (req, res) => {
 // ... } mezőt mostantól KÜLÖN, nem-generikus logikával dolgozzák fel az
 // androidos oldalon (nem a cikkt tábla generikus, mezőnév=oszlopnév alapú
 // illesztőjén keresztül) — ezért ismét belekerülhet a payloadba.
-function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }) {
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat, ntakSzorzo, ntakMe }) {
   const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
   if (csoportNev) payload.csoport = { megnevezes: csoportNev };
+  // FONTOS: a mezőnevek itt PONTOSAN a cikkt tábla valódi oszlopneveit
+  // követik (fokatjson/alkatjson/ntakszorzo/ntakme) — az androidos
+  // alkalmazás a payload minden kulcsát mezőnév=oszlopnév alapon,
+  // generikusan illeszti a cikkt táblára, és bármilyen ismeretlen
+  // mezőnév esetén elutasítja az EGÉSZ szinkront, ezért itt nem lehet
+  // "szebb", eltérő elnevezést használni.
+  if (fokat !== undefined) payload.fokatjson = fokat || null;
+  if (alkat !== undefined) payload.alkatjson = alkat || null;
+  if (ntakSzorzo !== undefined) payload.ntakszorzo = ntakSzorzo ?? null;
+  if (ntakMe !== undefined) payload.ntakme = ntakMe || null;
   return payload;
 }
 
@@ -3798,7 +3852,18 @@ route('POST', '/api/products/change', async (req, res) => {
   const vonalkod = clampStr(body.vonalkod, 40) || null;
   const afakodelv = clampStr(body.afakodElviteli, 10) || null;
   if (afakodelv && !VALID_AFA_CODES.includes(afakodelv)) return sendJson(res, 400, { error: `Érvénytelen elviteli ÁFA kód. Megengedett értékek: ${VALID_AFA_CODES.join(', ')}.` });
-  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev }), 'web_form');
+
+  // Az NTAK-kategória mezők (fő- és alkategória) csak akkor kötelezők,
+  // ha a cég a Profil menüpontban bekapcsolta az NTAK-os üzemmódot —
+  // enélkül a legtöbb cégnek felesleges, értelmezhetetlen mezők lennének.
+  const ntakAktiv = isCompanyNtakActive(session.cegKulcs);
+  const fokat = clampStr(body.fokat, 60) || null;
+  const alkat = clampStr(body.alkat, 60) || null;
+  if (ntakAktiv) {
+    if (!fokat) return sendJson(res, 400, { error: 'Az NTAK-főkategória megadása kötelező (a cég NTAK-os üzemmódban van — ez a Profil menüpontban kapcsolható ki).' });
+    if (!alkat) return sendJson(res, 400, { error: 'Az NTAK-alkategória megadása kötelező (a cég NTAK-os üzemmódban van — ez a Profil menüpontban kapcsolható ki).' });
+  }
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat }), 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
   sendJson(res, 200, { ok: true });
 });
@@ -3829,8 +3894,15 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
   const names = Array.isArray(body.names) ? body.names.filter(Boolean) : null;
   if (!csoportNev && !names) return sendJson(res, 400, { error: 'Válassz csoportot vagy cikkeket.' });
 
+  const cikktColumnsBulk = all(session.companyKey, `PRAGMA table_info(cikkt)`);
+  const hasNtakColsBulk = ['fokatjson', 'alkatjson', 'ntakszorzo', 'ntakme'].every((col) => cikktColumnsBulk.some((c) => c.name === col));
+  const ntakSelectBulk = hasNtakColsBulk
+    ? `c.fokatjson AS fokat, c.alkatjson AS alkat, c.ntakszorzo AS ntakSzorzo, c.ntakme AS ntakMe,`
+    : `NULL AS fokat, NULL AS alkat, NULL AS ntakSzorzo, NULL AS ntakMe,`;
   let products = all(session.companyKey,
-    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.afakodelv, IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
+    `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.afakodelv,
+            ${ntakSelectBulk}
+            IFNULL(g.megnevezes,'Nincs csoport') AS csoportNev
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon WHERE c.status = 'A'`
   );
   if (csoportNev) products = products.filter((p) => p.csoportNev === csoportNev);
@@ -3841,7 +3913,10 @@ route('POST', '/api/products/bulk-price', async (req, res) => {
     let newPrice = mode === 'percent' ? p.bruttoar * (1 + value / 100) : p.bruttoar + value;
     newPrice = Math.max(0, Math.round(newPrice));
     addProductChange(session.companyKey, 'cikk_upsert',
-      buildCikkPayload({ megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev }),
+      buildCikkPayload({
+        megnevezes: p.nev, me: p.me, bruttoar: newPrice, afakod: p.afakod, vonalkod: p.vonalkod, afakodelv: p.afakodelv, csoportNev: p.csoportNev,
+        fokat: p.fokat, alkat: p.alkat, ntakSzorzo: p.ntakSzorzo, ntakMe: p.ntakMe,
+      }),
       'web_bulk_price');
   }
   logActivity({ type: 'product_bulk_price', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${products.length} cikk ára módosítva (${mode === 'percent' ? value + '%' : value + ' Ft'})` });
@@ -4536,6 +4611,10 @@ route('GET', '/api/sync/companies', async (req, res) => {
 function isLicenseEnforceOn() {
   const row = licenseDb.prepare(`SELECT value FROM app_settings WHERE key = 'license_enforce'`).get();
   return row ? row.value === '1' : false;
+}
+function isCompanyNtakActive(cegKulcs) {
+  const row = licenseDb.prepare(`SELECT ntak_aktiv FROM company_settings WHERE ceg_kulcs = ?`).get(cegKulcs);
+  return row ? !!row.ntak_aktiv : false;
 }
 const LICENSE_TRIAL_DAYS = parseInt(process.env.LICENSE_TRIAL_DAYS || '7', 10);
 

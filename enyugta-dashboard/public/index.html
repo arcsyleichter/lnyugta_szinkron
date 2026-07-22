@@ -704,6 +704,8 @@
             <th data-sort="bruttoar" class="reg-sortable td-right">Bruttó ár</th>
             <th data-sort="afakod" class="reg-sortable">ÁFA kód</th>
             <th data-sort="vonalkod" class="reg-sortable">Vonalkód</th>
+            <th data-sort="fokat" class="reg-sortable md-ntak-col" hidden>NTAK főkategória</th>
+            <th data-sort="alkat" class="reg-sortable md-ntak-col" hidden>NTAK alkategória</th>
             <th data-sort="status" class="reg-sortable">Állapot</th>
             <th></th>
           </tr></thead>
@@ -756,6 +758,34 @@
               <option value="18%">18% (kedvezményes)</option>
               <option value="05%">5% (kedvezményes)</option>
             </select>
+          </div>
+          <div class="stock-field" id="md-ntak-fokat-field" hidden>
+            <label for="md-ntak-fokat-input">NTAK főkategória</label>
+            <input list="md-ntak-fokat-list" id="md-ntak-fokat-input" placeholder="pl. ETEL">
+            <datalist id="md-ntak-fokat-list">
+              <option value="ETEL">
+              <option value="ALKMENTESITAL_HELYBEN">
+              <option value="ALKOHOLOSITAL_HELYBEN">
+              <option value="ETEL_ELVITEL">
+              <option value="ALKMENTESITAL_ELVITEL">
+              <option value="ALKOHOLOSITAL_ELVITEL">
+            </datalist>
+          </div>
+          <div class="stock-field" id="md-ntak-alkat-field" hidden>
+            <label for="md-ntak-alkat-input">NTAK alkategória</label>
+            <input list="md-ntak-alkat-list" id="md-ntak-alkat-input" placeholder="pl. FOETEL">
+            <datalist id="md-ntak-alkat-list">
+              <option value="FOETEL">
+              <option value="LEVES">
+              <option value="DESSZERT">
+              <option value="PEKARU">
+              <option value="KAVE">
+              <option value="TEA_FORROCSOKOLADE">
+              <option value="UDITO">
+              <option value="SOR">
+              <option value="BOR">
+            </datalist>
+            <span class="field-hint">A lista csak gyakori példa — bármilyen, az NTAK hivatalos kódtárában szereplő értéket beírhatsz.</span>
           </div>
           <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
           <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
@@ -1044,6 +1074,19 @@
         <div class="card-title">Eszközök</div>
         <p class="card-subtitle" style="margin-bottom:14px;">a szinkronizáló eszközök (kasszák) listája — adj nekik egyedi nevet, hogy könnyebben megkülönböztesd őket (pl. "1-es kassza")</p>
         <div id="profil-device-list"></div>
+      </div>
+
+      <div class="card" id="profil-ntak-card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">NTAK-adatszolgáltatás</div>
+            <div class="card-subtitle" id="profil-ntak-desc">Betöltés…</div>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+            <input type="checkbox" id="profil-ntak-toggle" style="width:20px;height:20px;">
+            NTAK-köteles vagyunk
+          </label>
+        </div>
       </div>
 
       <div class="card" id="profil-fizetes-card">

@@ -270,6 +270,71 @@ test('Alapvető adat-végpontok', async (t) => {
   });
 });
 
+test('NTAK — cégenkénti kapcsoló és a Cikktörzs kötelező mezői', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('alapból ki van kapcsolva, és a mezők nem kötelezők', async () => {
+    const cookie = await getCompanySession();
+    const settingRes = await fetch(`${server.baseUrl}/api/profile/ntak-setting`, { headers: { Cookie: cookie } });
+    assert.equal((await settingRes.json()).ntakAktiv, false);
+
+    const res = await fetch(`${server.baseUrl}/api/products/change`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'NTAK teszt cikk 1', bruttoar: 500, afakod: '27%' }),
+    });
+    assert.equal(res.status, 200, 'NTAK-mezők nélkül is sikeresnek kell lennie, amíg a cég nincs NTAK-os módban');
+  });
+
+  await t.test('bekapcsolás után a fő- és alkategória kötelezővé válik', async () => {
+    const cookie = await getCompanySession();
+    const toggleRes = await fetch(`${server.baseUrl}/api/profile/ntak-setting`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ ntakAktiv: true }),
+    });
+    assert.equal(toggleRes.status, 200);
+
+    const withoutCategories = await fetch(`${server.baseUrl}/api/products/change`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'NTAK teszt cikk 2', bruttoar: 500, afakod: '27%' }),
+    });
+    assert.equal(withoutCategories.status, 400, 'kategóriák nélkül el kell utasítani, ha a cég NTAK-os módban van');
+
+    const withCategories = await fetch(`${server.baseUrl}/api/products/change`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'NTAK teszt cikk 3', bruttoar: 500, afakod: '27%', fokat: 'ETEL', alkat: 'FOETEL' }),
+    });
+    assert.equal(withCategories.status, 200, 'megadott kategóriákkal sikeresnek kell lennie');
+
+    const masterRes = await fetch(`${server.baseUrl}/api/products/master`, { headers: { Cookie: cookie } });
+    const masterBody = await masterRes.json();
+    assert.equal(masterBody.ntakAktiv, true);
+    const created = masterBody.items.find((it) => it.nev === 'NTAK teszt cikk 3');
+    assert.ok(created, 'az új cikknek meg kell jelennie függőben lévő tételként');
+    assert.equal(created.pendingChange.fokatjson, 'ETEL', 'a payload-nak a valódi cikkt oszlopnevet (fokatjson) kell használnia');
+    assert.equal(created.pendingChange.alkatjson, 'FOETEL');
+  });
+});
+
 test('NTAK — tartalék-lekérdezés, amikor nincs külön ntakrms tábla', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

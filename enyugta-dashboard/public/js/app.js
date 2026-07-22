@@ -3767,6 +3767,8 @@ function fillMasterdataForm(item) {
   document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
   document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
   document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodelv : item.afakodElviteli) || '';
+  document.getElementById('md-ntak-fokat-input').value = (item.pendingChange ? item.pendingChange.fokatjson : item.fokat) || '';
+  document.getElementById('md-ntak-alkat-input').value = (item.pendingChange ? item.pendingChange.alkatjson : item.alkat) || '';
   document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;
   document.getElementById('md-cancel-btn').hidden = false;
   document.getElementById('masterdata-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -3785,10 +3787,23 @@ listen('md-cancel-btn', 'click', resetMasterdataForm);
 
 const masterdataPaginator = new Paginator();
 let masterdataSort = { key: 'nev', dir: 'asc' };
+let masterdataNtakAktiv = false;
+
+function applyMasterdataNtakVisibility(ntakAktiv) {
+  masterdataNtakAktiv = ntakAktiv;
+  const fokatField = document.getElementById('md-ntak-fokat-field');
+  const alkatField = document.getElementById('md-ntak-alkat-field');
+  fokatField.hidden = !ntakAktiv;
+  alkatField.hidden = !ntakAktiv;
+  document.getElementById('md-ntak-fokat-input').required = ntakAktiv;
+  document.getElementById('md-ntak-alkat-input').required = ntakAktiv;
+  document.querySelectorAll('#masterdata-table .md-ntak-col').forEach((th) => { th.hidden = !ntakAktiv; });
+}
 
 async function loadMasterdataView() {
   loadMasterdataGroups();
   const data = await api('/api/products/master');
+  applyMasterdataNtakVisibility(data.ntakAktiv);
   const q = masterdataFilter.q.toLowerCase();
   let items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
 
@@ -3813,7 +3828,7 @@ async function loadMasterdataView() {
   tbody.innerHTML = '';
   accList.innerHTML = '';
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nincs a keresésnek megfelelő cikk.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nincs a keresésnek megfelelő cikk.</td></tr>';
     accList.innerHTML = '<p class="empty-state">Nincs a keresésnek megfelelő cikk.</p>';
     document.getElementById('masterdata-pagination').innerHTML = '';
   } else {
@@ -3824,12 +3839,15 @@ async function loadMasterdataView() {
       if (it.isNewPending) statusCell = '<span class="ntak-badge pending">Új — függőben</span>';
       else if (it.pendingChange) statusCell = `<span class="ntak-badge warn">Függőben: ${fmtHuf(it.pendingChange.bruttoar)}</span>`;
       else statusCell = '<span class="ntak-badge ok">Élő</span>';
+      const ntakColStyle = masterdataNtakAktiv ? '' : ' hidden';
       tr.innerHTML = `
         <td>${escapeHtml(it.nev)}</td>
         <td>${escapeHtml(it.csoportNev)}</td>
         <td class="num">${fmtHuf(it.bruttoar)}</td>
         <td>${escapeHtml(it.afakod)}</td>
         <td>${escapeHtml(it.vonalkod || '—')}</td>
+        <td class="md-ntak-col"${ntakColStyle}>${escapeHtml(it.fokat || '—')}</td>
+        <td class="md-ntak-col"${ntakColStyle}>${escapeHtml(it.alkat || '—')}</td>
         <td>${statusCell}</td>
         <td><button class="btn-tiny md-edit-btn" data-nev="${escapeHtml(it.nev)}">Szerkesztés</button></td>`;
       tbody.appendChild(tr);
@@ -3838,6 +3856,10 @@ async function loadMasterdataView() {
       // Mobil, lenyíló kártyás sor — alapból csak a név és az ár látszik.
       const row = document.createElement('div');
       row.className = 'acc-row';
+      const ntakDetailRows = masterdataNtakAktiv
+        ? `<div class="acc-detail-row"><span>NTAK főkategória</span><span>${escapeHtml(it.fokat || '—')}</span></div>
+           <div class="acc-detail-row"><span>NTAK alkategória</span><span>${escapeHtml(it.alkat || '—')}</span></div>`
+        : '';
       row.innerHTML = `
         <button type="button" class="acc-summary">
           <span class="acc-summary-name">${escapeHtml(it.nev)}</span>
@@ -3848,6 +3870,7 @@ async function loadMasterdataView() {
           <div class="acc-detail-row"><span>Csoport</span><span>${escapeHtml(it.csoportNev)}</span></div>
           <div class="acc-detail-row"><span>ÁFA kód</span><span>${escapeHtml(it.afakod)}</span></div>
           <div class="acc-detail-row"><span>Vonalkód</span><span>${escapeHtml(it.vonalkod || '—')}</span></div>
+          ${ntakDetailRows}
           <div class="acc-detail-row"><span>Állapot</span>${statusCell}</div>
           <div class="acc-actions"><button class="btn-tiny acc-md-edit-btn">Szerkesztés</button></div>
         </div>`;
@@ -3923,6 +3946,8 @@ listen('masterdata-form', 'submit', async (e) => {
       csoportNev: document.getElementById('md-csoport-input').value.trim(),
       vonalkod: document.getElementById('md-vonalkod-input').value.trim(),
       afakodElviteli: document.getElementById('md-afakodelv-input').value.trim(),
+      fokat: document.getElementById('md-ntak-fokat-input').value.trim(),
+      alkat: document.getElementById('md-ntak-alkat-input').value.trim(),
     };
     await api('/api/products/change', { method: 'POST', body: JSON.stringify(body) });
     msg.textContent = '✓ Mentve — a következő androidos szinkronig "függőben" marad.'; msg.className = 'stock-form-msg ok';
@@ -4024,10 +4049,45 @@ async function loadProfilView() {
     }
     loadProfilDeviceList();
     loadProfilSubscription();
+    loadProfilNtakSetting(isManager);
   } catch (e) {
     alert('Nem sikerült betölteni a profilt: ' + e.message);
   }
 }
+
+async function loadProfilNtakSetting(isManager) {
+  const toggle = document.getElementById('profil-ntak-toggle');
+  const desc = document.getElementById('profil-ntak-desc');
+  try {
+    const data = await api('/api/profile/ntak-setting');
+    toggle.checked = data.ntakAktiv;
+    updateNtakSettingDesc(data.ntakAktiv);
+    toggle.disabled = isManager;
+    if (isManager) desc.innerHTML += ' <i>(csak a cégtulajdonos módosíthatja)</i>';
+  } catch (e) {
+    desc.textContent = 'Nem sikerült betölteni: ' + e.message;
+  }
+}
+function updateNtakSettingDesc(ntakAktiv) {
+  const desc = document.getElementById('profil-ntak-desc');
+  desc.innerHTML = ntakAktiv
+    ? '<b>Bekapcsolva</b> — a Cikktörzsben minden cikknél kötelező megadni az NTAK fő- és alkategóriát.'
+    : '<b>Kikapcsolva</b> — a Cikktörzsben nem jelennek meg és nem is kötelezők az NTAK-kategória mezők.';
+}
+listen('profil-ntak-toggle', 'change', async (e) => {
+  const toggle = e.target;
+  const newValue = toggle.checked;
+  toggle.disabled = true;
+  try {
+    await api('/api/profile/ntak-setting', { method: 'POST', body: JSON.stringify({ ntakAktiv: newValue }) });
+    updateNtakSettingDesc(newValue);
+  } catch (err) {
+    alert('Nem sikerült menteni: ' + err.message);
+    toggle.checked = !newValue;
+  } finally {
+    toggle.disabled = false;
+  }
+});
 
 const PAYMENT_STATUS_LABELS = { FUGGOBEN: 'függőben', SIKERES: 'sikeres', SIKERTELEN: 'sikertelen' };
 
