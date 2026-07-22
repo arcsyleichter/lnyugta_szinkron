@@ -1077,7 +1077,8 @@ function buildSimplePdf(lines) {
 // előfizetési díjról. NEM hivatalos, számvitelileg elfogadott bizonylat —
 // a kérésnek megfelelően csak egy áttekinthető, letölthető/emailezhető
 // összefoglaló.
-function buildDemoInvoicePdf({ cegNev, adoszam, tetelNev, osszeg, penznem, datum, orderId, ismetlodo }) {
+function buildDemoInvoicePdf({ cegNev, adoszam, tetelek, penznem, datum, orderId, ismetlodo }) {
+  const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
   const lines = [
     { text: 'L-NYUGTA - Dijbekero / demo szamla', size: 16, y: 60, bold: true },
     { text: '(Tajekoztato jellegu bizonylat, nem hivatalos szamviteli szamla)', size: 9, y: 82 },
@@ -1085,16 +1086,23 @@ function buildDemoInvoicePdf({ cegNev, adoszam, tetelNev, osszeg, penznem, datum
     { text: `Bizonylatszám: ${orderId}`, size: 11, y: 140 },
     { text: `Vevő: ${cegNev}`, size: 11, y: 175 },
     { text: `Adószám: ${adoszam}`, size: 11, y: 195 },
-    { text: 'Tétel', size: 11, y: 240, bold: true },
-    { text: tetelNev, size: 11, y: 262 },
-    { text: `Összeg: ${osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 13, y: 290, bold: true },
-    { text: ismetlodo ? 'Ismétlődő, havi előfizetési díj - a következő terhelés kb. 1 hónap múlva esedékes.' : 'Kezdeti előfizetési díj - a szolgáltatás mostantól havonta automatikusan megújul.', size: 10, y: 315 },
-    { text: 'Fizetési mód: bankkártya (myPOS)', size: 10, y: 340 },
+    { text: 'Tételek', size: 11, y: 240, bold: true },
   ];
+  let y = 262;
+  for (const t of tetelek) {
+    lines.push({ text: `${t.nev} - ${t.osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 10.5, y });
+    y += 20;
+  }
+  y += 10;
+  lines.push({ text: `Összesen: ${osszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, y, bold: true });
+  y += 25;
+  lines.push({ text: ismetlodo ? 'Ismétlődő, havi előfizetési díj - a következő terhelés kb. 1 hónap múlva esedékes.' : 'Kezdeti előfizetési díj - a szolgáltatás mostantól havonta automatikusan megújul.', size: 10, y });
+  y += 22;
+  lines.push({ text: 'Fizetési mód: demo fizetés (nincs valódi bankkártya-terhelés)', size: 10, y });
   return buildSimplePdf(lines);
 }
 
-async function sendDemoInvoiceEmail({ cegKulcs, tetelNev, osszeg, penznem, orderId, ismetlodo }) {
+async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
   const codes = readAccessCodes();
   let email = codes[cegKulcs]?.email || '';
   const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
@@ -1115,12 +1123,16 @@ async function sendDemoInvoiceEmail({ cegKulcs, tetelNev, osszeg, penznem, order
   const cegNev = anySite?.nev || cegKulcs;
   const adoszam = anySite?.adoszam || '';
   const datum = todayIsoServer();
-  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, tetelNev, osszeg, penznem, datum, orderId, ismetlodo });
+  const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
+  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, tetelek, penznem, datum, orderId, ismetlodo });
+  const tetelSorokHtml = tetelek.map((t) => `<li>${escapeHtmlForEmail(t.nev)} — ${t.osszeg.toLocaleString('hu-HU')} ${penznem}</li>`).join('');
   await sendBrevoEmail({
     toEmail: email, toName: cegNev,
     subject: `L-NYUGTA — demo számla (${orderId})`,
     html: `<p>Kedves ${escapeHtmlForEmail(cegNev)}!</p>
-      <p>Sikeres fizetés történt: <b>${escapeHtmlForEmail(tetelNev)}</b> — ${osszeg.toLocaleString('hu-HU')} ${penznem}.</p>
+      <p>Sikeres fizetés történt:</p>
+      <ul>${tetelSorokHtml}</ul>
+      <p><b>Összesen: ${osszesen.toLocaleString('hu-HU')} ${penznem}</b></p>
       <p>A tájékoztató jellegű demo számlát csatoltan küldjük.</p>
       <p style="color:#888;font-size:12px;">Ez egy automatikus üzenet, nem hivatalos számviteli bizonylatról.</p>`,
     attachments: [{ name: `demo-szamla-${orderId}.pdf`, content: pdf }],
@@ -2906,58 +2918,58 @@ route('POST', '/api/payment/start', async (req, res) => {
 // ---------------------------------------------------------------------------
 // DEMO FIZETÉS — nincs mögötte valódi fizetési átjáró (myPOS nélkül is
 // használható). A fejlesztő kifejezett kérésére: a fizetési LÉPÉS meg van
-// jelenítve (ár, tétel, megerősítő gomb), de a tényleges terhelés csak
-// szimulált — azonnal "sikeresnek" jelöljük. A funkció innentől ugyanúgy
-// HAVONTA "megújul" (a napi ütemezett feladat automatikusan, valódi
-// terhelés nélkül meghosszabbítja), amíg a cég ki nem kapcsolja.
+// jelenítve (kosárszerűen — több funkció is kiválasztható, majd EGY közös
+// "Fizetés" gombbal, egy összesítő után), de a tényleges terhelés csak
+// szimulált — azonnal "sikeresnek" jelöljük. A funkciók innentől ugyanúgy
+// HAVONTA "megújulnak" (a napi ütemezett feladat automatikusan, valódi
+// terhelés nélkül meghosszabbítja), amíg a cég ki nem kapcsolja őket.
 // ---------------------------------------------------------------------------
 const DEMO_CARD_TOKEN = 'DEMO_TOKEN';
 
 route('POST', '/api/payment/demo-pay', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const { cel } = await readJsonBody(req);
-  let target;
-  try { target = resolvePaymentTarget(String(cel || '')); }
-  catch (e) { return sendJson(res, 400, { error: e.message }); }
-  if (!target.telephelyKod || !target.featureKey) {
-    return sendJson(res, 400, { error: 'A demo fizetés csak telephely-specifikus funkció-előfizetéshez használható.' });
-  }
-  // A demo-fizetés csak a SAJÁT telephelyére engedélyezett a bejelentkezett
-  // felhasználónak — ne lehessen más telephely nevében fizetést indítani.
-  if (target.telephelyKod !== session.telephelyKod) {
-    return sendJson(res, 403, { error: 'Csak a saját telephelyedre indíthatsz fizetést.' });
+  if (!session.telephelyKod) return sendJson(res, 400, { error: 'Előbb válassz telephelyet.' });
+  const { featureKeys } = await readJsonBody(req);
+  const keys = Array.isArray(featureKeys) ? [...new Set(featureKeys.filter(Boolean))] : [];
+  if (!keys.length) return sendJson(res, 400, { error: 'Nincs kiválasztott funkció.' });
+
+  const tetelek = [];
+  for (const key of keys) {
+    const f = licenseDb.prepare('SELECT key, nev, alap_ar FROM license_features WHERE key = ? AND aktiv = 1').get(key);
+    if (!f) return sendJson(res, 400, { error: `Ismeretlen vagy inaktív funkció: ${key}` });
+    if (!f.alap_ar) return sendJson(res, 400, { error: `A(z) "${f.nev}" funkciónak nincs ára beállítva.` });
+    tetelek.push({ key, nev: f.nev, osszeg: f.alap_ar });
   }
 
   const orderId = `LNYDEMO${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
   const lejarat = addDaysISO(todayIsoServer(), 30);
-  licenseDb.prepare(`
-    INSERT INTO license_payments (order_id, ceg_kulcs, telephely_kod, feature_key, cel, osszeg, penznem, allapot, kartya_token, ismetlodo, letrehozva, lezarva)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'SIKERES', ?, 1, ?, ?)
-  `).run(orderId, session.cegKulcs, target.telephelyKod, target.featureKey, cel, target.osszeg, target.penznem, DEMO_CARD_TOKEN, now, now);
+  for (const t of tetelek) {
+    licenseDb.prepare(`
+      INSERT INTO license_payments (order_id, ceg_kulcs, telephely_kod, feature_key, cel, osszeg, penznem, allapot, kartya_token, ismetlodo, letrehozva, lezarva)
+      VALUES (?, ?, ?, ?, ?, ?, 'HUF', 'SIKERES', ?, 1, ?, ?)
+    `).run(`${orderId}-${t.key}`, session.cegKulcs, session.telephelyKod, t.key, `funkcio_telephely:${session.telephelyKod}:${t.key}`, t.osszeg, DEMO_CARD_TOKEN, now, now);
 
-  licenseDb.prepare(`
-    INSERT INTO company_licenses (ceg_kulcs, telephely_kod, feature_key, ar, lejarat, aktiv, jovahagyta, kartya_token, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
-    ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET
-      lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, kartya_token = excluded.kartya_token, updated_at = excluded.updated_at
-  `).run(session.cegKulcs, target.telephelyKod, target.featureKey, target.osszeg, lejarat, `demo fizetés (${session.nev})`, DEMO_CARD_TOKEN, now);
+    licenseDb.prepare(`
+      INSERT INTO company_licenses (ceg_kulcs, telephely_kod, feature_key, ar, lejarat, aktiv, jovahagyta, kartya_token, updated_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET
+        lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, kartya_token = excluded.kartya_token, updated_at = excluded.updated_at
+    `).run(session.cegKulcs, session.telephelyKod, t.key, t.osszeg, lejarat, `demo fizetés (${session.nev})`, DEMO_CARD_TOKEN, now);
+  }
 
-  logActivity({ type: 'payment_demo', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `Demo fizetés: ${target.leiras}, ${target.osszeg} ${target.penznem} (${orderId})` });
+  const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
+  logActivity({ type: 'payment_demo', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `Demo fizetés (${session.telephelyKod}): ${tetelek.map((t) => t.nev).join(', ')} — összesen ${osszesen} HUF (${orderId})` });
 
   try {
-    const feature = licenseDb.prepare('SELECT nev FROM license_features WHERE key = ?').get(target.featureKey);
-    await sendDemoInvoiceEmail({
-      cegKulcs: session.cegKulcs, osszeg: target.osszeg, penznem: target.penznem, orderId, ismetlodo: false,
-      tetelNev: `${feature?.nev || target.featureKey} (${target.telephelyKod} telephely) - havi előfizetés (demo)`,
-    });
+    await sendDemoInvoiceEmail({ cegKulcs: session.cegKulcs, tetelek: tetelek.map((t) => ({ nev: `${t.nev} (${session.telephelyKod} telephely) - havi előfizetés (demo)`, osszeg: t.osszeg })), penznem: 'HUF', orderId, ismetlodo: false });
   } catch (e) {
     console.error('[fizetés] demo számla-email hiba:', e.message);
     logActivity({ type: 'payment_invoice_email', ok: false, companyKey: session.cegKulcs, nev: null, detail: e.message });
   }
 
-  sendJson(res, 200, { ok: true, orderId, lejarat });
+  sendJson(res, 200, { ok: true, orderId, lejarat, osszesen });
 });
 
 // A vásárló böngészője ide tér vissza a fizetés után (URL_OK/URL_Cancel) —
@@ -3043,7 +3055,7 @@ route('POST', '/api/payment/notify', async (req, res) => {
         ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET
           lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, kartya_token = excluded.kartya_token, updated_at = excluded.updated_at
       `).run(payment.ceg_kulcs, payment.telephely_kod, payment.feature_key, payment.osszeg, lejarat, `myPOS fizetés (${body.IPC_Trnref})`, body.CardToken || null, now);
-      invoiceInfo = { tetelNev: `${feature?.nev || payment.feature_key} (${payment.telephely_kod} telephely) - havi előfizetés`, ismetlodo: false };
+      invoiceInfo = { tetelek: [{ nev: `${feature?.nev || payment.feature_key} (${payment.telephely_kod} telephely) - havi előfizetés`, osszeg: payment.osszeg }], ismetlodo: false };
     } else if (payment.cel.startsWith('funkcio:')) {
       const key = payment.cel.slice(8);
       const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
@@ -3064,7 +3076,7 @@ route('POST', '/api/payment/notify', async (req, res) => {
   // jóváírását, ezért teljesen külön, saját try/catch-ben fut, és a hibája
   // csak naplózásra kerül.
   if (invoiceInfo) {
-    try { await sendDemoInvoiceEmail({ cegKulcs: payment.ceg_kulcs, osszeg: payment.osszeg, penznem: payment.penznem, orderId: body.OrderID, ...invoiceInfo }); }
+    try { await sendDemoInvoiceEmail({ cegKulcs: payment.ceg_kulcs, penznem: payment.penznem, orderId: body.OrderID, ...invoiceInfo }); }
     catch (e) { console.error('[fizetés] számla-email hiba:', e.message); logActivity({ type: 'payment_invoice_email', ok: false, companyKey: payment.ceg_kulcs, nev: null, detail: e.message }); }
   }
 
@@ -3164,8 +3176,8 @@ async function runRecurringBillingCycle() {
         logActivity({ type: 'payment_recurring', ok: true, companyKey: row.ceg_kulcs, nev: null, detail: `Havi megújítás sikeres${isDemo ? ' (demo)' : ''}: ${feature?.nev || row.feature_key} (${row.telephely_kod}), ${amount} HUF` });
         try {
           await sendDemoInvoiceEmail({
-            cegKulcs: row.ceg_kulcs, osszeg: amount, penznem: 'HUF', orderId, ismetlodo: true,
-            tetelNev: `${feature?.nev || row.feature_key} (${row.telephely_kod} telephely) - havi megújítás${isDemo ? ' (demo)' : ''}`,
+            cegKulcs: row.ceg_kulcs, penznem: 'HUF', orderId, ismetlodo: true,
+            tetelek: [{ nev: `${feature?.nev || row.feature_key} (${row.telephely_kod} telephely) - havi megújítás${isDemo ? ' (demo)' : ''}`, osszeg: amount }],
           });
         } catch (e) { console.error('[fizetés] ismétlődő számla-email hiba:', e.message); }
       } else {

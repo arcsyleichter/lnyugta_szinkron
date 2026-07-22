@@ -592,7 +592,7 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
     const cookie = await getCompanySession();
     const res = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
-      body: JSON.stringify({ cel: 'funkcio_telephely:01:MERLEGELES' }),
+      body: JSON.stringify({ featureKeys: ['MERLEGELES'] }),
     });
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -604,13 +604,29 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
     assert.equal(profileBody.features.find((f) => f.key === 'MERLEGELES').kivalasztva, true);
   });
 
-  await t.test('másik telephely nevében nem indítható demo-fizetés', async () => {
+  await t.test('kosárszerűen, több funkció egyszerre is fizethető, egy közös összesítővel', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'NTAK', nev: 'NTAK', alapAr: 2500 }),
+    });
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'VONALKOD', nev: 'Vonalkód generálás', alapAr: 800 }),
+    });
     const cookie = await getCompanySession();
     const res = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
-      body: JSON.stringify({ cel: 'funkcio_telephely:99:MERLEGELES' }),
+      body: JSON.stringify({ featureKeys: ['NTAK', 'VONALKOD'] }),
     });
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.osszesen, 2500 + 800, 'az összesítőnek a két tétel együttes árát kell mutatnia');
+
+    const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const profileBody = await profileRes.json();
+    assert.ok(profileBody.features.find((f) => f.key === 'NTAK').kivalasztva);
+    assert.ok(profileBody.features.find((f) => f.key === 'VONALKOD').kivalasztva);
   });
 
   await t.test('a demo-előfizetés is havonta automatikusan megújul, myPOS-konfiguráció nélkül is, valódi terhelési kísérlet nélkül', async () => {

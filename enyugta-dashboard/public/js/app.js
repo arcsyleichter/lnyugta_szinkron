@@ -4316,10 +4316,30 @@ listen('profil-ntak-toggle', 'change', async (e) => {
   }
 });
 
-function openDemoPaymentModal({ telephelyKod, featureKey, feature, checkbox }) {
-  document.getElementById('demo-payment-feature-name').textContent = feature.nev;
-  document.getElementById('demo-payment-telephely').textContent = `${telephelyKod} telephely`;
-  document.getElementById('demo-payment-price').textContent = `${fmtHuf(feature.alapAr)} / hó`;
+let profilFeaturesCart = new Set(); // kiválasztott, de MÉG NEM fizetett fizetős funkciók
+let profilFeaturesDataCache = null;
+
+function updateProfilFeaturesCartBar() {
+  const bar = document.getElementById('profil-features-cart-bar');
+  const summary = document.getElementById('profil-features-cart-summary');
+  if (!profilFeaturesCart.size || !profilFeaturesDataCache) { bar.hidden = true; return; }
+  const items = [...profilFeaturesCart].map((key) => profilFeaturesDataCache.features.find((f) => f.key === key)).filter(Boolean);
+  const total = items.reduce((s, f) => s + f.alapAr, 0);
+  summary.textContent = `${items.length} funkció kiválasztva — ${fmtHuf(total)} / hó`;
+  bar.hidden = false;
+}
+
+function openDemoPaymentModal() {
+  const data = profilFeaturesDataCache;
+  const items = [...profilFeaturesCart].map((key) => data.features.find((f) => f.key === key)).filter(Boolean);
+  if (!items.length) return;
+  document.getElementById('demo-payment-telephely').textContent = `${data.telephelyKod} telephely`;
+  document.getElementById('demo-payment-items').innerHTML = items.map((f) => `
+    <div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;">
+      <span>${escapeHtml(f.nev)}</span><span>${fmtHuf(f.alapAr)} / hó</span>
+    </div>`).join('');
+  const total = items.reduce((s, f) => s + f.alapAr, 0);
+  document.getElementById('demo-payment-total').textContent = `${fmtHuf(total)} / hó`;
   const msg = document.getElementById('demo-payment-msg');
   msg.textContent = '';
   const confirmBtn = document.getElementById('demo-payment-confirm-btn');
@@ -4329,7 +4349,8 @@ function openDemoPaymentModal({ telephelyKod, featureKey, feature, checkbox }) {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Feldolgozás…';
     try {
-      await api('/api/payment/demo-pay', { method: 'POST', body: JSON.stringify({ cel: `funkcio_telephely:${telephelyKod}:${featureKey}` }) });
+      await api('/api/payment/demo-pay', { method: 'POST', body: JSON.stringify({ featureKeys: [...profilFeaturesCart] }) });
+      profilFeaturesCart.clear();
       document.getElementById('demo-payment-modal-backdrop').hidden = true;
       loadProfilFeatures();
     } catch (err) {
@@ -4347,13 +4368,17 @@ listen('demo-payment-modal-close', 'click', () => {
 listen('demo-payment-modal-backdrop', 'click', (e) => {
   if (e.target.id === 'demo-payment-modal-backdrop') e.target.hidden = true;
 });
+listen('profil-features-pay-btn', 'click', openDemoPaymentModal);
 
 async function loadProfilFeatures() {
   const list = document.getElementById('profil-features-list');
   const subtitle = document.getElementById('profil-features-subtitle');
+  profilFeaturesCart.clear();
   try {
     const data = await api('/api/profile/features');
+    profilFeaturesDataCache = data;
     subtitle.textContent = `Válaszd ki, mely funkciókra van szükséged a(z) ${data.telephelyKod} telephelyen — a beállítás csak erre a telephelyre vonatkozik, a többi telephelyed külön állítható.`;
+    updateProfilFeaturesCartBar();
     if (!data.features.length) {
       list.innerHTML = '<p class="muted">Jelenleg nincs elérhető funkció a katalógusban.</p>';
       return;
@@ -4376,14 +4401,17 @@ async function loadProfilFeatures() {
         const feature = data.features.find((f) => f.key === key);
         const kivalasztva = e.target.checked;
 
-        // Fizetős funkció BEKAPCSOLÁSA — egy demo fizetési lépést mutatunk
-        // (nincs mögötte valódi bankkártya-terhelés), a tényleges
-        // bekapcsolás csak a megerősítés után történik meg.
-        if (kivalasztva && feature.alapAr > 0) {
-          e.target.checked = false; // amíg a demo fizetés nincs megerősítve, ne mutassa bekapcsoltnak
-          openDemoPaymentModal({ telephelyKod: data.telephelyKod, featureKey: key, feature, checkbox: e.target });
+        // Fizetős funkció, ami MÉG NINCS ténylegesen aktiválva — csak a
+        // kosárba kerül, nem hív azonnal API-t. A tényleges aktiválás a
+        // "Fizetés" gombra kattintva, egy összesítő után történik.
+        if (feature.alapAr > 0 && !feature.kivalasztva) {
+          if (kivalasztva) profilFeaturesCart.add(key); else profilFeaturesCart.delete(key);
+          row.classList.toggle('is-pending', kivalasztva);
+          updateProfilFeaturesCartBar();
           return;
         }
+        // Már aktív, fizetős funkció KIKAPCSOLÁSA — ez azonnali, nem
+        // igényel új fizetést, csak a meglévő előfizetést szünteti meg.
         e.target.disabled = true;
         try {
           await api('/api/profile/features/toggle', { method: 'POST', body: JSON.stringify({ featureKey: key, kivalasztva }) });
