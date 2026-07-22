@@ -333,6 +333,77 @@ test('Cikktörzs — termékfotó és göngyöleg-kapcsolás', async (t) => {
   });
 });
 
+test('Admin — funkció törlése a licenc-katalógusból', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+
+  await t.test('egy csak LEJÁRT/LETILTOTT kiosztással rendelkező funkció akadálytalanul törölhető', async () => {
+    const adminCookie = await getAdminCookie();
+    const saveRes = await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'TESZT_FUNKCIO', nev: 'Teszt funkció' }),
+    });
+    assert.equal(saveRes.status, 200);
+
+    // Egy MÁR LETILTOTT (aktiv:false) kiosztás — ez volt a bejelentett hiba
+    // gyökér-oka: egy ilyen, valójában nem élő sor is blokkolta a törlést.
+    const grantRes = await fetch(`${server.baseUrl}/api/admin/license/grant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', featureKey: 'TESZT_FUNKCIO', ar: 0, aktiv: false }),
+    });
+    assert.equal(grantRes.status, 200);
+
+    const deleteRes = await fetch(`${server.baseUrl}/api/admin/license/features/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'TESZT_FUNKCIO' }),
+    });
+    assert.equal(deleteRes.status, 200, 'egy csak letiltott kiosztással rendelkező funkciónak akadálytalanul törölhetőnek kell lennie, force nélkül is');
+  });
+
+  await t.test('egy VALÓBAN aktív kiosztással rendelkező funkció force nélkül elutasításra kerül, force-szal törölhető', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'TESZT_FUNKCIO2', nev: 'Teszt funkció 2' }),
+    });
+    await fetch(`${server.baseUrl}/api/admin/license/grant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', featureKey: 'TESZT_FUNKCIO2', ar: 500, aktiv: true }),
+    });
+
+    const blockedRes = await fetch(`${server.baseUrl}/api/admin/license/features/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'TESZT_FUNKCIO2' }),
+    });
+    assert.equal(blockedRes.status, 400);
+    const blockedBody = await blockedRes.json();
+    assert.equal(blockedBody.canForce, true, 'a válasznak jeleznie kell, hogy kényszerítéssel törölhető');
+    assert.equal(blockedBody.activeCount, 1);
+
+    const forcedRes = await fetch(`${server.baseUrl}/api/admin/license/features/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'TESZT_FUNKCIO2', force: true }),
+    });
+    assert.equal(forcedRes.status, 200, 'force:true esetén akkor is törlődnie kell, ha van aktív kiosztás');
+  });
+});
+
 test('Licenc-lekérdezés — soha nem szinkronizált cég', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

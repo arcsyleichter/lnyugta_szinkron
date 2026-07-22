@@ -2275,16 +2275,34 @@ route('POST', '/api/admin/license/features/rename-key', async (req, res) => {
 route('POST', '/api/admin/license/features/delete', async (req, res) => {
   const admin = requireAdmin(req);
   if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
-  const { key } = await readJsonBody(req);
+  const { key, force } = await readJsonBody(req);
   const feature = licenseDb.prepare('SELECT key, nev FROM license_features WHERE key = ?').get(key);
   if (!feature) return sendJson(res, 404, { error: 'Ismeretlen funkció-kulcs.' });
-  const inUse = licenseDb.prepare('SELECT COUNT(*) AS c FROM company_licenses WHERE feature_key = ?').get(key).c;
-  if (inUse > 0) {
-    return sendJson(res, 400, { error: `Ez a funkció ${inUse} cégnél van kiosztva — előbb vond vissza azoknál, vagy kapcsold ki helyette az "aktív" jelzőt.` });
+
+  // FONTOS: csak a TÉNYLEGESEN aktív (nem letiltott, nem lejárt)
+  // kiosztásokat számoljuk "használatban lévőnek" — egy régi, már
+  // letiltott vagy lejárt sor a company_licenses táblában (ami
+  // szándékosan megmarad, mint történeti adat) NEM jelenti azt, hogy a
+  // funkció ma valakinél ténylegesen aktív lenne. Korábban ez a
+  // különbségtétel hiányzott, és emiatt hamisan blokkolta a törlést.
+  const allGrants = licenseDb.prepare('SELECT ceg_kulcs, aktiv, lejarat FROM company_licenses WHERE feature_key = ?').all(key);
+  const activeGrants = allGrants.filter((r) => licenseRowStatus(r).allapot === 'ok');
+
+  if (activeGrants.length > 0 && !force) {
+    return sendJson(res, 400, {
+      error: `Ez a funkció ${activeGrants.length} cégnél ténylegesen aktívan ki van osztva — előbb vond vissza azoknál, vagy erősítsd meg a törlést a figyelmeztetés elfogadásával.`,
+      activeCount: activeGrants.length,
+      canForce: true,
+    });
   }
+
+  licenseDb.prepare('DELETE FROM company_licenses WHERE feature_key = ?').run(key);
   licenseDb.prepare('DELETE FROM license_features WHERE key = ?').run(key);
-  logActivity({ type: 'license_feature_delete', ok: true, companyKey: null, nev: 'admin', detail: `Funkció törölve a katalógusból: ${feature.nev} (${key})` });
-  sendJson(res, 200, { ok: true });
+  const detail = activeGrants.length > 0
+    ? `Funkció törölve a katalógusból (kényszerítve, ${activeGrants.length} aktív kiosztás visszavonásával): ${feature.nev} (${key})`
+    : `Funkció törölve a katalógusból: ${feature.nev} (${key})`;
+  logActivity({ type: 'license_feature_delete', ok: true, companyKey: null, nev: 'admin', detail });
+  sendJson(res, 200, { ok: true, revokedCount: activeGrants.length });
 });
 
 // ---------------------------------------------------------------------------

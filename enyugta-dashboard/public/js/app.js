@@ -174,7 +174,11 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
   if (res.status === 401 && !LOGIN_ENDPOINTS.includes(path)) { showLandingScreen(); throw new Error('NOT_AUTHENTICATED'); }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Ismeretlen hiba');
+  if (!res.ok) {
+    const err = new Error(data.error || 'Ismeretlen hiba');
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 // Csendes verzió a kezdeti "vajon be vagyok-e már jelentkezve?" ellenőrzéshez —
@@ -483,7 +487,20 @@ function renderLicenseFeatures() {
         await api('/api/admin/license/features/delete', { method: 'POST', body: JSON.stringify({ key }) });
         loadLicenseData();
       } catch (e) {
-        alert('Nem sikerült törölni: ' + e.message);
+        if (e.data?.canForce) {
+          const force = confirm(
+            `${e.message}\n\nHa MOST folytatod, a funkció akkor is törlődik a katalógusból, és mind a(z) ${e.data.activeCount} cégnél automatikusan visszavonásra kerül — ezt nem lehet visszavonni. Folytatod?`
+          );
+          if (!force) return;
+          try {
+            await api('/api/admin/license/features/delete', { method: 'POST', body: JSON.stringify({ key, force: true }) });
+            loadLicenseData();
+          } catch (e2) {
+            alert('Nem sikerült törölni: ' + e2.message);
+          }
+        } else {
+          alert('Nem sikerült törölni: ' + e.message);
+        }
       }
     });
   });
