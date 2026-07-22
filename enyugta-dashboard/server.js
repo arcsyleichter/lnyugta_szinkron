@@ -3461,8 +3461,38 @@ route('GET', '/api/admin/payments', async (req, res, query) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// PÉNZÜGYEK — admin áttekintés az előfizetésekből befolyó összegekről,
+// NAV Online Számla — kapcsolat állapota és élő tesztelése. A tényleges
+// XML-alapú számla-beküldés (manageInvoice) egy KÖVETKEZŐ fejlesztési
+// körben készül el — ez a végpont egyelőre a hitelesítést (tokenExchange)
+// teszteli, mivel ez az alapja mindennek, és élő NAV-kapcsolat nélkül
+// (a fejlesztői sandbox-ban) nem tudtuk kipróbálni.
+route('GET', '/api/admin/nav/status', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  sendJson(res, 200, {
+    configured: navConfigured(),
+    sandbox: NAV_SANDBOX,
+    baseUrl: NAV_BASE_URL,
+    taxNumber: process.env.NAV_TAXNUMBER || null,
+    techUser: process.env.NAV_TECH_USER || null,
+  });
+});
+
+route('POST', '/api/admin/nav/test-connection', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (!navConfigured()) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva (hiányzó környezeti változók).' });
+  try {
+    const result = await navTokenExchange();
+    logActivity({ type: 'nav_test_connection', ok: true, companyKey: null, nev: 'admin', detail: `Sikeres NAV tokenExchange (${NAV_SANDBOX ? 'teszt' : 'éles'} környezet)` });
+    sendJson(res, 200, { ok: true, tokenValidFrom: result.validFrom, tokenValidTo: result.validTo });
+  } catch (e) {
+    logActivity({ type: 'nav_test_connection', ok: false, companyKey: null, nev: 'admin', detail: e.message });
+    sendJson(res, 500, { error: e.message });
+  }
+});
+
+
 // cégenként/funkciónként/havonta lebontva, plusz a ténylegesen kiküldött
 // (és lemezen eltárolt) PDF-számlák listája, letölthető formában.
 // ---------------------------------------------------------------------------
@@ -5610,6 +5640,178 @@ function myposPrivateKey() {
 function myposPublicCert() {
   if (!process.env.MYPOS_PUBLIC_CERT_PATH) return null;
   return fs.readFileSync(process.env.MYPOS_PUBLIC_CERT_PATH, 'utf8');
+}
+
+// ---------------------------------------------------------------------------
+// NAV ONLINE SZÁMLA — a magyar adóhatóság kötelező számla-adatszolgáltatási
+// rendszeréhez való kapcsolódás (interfész specifikáció v3.0 alapján).
+//
+// Környezeti változók:
+//   NAV_SANDBOX          — "1" = teszt-környezet (alapértelmezett), "0" = éles
+//   NAV_BASE_URL_OVERRIDE — opcionális, ha a NAV API URL-je változna
+//   NAV_TAXNUMBER         — az adatszolgáltatásra kötelezett cég adószámának
+//                           első 8 számjegye (törzsszám)
+//   NAV_TECH_USER         — a technikai felhasználó neve
+//   NAV_TECH_PASSWORD     — a technikai felhasználó jelszava (literál)
+//   NAV_SIGNING_KEY       — XML aláírókulcs
+//   NAV_EXCHANGE_KEY      — XML cserekulcs
+//   NAV_SOFTWARE_ID       — 18 karakteres szoftver-azonosító (opcionális,
+//                           van ésszerű alapértelmezett)
+// ---------------------------------------------------------------------------
+const NAV_SANDBOX = process.env.NAV_SANDBOX !== '0';
+const NAV_BASE_URL = process.env.NAV_BASE_URL_OVERRIDE
+  || (NAV_SANDBOX ? 'https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3' : 'https://api.onlineszamla.nav.gov.hu/invoiceService/v3');
+
+function navConfigured() {
+  return !!(process.env.NAV_TAXNUMBER && process.env.NAV_TECH_USER && process.env.NAV_TECH_PASSWORD
+    && process.env.NAV_SIGNING_KEY && process.env.NAV_EXCHANGE_KEY);
+}
+// Best-effort 18 karakteres szoftver-azonosító: HU + a fejlesztő cég
+// (Leichter Irodatechnika Kft.) adószám-törzsszáma + egy rögzített utótag,
+// pontosan 18 karakterre kiegészítve. Ha a NAV másképp várná el, a
+// NAV_SOFTWARE_ID env változóval felülírható kódmódosítás nélkül.
+function navSoftwareId() {
+  return process.env.NAV_SOFTWARE_ID || 'HU12491980ENYUGTA1';
+}
+
+// A NAV időbélyeg-formátuma: yyyyMMddHHmmss, UTC időben, elválasztójelek
+// nélkül (a specifikáció ezt írja elő a requestSignature számításához is,
+// és ugyanezt a maszkolt formát várja a timestamp XML-tag tartalmául is,
+// UTC-ben kifejezve, 'Z' jelöléssel az xs:dateTime mezőben).
+function navTimestampMasked(date = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${date.getUTCFullYear()}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}`;
+}
+function navTimestampIso(date = new Date()) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+function navRequestId() {
+  // Előírás: max. 30 karakter, adózónként/technikai felhasználónként
+  // egyedi kell legyen — az időbélyeg + véletlen rész biztosítja ezt.
+  return `LNY${Date.now()}${crypto.randomBytes(4).toString('hex')}`.slice(0, 30);
+}
+function navPasswordHash(password) {
+  return crypto.createHash('sha512').update(password, 'utf8').digest('hex').toUpperCase();
+}
+// requestSignature a LEGTÖBB operációhoz (tokenExchange, queryTransactionStatus,
+// stb.) — a manageInvoice/manageAnnulment KIVÉTELÉVEL, azoknál külön,
+// tételenkénti index-hash-eket is tartalmazó számítás kell (lásd lejjebb).
+function navRequestSignatureSimple(requestId, timestampMasked, signingKey) {
+  const concatenated = `${requestId}${timestampMasked}${signingKey}`;
+  return crypto.createHash('sha3-512').update(concatenated, 'utf8').digest('hex').toUpperCase();
+}
+// requestSignature a manageInvoice operációhoz — a specifikáció szerint:
+// 1) "parciális hitelesítés" = nagybetűs SHA3-512(requestId + timestamp + aláírókulcs)
+// 2) minden egyes tételhez (1-100 index) egy "index hash" = nagybetűs
+//    SHA3-512(operation + base64(számla-XML))
+// 3) a végső requestSignature = nagybetűs SHA3-512(parciális hitelesítés + az összes index hash, sorrendben összefűzve)
+function navRequestSignatureManageInvoice(requestId, timestampMasked, signingKey, items) {
+  const partialAuth = navRequestSignatureSimple(requestId, timestampMasked, signingKey);
+  const indexHashes = items.map(({ operation, base64Content }) =>
+    crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex').toUpperCase()
+  );
+  return crypto.createHash('sha3-512').update(partialAuth + indexHashes.join(''), 'utf8').digest('hex').toUpperCase();
+}
+// A /tokenExchange válaszban kapott token AES-128 ECB titkosítással van
+// kódolva (a cserekulccsal, mint 16 bájtos kulccsal) — ezt kell nekünk,
+// kliens oldalon visszafejtenünk, mielőtt a manageInvoice hívásban a
+// nyílt (dekódolt) tokent elküldenénk.
+function navDecryptExchangeToken(base64Token, exchangeKey) {
+  const keyBuf = Buffer.alloc(16);
+  Buffer.from(exchangeKey, 'utf8').copy(keyBuf, 0, 0, Math.min(16, Buffer.byteLength(exchangeKey, 'utf8')));
+  const decipher = crypto.createDecipheriv('aes-128-ecb', keyBuf, null);
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(base64Token, 'base64')), decipher.final()]);
+  return decrypted.toString('utf8');
+}
+
+// Egyszerű, EGYSZINTŰ XML-mezőkinyerő (nem teljes XML-parser) — a NAV
+// válaszok síkjában elég egy adott tag TARTALMÁT kiolvasni névvel, még ha
+// az adott tag esetleg attribútumokat is hordoz. Beágyazott, azonos nevű
+// tagek esetén az ELSŐ előfordulást adja vissza — ez a legtöbb NAV-válasz
+// mezőnél elég (a válaszok nem mélyen egymásba ágyazottak).
+function navXmlField(xml, tag) {
+  const m = new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i').exec(xml);
+  return m ? m[1].trim() : null;
+}
+function navXmlFieldAll(xml, tag) {
+  const re = new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'gi');
+  const out = [];
+  let m;
+  while ((m = re.exec(xml))) out.push(m[1].trim());
+  return out;
+}
+
+function navHeaderXml(requestId, timestampIso) {
+  return `<header>
+    <requestId>${requestId}</requestId>
+    <timestamp>${timestampIso}</timestamp>
+    <requestVersion>3.0</requestVersion>
+    <headerVersion>1.0</headerVersion>
+  </header>`;
+}
+function navUserXml(requestSignature) {
+  return `<user>
+    <login>${escapeXml(process.env.NAV_TECH_USER)}</login>
+    <passwordHash cryptoType="SHA-512">${navPasswordHash(process.env.NAV_TECH_PASSWORD)}</passwordHash>
+    <taxNumber>${escapeXml(process.env.NAV_TAXNUMBER)}</taxNumber>
+    <requestSignature cryptoType="SHA3-512">${requestSignature}</requestSignature>
+  </user>`;
+}
+function navSoftwareXml() {
+  return `<software>
+    <softwareId>${navSoftwareId()}</softwareId>
+    <softwareName>L-NYUGTA</softwareName>
+    <softwareOperation>LOCAL_SOFTWARE</softwareOperation>
+    <softwareMainVersion>1.0</softwareMainVersion>
+    <softwareDevName>${escapeXml(ELADO_NEV)}</softwareDevName>
+    <softwareDevContact>info@lnyugta.hu</softwareDevContact>
+    <softwareDevCountryCode>HU</softwareDevCountryCode>
+    <softwareDevTaxNumber>${ELADO_ADOSZAM.slice(0, 8)}</softwareDevTaxNumber>
+  </software>`;
+}
+function escapeXml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function navApiCall(operation, bodyXml) {
+  const resp = await fetch(`${NAV_BASE_URL}/${operation}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/xml; charset=UTF-8', 'Accept': 'application/xml' },
+    body: `<?xml version="1.0" encoding="UTF-8"?>\n${bodyXml}`,
+  });
+  const text = await resp.text();
+  return { status: resp.status, text };
+}
+
+// Az adatszolgáltatási munkamenethez szükséges, DEKÓDOLT token lekérése.
+// FONTOS, ŐSZINTE MEGJEGYZÉS: ez a NAV hivatalos interfész-specifikációja
+// (v3.0) és több független, technikai forrás alapján legjobb tudásunk
+// szerint készült — a pontos XML-elemsorrendet/névteret valódi NAV
+// teszt-környezet elleni éles próbával kell megerősíteni (erre a
+// sandboxunkban nincs kimenő hálózati hozzáférés).
+async function navTokenExchange() {
+  if (!navConfigured()) throw new Error('A NAV-kapcsolat nincs beállítva (hiányzó környezeti változók).');
+  const requestId = navRequestId();
+  const now = new Date();
+  const timestampMasked = navTimestampMasked(now);
+  const timestampIso = navTimestampIso(now);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+
+  const bodyXml = `<TokenExchangeRequest xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+${navHeaderXml(requestId, timestampIso)}
+${navUserXml(requestSignature)}
+${navSoftwareXml()}
+</TokenExchangeRequest>`;
+
+  const { status, text } = await navApiCall('tokenExchange', bodyXml);
+  if (status !== 200) {
+    const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
+    throw new Error(`NAV tokenExchange hiba: ${errorMsg}`);
+  }
+  const encodedToken = navXmlField(text, 'encodedExchangeToken');
+  if (!encodedToken) throw new Error(`A NAV válaszában nem található token. Nyers válasz: ${text.slice(0, 500)}`);
+  const decodedToken = navDecryptExchangeToken(encodedToken, process.env.NAV_EXCHANGE_KEY);
+  return { token: decodedToken, validFrom: navXmlField(text, 'tokenValidityFrom'), validTo: navXmlField(text, 'tokenValidityTo') };
 }
 
 // A myPOS aláírás-algoritmusa (a hivatalos dokumentáció szerint):

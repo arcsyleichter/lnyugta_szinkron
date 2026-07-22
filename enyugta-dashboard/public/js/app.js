@@ -290,7 +290,34 @@ let licenseFeaturesCache = [];
 let licenseCompaniesCache = [];
 let licensePackagesCache = [];
 
+listen('nav-test-connection-btn', 'click', async (e) => {
+  const btn = e.target;
+  const result = document.getElementById('nav-test-result');
+  btn.disabled = true; btn.textContent = 'Tesztelés…';
+  result.textContent = '';
+  try {
+    const data = await api('/api/admin/nav/test-connection', { method: 'POST' });
+    result.textContent = `✓ Sikeres kapcsolat! A token ${data.tokenValidTo} időpontig érvényes.`;
+    result.style.color = 'var(--jade-deep)';
+  } catch (err) {
+    result.textContent = '✗ ' + err.message;
+    result.style.color = 'var(--brick)';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Kapcsolat tesztelése';
+  }
+});
+
 async function loadFinanceView() {
+  try {
+    const navStatus = await api('/api/admin/nav/status');
+    const navDesc = document.getElementById('nav-status-desc');
+    if (!navStatus.configured) {
+      navDesc.innerHTML = '<span class="muted">Nincs beállítva (hiányzó környezeti változók: NAV_TAXNUMBER, NAV_TECH_USER, NAV_TECH_PASSWORD, NAV_SIGNING_KEY, NAV_EXCHANGE_KEY).</span>';
+    } else {
+      navDesc.innerHTML = `<b>${navStatus.sandbox ? 'Teszt' : 'Éles'} környezet</b> — technikai felhasználó: ${escapeHtml(navStatus.techUser)}, adószám: ${escapeHtml(navStatus.taxNumber)}`;
+    }
+  } catch (e) { /* nem kritikus, ha ez nem töltődik be */ }
+
   try {
     const [overview, invoicesData] = await Promise.all([
       api('/api/admin/finance/overview'),
