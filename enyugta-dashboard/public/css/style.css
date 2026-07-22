@@ -906,19 +906,19 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
    azonnalira rövidíti annak, aki ezt kéri a rendszerében.
    ============================================================ */
 @keyframes lnyugtaFadeInUp{
-  from{ opacity:0; transform:translateY(10px); }
-  to{ opacity:1; transform:translateY(0); }
+  from{ opacity:0; transform:translateY(32px) scale(0.98); }
+  to{ opacity:1; transform:translateY(0) scale(1); }
 }
 .card, .login-card{
-  animation:lnyugtaFadeInUp .45s cubic-bezier(0.16,1,0.3,1) both;
+  animation:lnyugtaFadeInUp .8s cubic-bezier(0.16,1,0.3,1) both;
 }
 /* Enyhe lépcsőzetes megjelenés, ha több kártya van egymás alatt/mellett
    egy oldalon — finom kaszkád-hatás, nem egyszerre "csapódik be" minden. */
-.main .card:nth-of-type(2){ animation-delay:.04s; }
-.main .card:nth-of-type(3){ animation-delay:.08s; }
-.main .card:nth-of-type(4){ animation-delay:.12s; }
-.main .card:nth-of-type(5){ animation-delay:.16s; }
-.main .card:nth-of-type(n+6){ animation-delay:.2s; }
+.main .card:nth-of-type(2){ animation-delay:.08s; }
+.main .card:nth-of-type(3){ animation-delay:.16s; }
+.main .card:nth-of-type(4){ animation-delay:.24s; }
+.main .card:nth-of-type(5){ animation-delay:.32s; }
+.main .card:nth-of-type(n+6){ animation-delay:.4s; }
 
 /* ============================================================
    Cikktörzs-szerkesztő — teljesen újratervezett, arányos elrendezés
