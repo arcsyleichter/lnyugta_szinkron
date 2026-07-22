@@ -269,3 +269,42 @@ test('Alapvető adat-végpontok', async (t) => {
     assert.ok(Array.isArray(body.funkciok));
   });
 });
+
+test('NTAK — tartalék-lekérdezés, amikor nincs külön ntakrms tábla', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('a nyfej-alapú tartalék akkor is helyesen működik, ha a séma nem tartalmaz "rmsfelduuid" oszlopot', async () => {
+    // A teszt-adatbázisban SZÁNDÉKOSAN nincs sem ntakrms tábla, sem
+    // rmsfelduuid oszlop — pontosan úgy, ahogy egyes valós LSZAMLA-
+    // változatoknál sem — ez volt a gyökér-oka egy korábbi, éles hibának:
+    // a tartalék-lekérdezés ezen a hiányzó oszlopon elszállt, és emiatt a
+    // "legutóbbi küldések" lista sosem töltődött fel, még akkor sem, ha
+    // az összesítő adat (submissionsByStatus) átjött.
+    const cookie = await getCompanySession();
+    const from = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const to = new Date().toISOString().slice(0, 10);
+    const res = await fetch(`${server.baseUrl}/api/ntak/summary?from=${from}&to=${to}`, { headers: { Cookie: cookie } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.usedNyfejFallback, true, 'a tartaléknak be kell kapcsolnia, mivel nincs ntakrms tábla');
+    assert.ok(body.submissionsByStatus.length > 0, 'az összesítőnek tartalmaznia kell adatot');
+    assert.ok(body.recent.length > 0, 'a részletes listának IS tartalmaznia kell adatot — ez volt a hiba, ami korábban üresen maradt');
+    assert.ok(!body.diag.error.includes('no such column'), 'nem szabad "no such column" hibának maradnia a diagnosztikában');
+  });
+});

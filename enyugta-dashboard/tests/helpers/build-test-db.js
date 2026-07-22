@@ -51,9 +51,12 @@ function buildTestCompanyDb(outPath, { adoszam, nev, varos = 'Teszt Város', cim
 
   // Néhány nyugta, az elmúlt 5 napra elosztva, hogy a lekérdezések
   // (forgalom, termékek, nyugták listája) valós adatot lássanak.
+  // Az ellenorzott/kuldstat/uuid mezők is fel vannak töltve, hogy az
+  // NTAK-fallback (amikor nincs külön ntakrms tábla) is tesztelhető
+  // legyen valós, ellenőrzött adaton.
   const insNyfej = db.prepare(`
-    INSERT INTO nyfej (id, cegid, bsz, keltdat, fizmod, bruttokp, bruttoafr, bruttokartya, storno, rendkezdatum)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'N', ?)
+    INSERT INTO nyfej (id, cegid, bsz, keltdat, fizmod, bruttokp, bruttoafr, bruttokartya, storno, rendkezdatum, ellenorzott, kuldstat, uuid)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'N', ?, ?, ?, ?)
   `);
   const insNytet = db.prepare(`
     INSERT INTO nytet (bsz, sor, cikkszam, megnevezes, me, menny, bruttoar, afakod, sorbrutto)
@@ -70,7 +73,7 @@ function buildTestCompanyDb(outPath, { adoszam, nev, varos = 'Teszt Város', cim
       insNyfej.run(
         id, '1', bsz, datum, fizmod,
         fizmod === 'kp' ? osszeg : 0, 0, fizmod === 'bankkártya' ? osszeg : 0,
-        `${datum} ${10 + sorsz}:00:00`
+        `${datum} ${10 + sorsz}:00:00`, 'TELJESEN_SIKERES', 'OK', `uuid-${id}`
       );
       insNytet.run(bsz, 1, '1', termekek[sorsz % termekek.length][0], 'db', 1, osszeg, '27%', osszeg);
       id++;

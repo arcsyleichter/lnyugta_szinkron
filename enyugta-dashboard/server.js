@@ -4202,12 +4202,20 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
   // csak épp ezen az időszakon kívül van) — minden lekérdezés külön
   // try/catch-ben, hogy egy hiányzó/eltérő szerkezetű tábla se
   // akassza meg a többit.
-  const diag = { nyfej: null, ntakrms: null, ntaknapzaras: null, error: null };
+  const diag = { nyfej: null, nyfejEllenorzottInRange: null, ntakrms: null, ntaknapzaras: null, error: null };
   try {
     diag.nyfej = get(k, `SELECT COUNT(*) AS total, MIN(keltdat) AS minDate, MAX(keltdat) AS maxDate,
       SUM(CASE WHEN ntakzarasid IS NOT NULL THEN 1 ELSE 0 END) AS vanZarasid,
       SUM(CASE WHEN ellenorzott IS NOT NULL THEN 1 ELSE 0 END) AS vanEllenorzott
       FROM nyfej`);
+    // Ugyanez, de kifejezetten a "hol van ellenőrzött adat" kérdésre —
+    // enélkül a fenti, TELJES idősávra vonatkozó összesítő félrevezető
+    // lehet: lehet, hogy VAN 56000+ ellenőrzött sor összesen, de egyik
+    // sem esik a ténylegesen kiválasztott időszakba, és emiatt tűnik úgy,
+    // mintha "nem lenne adat", holott csak a dátumszűrő túl szűk.
+    diag.nyfejEllenorzottInRange = get(k,
+      `SELECT MIN(keltdat) AS minDate, MAX(keltdat) AS maxDate, COUNT(*) AS total
+       FROM nyfej WHERE ellenorzott IS NOT NULL`);
   } catch (e) { diag.error = `nyfej: ${e.message}`; }
   try {
     diag.ntakrms = get(k, `SELECT COUNT(*) AS total, MIN(date(kulddate)) AS minDate, MAX(date(kulddate)) AS maxDate FROM ntakrms`);
@@ -4290,8 +4298,17 @@ route('GET', '/api/ntak/summary', async (req, res, query) => {
       );
       const nyfejTotal = get(k, `SELECT COUNT(*) AS cnt FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL`, [from, to]);
       submissionsByType = nyfejTotal.cnt ? [{ url: 'nyugta-kuldes', cnt: nyfejTotal.cnt }] : [];
+      // A "rmsfelduuid" oszlop NEM létezik minden pénztárgép-szoftver
+      // változat nyfej sémájában (pl. néhány LSZAMLA-variánsnál hiányzik)
+      // — ha rá hivatkoznánk, a teljes lekérdezés hibával elszállna, és
+      // ez csendben megakadályozná, hogy a fenti, MÁR SIKERESEN lekért
+      // "submissionsByStatus" összesítő mellett a részletes lista is
+      // megjelenjen. Ezért előbb ellenőrizzük, hogy egyáltalán létezik-e.
+      const nyfejColumns = all(k, `PRAGMA table_info(nyfej)`);
+      const hasRmsFelduuid = nyfejColumns.some((c) => c.name === 'rmsfelduuid');
+      const uuidExpr = hasRmsFelduuid ? 'IFNULL(rmsfelduuid, uuid)' : 'uuid';
       recent = all(k,
-        `SELECT 'nyugta-kuldes' AS url, bsz, keltdat AS kulddate, NULL AS elldate, ellenorzott, IFNULL(rmsfelduuid, uuid) AS uuid
+        `SELECT 'nyugta-kuldes' AS url, bsz, keltdat AS kulddate, NULL AS elldate, ellenorzott, ${uuidExpr} AS uuid
          FROM nyfej WHERE keltdat BETWEEN ? AND ? AND kuldstat IS NOT NULL ORDER BY keltdat DESC, id DESC LIMIT 100`,
         [from, to]
       );
