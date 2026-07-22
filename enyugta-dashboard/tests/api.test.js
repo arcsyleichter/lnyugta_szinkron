@@ -665,6 +665,43 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
     assert.equal(profileBody.features.find((f) => f.key === 'MERLEGELES').kivalasztva, true);
   });
 
+  await t.test('a fizetéshez folyamatos, helyes formátumú számlasorszám rendelődik, még sikertelen email-küldés esetén is', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'PINTEGRACIO', nev: 'PIN integráció', alapAr: 1000 }),
+    });
+    const cookie = await getCompanySession();
+    await fetch(`${server.baseUrl}/api/profile/email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ email: 'teszt-cegvezeto@example.com' }),
+    });
+    const res1 = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['PINTEGRACIO'] }),
+    });
+    const body1 = await res1.json();
+    await fetch(`${server.baseUrl}/api/profile/features/toggle`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKey: 'PINTEGRACIO', kivalasztva: false }),
+    });
+    const res2 = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['PINTEGRACIO'] }),
+    });
+    const body2 = await res2.json();
+
+    const paymentsRes = await fetch(`${server.baseUrl}/api/admin/payments`, { headers: { Cookie: adminCookie } });
+    const paymentsBody = await paymentsRes.json();
+    const p1 = paymentsBody.payments.find((p) => p.orderId === `${body1.orderId}-PINTEGRACIO`);
+    const p2 = paymentsBody.payments.find((p) => p.orderId === `${body2.orderId}-PINTEGRACIO`);
+    assert.ok(p1.szamlaSorszam, 'a számlasorszámnak akkor is meg kell lennie, ha az email küldése meghiúsult');
+    assert.match(p1.szamlaSorszam, /^\d{4}\/\d{6}$/, 'a formátumnak "ÉV/000000" alakúnak kell lennie');
+    const [, sorszam1] = p1.szamlaSorszam.split('/');
+    const [, sorszam2] = p2.szamlaSorszam.split('/');
+    assert.equal(Number(sorszam2), Number(sorszam1) + 1, 'a második számlának eggyel nagyobb, folyamatos sorszámot kell kapnia');
+  });
+
   await t.test('kosárszerűen, több funkció egyszerre is fizethető, egy közös összesítővel', async () => {
     const adminCookie = await getAdminCookie();
     await fetch(`${server.baseUrl}/api/admin/license/features/save`, {

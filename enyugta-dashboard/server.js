@@ -141,6 +141,14 @@ function formatNavAddress(a) {
   return [line1, a.emelet || ''].filter(Boolean).join(' ');
 }
 
+// A demo-számlák KIÁLLÍTÓJA — a rendszert üzemeltető cég valós,
+// nyilvános cégadatai (cégjegyzékből ellenőrizve), a kötelező számla-
+// adattartalomhoz (Áfa tv. 169. §) szükséges eladói adatok.
+const ELADO_NEV = 'Leichter Irodatechnika Kft.';
+const ELADO_ADOSZAM = '12491980-2-13';
+const ELADO_CIM = '2200 Monor, Virág utca 39.';
+const ELADO_CEGJEGYZEKSZAM = '13-09-085292';
+
 function readTelephelyek() {
   try { return JSON.parse(fs.readFileSync(TELEPHELYEK_PATH, 'utf8')); }
   catch (_) { return {}; }
@@ -535,10 +543,21 @@ licenseDb.exec(`
     mypos_trnref TEXT,
     kartya_token TEXT,
     ismetlodo INTEGER NOT NULL DEFAULT 0,
+    szamla_sorszam TEXT,
     letrehozva TEXT NOT NULL,
     lezarva TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_license_payments_ceg ON license_payments(ceg_kulcs);
+
+  -- A kötelező számla-adattartalomhoz (Áfa tv. 169. §) a bizonylatoknak
+  -- FOLYAMATOS, KIHAGYÁS NÉLKÜLI sorszámozásúnak kell lenniük — ez az
+  -- egyetlen soros számláló biztosítja ezt (évente újrainduló, "ÉV/sorszám"
+  -- formátumban), függetlenül attól, hogy egy fizetés hány tételből áll.
+  CREATE TABLE IF NOT EXISTS invoice_counter (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    ev INTEGER NOT NULL,
+    utolso_sorszam INTEGER NOT NULL
+  );
 
   -- Regisztrációk — a régi LSZAMLA rendszerből átvett, cégenkénti eszköz-
   -- nyilvántartás (programtípus, verzió, reg./lejárat dátum, kapcsolattartó).
@@ -688,7 +707,7 @@ licenseDb.exec(`
 // hiányozhatnak).
 {
   const cols = licenseDb.prepare(`PRAGMA table_info(license_payments)`).all();
-  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0']]) {
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT']]) {
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
     }
@@ -1074,6 +1093,32 @@ function sanitizePdfText(s) {
     .replace(/[^\x00-\xFF]/g, '?') // minden más, WinAnsi-n kívüli karakter
     .replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
+// Folyamatos, kihagyás nélküli számla-sorszám — évente újrainduló,
+// "ÉV/000001" formátumban. EGYETLEN sorszámot ad minden ténylegesen
+// kiküldött demo-számlához (nem tételenként, akkor sem, ha egy fizetés
+// több funkciót is tartalmaz).
+function nextInvoiceNumber() {
+  const ev = new Date().getFullYear();
+  const row = licenseDb.prepare(`SELECT ev, utolso_sorszam FROM invoice_counter WHERE id = 1`).get();
+  const sorszam = (!row || row.ev !== ev) ? 1 : row.utolso_sorszam + 1;
+  licenseDb.prepare(`
+    INSERT INTO invoice_counter (id, ev, utolso_sorszam) VALUES (1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET ev = excluded.ev, utolso_sorszam = excluded.utolso_sorszam
+  `).run(ev, sorszam);
+  return `${ev}/${String(sorszam).padStart(6, '0')}`;
+}
+
+// A kötelező számla-adattartalomhoz (Áfa tv. 169. §) az ÁFA-t tételenként
+// is fel kell tüntetni. A rendszerben megadott árakat BRUTTÓ (ÁFA-val
+// növelt) árnak tekintjük — ez a szokásos gyakorlat végfelhasználóknak
+// szánt áraknál —, ebből számoljuk vissza a nettó és az ÁFA összegét.
+const ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS = 0.27; // általános, 27%-os ÁFA-kulcs
+function splitBruttoToNettoAfa(brutto, afaKulcs = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS) {
+  const netto = Math.round(brutto / (1 + afaKulcs));
+  const afa = brutto - netto;
+  return { netto, afa, brutto, afaSzazalek: Math.round(afaKulcs * 100) };
+}
+
 function buildSimplePdf(elements) {
   // elements: kevert lista — { type:'text', text, size, y, x, bold, color:[r,g,b] }
   //                        vagy { type:'rect', x, y, w, h, fill:[r,g,b] }
@@ -1126,50 +1171,72 @@ function buildSimplePdf(elements) {
 // előfizetési díjról. NEM hivatalos, számvitelileg elfogadott bizonylat —
 // a kérésnek megfelelően csak egy áttekinthető, letölthető/emailezhető
 // összefoglaló, most már rendezettebb, "hivatalos számlaszerű" elrendezéssel.
-function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, ismetlodo }) {
-  const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
-  const JADE = [0.35, 0.58, 0.79]; const INK = [0.16, 0.2, 0.28]; const DIM = [0.45, 0.48, 0.53]; const AMBER = [0.94, 0.66, 0.24];
+function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, szamlaSorszam, ismetlodo }) {
+  // Minden tételnél kiszámoljuk a nettó/ÁFA/bruttó bontást — az itt
+  // megadott árakat bruttónak (ÁFA-val növeltnek) tekintjük.
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
+  const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
+
+  const JADE = [0.35, 0.58, 0.79]; const INK = [0.16, 0.2, 0.28]; const DIM = [0.45, 0.48, 0.53];
   const els = [];
   // Fejléc-sáv
   els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 90, fill: JADE });
   els.push({ type: 'text', x: 50, y: 40, text: 'L-NYUGTA', size: 22, bold: true, color: [1, 1, 1] });
   els.push({ type: 'text', x: 50, y: 62, text: 'Dijbekero / demo szamla', size: 11, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 400, y: 40, text: `Bizonylatszam:`, size: 9, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 400, y: 54, text: orderId, size: 10, bold: true, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 400, y: 70, text: `Datum: ${datum}`, size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 32, text: 'Szamla sorszama:', size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 46, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 62, text: `Kibocsatas kelte: ${datum}`, size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 76, text: `Teljesites kelte: ${datum}`, size: 9, color: [1, 1, 1] });
 
-  // Kiállító / Vevő, két oszlopban
+  // Kiállító / Vevő, két oszlopban — a kötelező eladói/vevői adatok.
   const infoTop = 130;
-  els.push({ type: 'text', x: 50, y: infoTop, text: 'KIALLITO', size: 9, bold: true, color: DIM });
-  els.push({ type: 'text', x: 50, y: infoTop + 18, text: 'L-NYUGTA rendszer', size: 11, bold: true, color: INK });
-  els.push({ type: 'text', x: 50, y: infoTop + 34, text: '(demo / tajekoztato bizonylat kiallitoja)', size: 9, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop, text: 'ELADO', size: 9, bold: true, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 16, text: ELADO_NEV, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 50, y: infoTop + 31, text: ELADO_CIM, size: 9, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 45, text: `Adoszam: ${ELADO_ADOSZAM}`, size: 9, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 59, text: `Cegjegyzekszam: ${ELADO_CEGJEGYZEKSZAM}`, size: 9, color: DIM });
 
   els.push({ type: 'text', x: 320, y: infoTop, text: 'VEVO', size: 9, bold: true, color: DIM });
-  els.push({ type: 'text', x: 320, y: infoTop + 18, text: cegNev, size: 11, bold: true, color: INK });
-  els.push({ type: 'text', x: 320, y: infoTop + 34, text: `Adoszam: ${adoszam || '-'}`, size: 9, color: DIM });
-  if (cimSzoveg) els.push({ type: 'text', x: 320, y: infoTop + 48, text: cimSzoveg, size: 9, color: DIM });
+  els.push({ type: 'text', x: 320, y: infoTop + 16, text: cegNev, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 320, y: infoTop + 31, text: cimSzoveg || '(nincs megadva szamlazasi cim)', size: 9, color: DIM });
+  els.push({ type: 'text', x: 320, y: infoTop + 45, text: `Adoszam: ${adoszam || '-'}`, size: 9, color: DIM });
 
-  els.push({ type: 'line', x1: 50, y1: infoTop + 65, x2: 545, y2: infoTop + 65, color: [0.85, 0.85, 0.85], width: 1 });
+  els.push({ type: 'line', x1: 50, y1: infoTop + 76, x2: 545, y2: infoTop + 76, color: [0.85, 0.85, 0.85], width: 1 });
 
-  // Tételes rész — fejléc sáv, majd soronként
-  const tableTop = infoTop + 90;
-  els.push({ type: 'rect', x: 50, y: tableTop - 18, w: 495, h: 24, fill: [0.95, 0.96, 0.97] });
-  els.push({ type: 'text', x: 55, y: tableTop, text: 'Tetel megnevezese', size: 10, bold: true, color: INK });
-  els.push({ type: 'text', x: 460, y: tableTop, text: 'Osszeg', size: 10, bold: true, color: INK });
-  let rowY = tableTop + 26;
-  for (const t of tetelek) {
-    els.push({ type: 'text', x: 55, y: rowY, text: t.nev, size: 10, color: INK });
-    els.push({ type: 'text', x: 460, y: rowY, text: `${t.osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 10, color: INK });
-    els.push({ type: 'line', x1: 50, y1: rowY + 10, x2: 545, y2: rowY + 10, color: [0.92, 0.92, 0.92], width: 0.5 });
-    rowY += 24;
+  // Tételes rész — megnevezés, mennyiség, nettó egységár, ÁFA%, ÁFA összeg, bruttó.
+  const tableTop = infoTop + 100;
+  els.push({ type: 'rect', x: 50, y: tableTop - 16, w: 495, h: 22, fill: [0.95, 0.96, 0.97] });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Megnevezes', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 245, y: tableTop, text: 'Menny.', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 280, y: tableTop, text: 'Nettó egys.ar', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 345, y: tableTop, text: 'AFA%', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 375, y: tableTop, text: 'AFA osszeg', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 450, y: tableTop, text: 'Brutto', size: 8.5, bold: true, color: INK });
+  let rowY = tableTop + 24;
+  for (const t of tetelekBontva) {
+    const nevRovidítve = t.nev.length > 32 ? `${t.nev.slice(0, 29)}...` : t.nev;
+    els.push({ type: 'text', x: 55, y: rowY, text: nevRovidítve, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 245, y: rowY, text: '1 ho', size: 8.5, color: INK });
+    els.push({ type: 'text', x: 280, y: rowY, text: `${t.netto.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 345, y: rowY, text: `${t.afaSzazalek}%`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 375, y: rowY, text: `${t.afa.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 450, y: rowY, text: `${t.brutto.toLocaleString('hu-HU')} ${penznem}`, size: 8.5, color: INK });
+    els.push({ type: 'line', x1: 50, y1: rowY + 9, x2: 545, y2: rowY + 9, color: [0.92, 0.92, 0.92], width: 0.5 });
+    rowY += 22;
   }
-  rowY += 6;
+  rowY += 8;
   els.push({ type: 'line', x1: 50, y1: rowY, x2: 545, y2: rowY, color: INK, width: 1.2 });
-  rowY += 22;
-  els.push({ type: 'text', x: 400, y: rowY, text: 'Osszesen', size: 12, bold: true, color: INK });
-  els.push({ type: 'text', x: 460, y: rowY, text: `${osszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: JADE });
+  rowY += 18;
+  els.push({ type: 'text', x: 280, y: rowY, text: `Netto osszesen: ${nettoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
+  rowY += 15;
+  els.push({ type: 'text', x: 280, y: rowY, text: `AFA osszesen (${ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS * 100}%): ${afaOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
+  rowY += 20;
+  els.push({ type: 'text', x: 280, y: rowY, text: 'Fizetendo (brutto)', size: 12, bold: true, color: INK });
+  els.push({ type: 'text', x: 450, y: rowY, text: `${bruttoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: JADE });
 
-  rowY += 40;
+  rowY += 34;
   els.push({ type: 'rect', x: 50, y: rowY, w: 495, h: 46, fill: [0.98, 0.95, 0.88] });
   els.push({
     type: 'text', x: 60, y: rowY + 18, size: 9.5, color: [0.54, 0.35, 0.08],
@@ -1177,9 +1244,9 @@ function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, dat
       ? 'Ismetlodo, havi elofizetesi dij - a kovetkezo terheles kb. 1 honap mulva esedekes.'
       : 'Kezdeti elofizetesi dij - a szolgaltatas mostantol havonta automatikusan megujul.',
   });
-  els.push({ type: 'text', x: 60, y: rowY + 34, text: 'Fizetesi mod: demo fizetes (nincs valodi bankkartya-terheles)', size: 9, color: [0.54, 0.35, 0.08] });
+  els.push({ type: 'text', x: 60, y: rowY + 34, text: `Fizetesi mod: demo fizetes (nincs valodi bankkartya-terheles). Belso azonosito: ${orderId}`, size: 8.5, color: [0.54, 0.35, 0.08] });
 
-  els.push({ type: 'text', x: 50, y: 800, text: '(Tajekoztato jellegu bizonylat, nem hivatalos szamviteli szamla.)', size: 8, color: DIM });
+  els.push({ type: 'text', x: 50, y: 800, text: '(A funkcio-elofizetes demo/tajekoztato jellegu; a tenyleges, valodi bankkartya-terheles bevezeteseig ez a bizonylat is annak minosul.)', size: 7.5, color: DIM });
   return buildSimplePdf(els);
 }
 
@@ -1211,18 +1278,22 @@ async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismet
     hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
   }) : '';
   const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
-  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, ismetlodo });
+  const szamlaSorszam = nextInvoiceNumber();
+  try {
+    licenseDb.prepare(`UPDATE license_payments SET szamla_sorszam = ? WHERE order_id = ? OR order_id LIKE ?`).run(szamlaSorszam, orderId, `${orderId}-%`);
+  } catch (_) {}
+  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, szamlaSorszam, ismetlodo });
   const tetelSorokHtml = tetelek.map((t) => `<li>${escapeHtmlForEmail(t.nev)} — ${t.osszeg.toLocaleString('hu-HU')} ${penznem}</li>`).join('');
   await sendBrevoEmail({
     toEmail: email, toName: cegNev,
-    subject: `L-NYUGTA — demo számla (${orderId})`,
+    subject: `L-NYUGTA — számla ${szamlaSorszam}`,
     html: `<p>Kedves ${escapeHtmlForEmail(cegNev)}!</p>
       <p>Sikeres fizetés történt:</p>
       <ul>${tetelSorokHtml}</ul>
       <p><b>Összesen: ${osszesen.toLocaleString('hu-HU')} ${penznem}</b></p>
       <p>A tájékoztató jellegű demo számlát csatoltan küldjük.</p>
       <p style="color:#888;font-size:12px;">Ez egy automatikus üzenet, nem hivatalos számviteli bizonylatról.</p>`,
-    attachments: [{ name: `demo-szamla-${orderId}.pdf`, content: pdf }],
+    attachments: [{ name: `szamla-${szamlaSorszam.replace('/', '-')}.pdf`, content: pdf }],
   });
   logActivity({ type: 'payment_invoice_email', ok: true, companyKey: cegKulcs, nev: null, detail: `Demo számla kiküldve: ${email} (${orderId})` });
 }
@@ -3365,7 +3436,7 @@ route('GET', '/api/admin/payments', async (req, res, query) => {
     myposConfigured: myposConfigured(),
     payments: rows.map((p) => ({
       orderId: p.order_id, cegKulcs: p.ceg_kulcs, cel: p.cel, osszeg: p.osszeg, penznem: p.penznem,
-      allapot: p.allapot, myposTrnref: p.mypos_trnref, letrehozva: p.letrehozva, lezarva: p.lezarva,
+      allapot: p.allapot, myposTrnref: p.mypos_trnref, szamlaSorszam: p.szamla_sorszam, letrehozva: p.letrehozva, lezarva: p.lezarva,
     })),
   });
 });
