@@ -1,4 +1,4 @@
-// L-NYUGTA élő értékesítési nézegető — önálló Node.js szerver
+// L-NYUGTA – A pénztárgéped okos társa — önálló Node.js szerver
 // Nincs npm függőség: csak a Node beépített moduljait használja,
 // beleértve a Node 22.5+ -ban elérhető node:sqlite-ot.
 // Indítás: node server.js   (lásd README.md)
@@ -6101,7 +6101,7 @@ route('POST', '/api/admin/impersonate', async (req, res) => {
 // Statikus fájlok kiszolgálása (public/)
 // ---------------------------------------------------------------------------
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8', '.xml': 'application/xml; charset=utf-8' };
 
 function serveStatic(req, res, pathname) {
   let rel = pathname === '/' ? '/index.html' : pathname;

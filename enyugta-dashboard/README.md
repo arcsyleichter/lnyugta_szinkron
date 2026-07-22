@@ -1,4 +1,4 @@
-# L-NYUGTA élő értékesítési nézegető
+# L-NYUGTA – A pénztárgéped okos társa
 
 Webes felület **több cég** L-NYUGTA GO androidos alkalmazásának adataihoz
 egyszerre: napi árbevétel, cikkenkénti eladások, fizetési mód és ÁFA szerinti
