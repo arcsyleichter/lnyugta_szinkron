@@ -29,6 +29,7 @@ data/companies/*.db.uploading
 # mentésekkel kezelendő, git-en KERESZTÜL SOHA nem mozgatható.
 data/companies/
 data/uploads/
+data/invoices/
 data/users.db
 
 # OS / szerkesztő

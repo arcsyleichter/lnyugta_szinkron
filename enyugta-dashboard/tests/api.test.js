@@ -615,6 +615,91 @@ test('Funkció-katalógus inaktiválás — a cég és az admin nézete ne térj
   });
 });
 
+test('Admin — Pénzügyek: bevétel-áttekintés és számla-PDF letöltés', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+  async function getCompanySession() {
+    const adminCookie = await getAdminCookie();
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('sikeres fizetés után a bevétel megjelenik a cégenkénti/funkciónkénti/havi bontásban, és a PDF ténylegesen letölthető', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'NTAK', nev: 'NTAK', alapAr: 2500 }),
+    });
+    const cookie = await getCompanySession();
+    await fetch(`${server.baseUrl}/api/profile/email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ email: 'penzugyi-teszt@example.com' }),
+    });
+    const payRes = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['NTAK'] }),
+    });
+    assert.equal(payRes.status, 200);
+
+    const overviewRes = await fetch(`${server.baseUrl}/api/admin/finance/overview`, { headers: { Cookie: adminCookie } });
+    const overview = await overviewRes.json();
+    assert.equal(overview.osszesenMindenIdok, 2500);
+    assert.equal(overview.cegenkent[0].osszeg, 2500);
+    assert.equal(overview.funkciononkent[0].featureKey, 'NTAK');
+    assert.equal(overview.havonta[0].osszeg, 2500);
+
+    const invoicesRes = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody = await invoicesRes.json();
+    const invoice = invoicesBody.invoices[0];
+    assert.match(invoice.szamlaSorszam, /^\d{4}\/\d{6}$/);
+    assert.equal(invoice.pdfElerheto, true);
+    assert.ok(invoice.pdfFajlnev);
+
+    const pdfRes = await fetch(`${server.baseUrl}/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(invoice.pdfFajlnev)}`, { headers: { Cookie: adminCookie } });
+    assert.equal(pdfRes.status, 200);
+    assert.equal(pdfRes.headers.get('content-type'), 'application/pdf');
+    const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+    assert.ok(pdfBuffer.slice(0, 5).toString() === '%PDF-', 'a letöltött fájlnak valódi PDF-nek kell lennie');
+  });
+
+  await t.test('a számla akkor is elkészül és letölthető, ha a cégnek nincs beállított email címe (a fizetés jóváírása nem múlhat az emailen)', async () => {
+    const adminCookie = await getAdminCookie();
+    const cookie = await getCompanySession();
+    // Ennek a cégnek NINCS beállítva email cím ebben a sub-teszben.
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'VONALKOD', nev: 'Vonalkód generálás', alapAr: 800 }),
+    });
+    await fetch(`${server.baseUrl}/api/profile/email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ email: '' }),
+    });
+    const payRes = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['VONALKOD'] }),
+    });
+    const payBody = await payRes.json();
+    assert.ok(payBody.emailWarning, 'email nélkül figyelmeztetést kell adnia');
+
+    const invoicesRes = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody = await invoicesRes.json();
+    const invoice = invoicesBody.invoices.find((i) => i.tetelek.some((t) => t.nev === 'Vonalkód generálás'));
+    assert.ok(invoice, 'a számlának EL KELL KÉSZÜLNIE akkor is, ha az email küldése nem sikerült');
+    assert.equal(invoice.pdfElerheto, true);
+  });
+});
+
 test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

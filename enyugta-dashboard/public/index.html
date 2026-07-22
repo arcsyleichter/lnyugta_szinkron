@@ -1293,6 +1293,7 @@
       <button class="nav-item admin-nav-item" data-admin-view="ntak">NTAK állapot</button>
       <button class="nav-item admin-nav-item" data-admin-view="activity">Tevékenység-napló</button>
       <button class="nav-item admin-nav-item" data-admin-view="licenc">Licenc-kezelés</button>
+      <button class="nav-item admin-nav-item" data-admin-view="penzugyek">Pénzügyek</button>
       <button class="nav-item admin-nav-item" data-admin-view="felhasznalok">Felhasználók</button>
     </nav>
     <div class="sidebar-footer">
@@ -1480,6 +1481,65 @@
           <table class="data-table" id="admin-payments-table">
           <thead><tr><th>Dátum</th><th>Cég</th><th>Cél</th><th class="td-right">Összeg</th><th>Állapot</th><th>myPOS ref.</th></tr></thead>
           <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="admin-view" data-admin-view="penzugyek" hidden>
+      <div class="finance-summary-row">
+        <div class="card finance-summary-card">
+          <div class="card-subtitle">Ebben a hónapban</div>
+          <div class="finance-summary-value" id="finance-honap-osszeg">—</div>
+        </div>
+        <div class="card finance-summary-card">
+          <div class="card-subtitle">Idén összesen</div>
+          <div class="finance-summary-value" id="finance-ev-osszeg">—</div>
+        </div>
+        <div class="card finance-summary-card">
+          <div class="card-subtitle">Minden idők bevétele</div>
+          <div class="finance-summary-value" id="finance-total-osszeg">—</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Havi bontás</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">Az utolsó 12 hónap, amiben ténylegesen volt bevétel.</p>
+        <div class="table-scroll">
+          <table class="data-table" id="finance-monthly-table">
+            <thead><tr><th>Hónap</th><th class="td-right">Fizetések száma</th><th class="td-right">Bevétel</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Cégenkénti bontás</div>
+        <div class="table-scroll">
+          <table class="data-table" id="finance-company-table">
+            <thead><tr><th>Cég</th><th class="td-right">Fizetések száma</th><th class="td-right">Bevétel</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Funkciónkénti bontás</div>
+        <div class="table-scroll">
+          <table class="data-table" id="finance-feature-table">
+            <thead><tr><th>Funkció</th><th class="td-right">Fizetések száma</th><th class="td-right">Bevétel</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Kiállított számlák</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">Minden ténylegesen kiállított és a szerveren eltárolt PDF-számla — letölthető formában.</p>
+        <div class="table-scroll">
+          <table class="data-table" id="finance-invoices-table">
+            <thead><tr><th>Sorszám</th><th>Cég</th><th>Dátum</th><th>Tételek</th><th class="td-right">Összeg</th><th></th></tr></thead>
+            <tbody></tbody>
           </table>
         </div>
       </div>

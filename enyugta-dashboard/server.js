@@ -544,6 +544,7 @@ licenseDb.exec(`
     kartya_token TEXT,
     ismetlodo INTEGER NOT NULL DEFAULT 0,
     szamla_sorszam TEXT,
+    szamla_pdf_fajlnev TEXT,
     letrehozva TEXT NOT NULL,
     lezarva TEXT
   );
@@ -707,7 +708,7 @@ licenseDb.exec(`
 // hiányozhatnak).
 {
   const cols = licenseDb.prepare(`PRAGMA table_info(license_payments)`).all();
-  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT']]) {
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT'], ['szamla_pdf_fajlnev', 'TEXT']]) {
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
     }
@@ -1250,10 +1251,43 @@ function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, dat
   return buildSimplePdf(els);
 }
 
+const INVOICES_DIR = path.join(DATA_DIR, 'invoices');
+if (!fs.existsSync(INVOICES_DIR)) fs.mkdirSync(INVOICES_DIR, { recursive: true });
+
+// A számla ELŐÁLLÍTÁSA és LEMEZRE MENTÉSE mindig megtörténik, amint egy
+// fizetés sikeres — FÜGGETLENÜL attól, hogy van-e beállított email cím a
+// cégnél. Ez egy üzleti nyilvántartási követelmény (a bizonylatnak léteznie
+// kell), nem szabad, hogy egy hiányzó email-cím miatt egyáltalán ne
+// készüljön el a számla. Az emailben történő KIKÜLDÉS ettől független,
+// külön, hibatűrő lépés (lásd sendDemoInvoiceEmail lejjebb).
+function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  const cegNev = anySite?.nev || cegKulcs;
+  const adoszam = anySite?.adoszam || '';
+  const datum = todayIsoServer();
+  const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(cegKulcs);
+  const cimSzoveg = billingRow ? formatNavAddress({
+    iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
+    kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
+    hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
+  }) : '';
+  const szamlaSorszam = nextInvoiceNumber();
+  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, szamlaSorszam, ismetlodo });
+  const fajlnev = `${szamlaSorszam.replace('/', '-')}.pdf`;
+  fs.writeFileSync(path.join(INVOICES_DIR, fajlnev), pdf);
+  try {
+    licenseDb.prepare(`UPDATE license_payments SET szamla_sorszam = ?, szamla_pdf_fajlnev = ? WHERE order_id = ? OR order_id LIKE ?`)
+      .run(szamlaSorszam, fajlnev, orderId, `${orderId}-%`);
+  } catch (_) {}
+  logActivity({ type: 'invoice_created', ok: true, companyKey: cegKulcs, nev: null, detail: `Számla előállítva: ${szamlaSorszam} (${orderId})` });
+  return { szamlaSorszam, fajlnev, pdf, cegNev, adoszam };
+}
+
 async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
+  const { szamlaSorszam, pdf, cegNev } = generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo });
+
   const codes = readAccessCodes();
   let email = codes[cegKulcs]?.email || '';
-  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
   // Ha az access-codes.json-ban nincs email, próbáljuk a cég saját,
   // szinkronizált adatbázisában tárolt címet (ugyanaz a tartalék-logika,
   // amit az admin cégek-lista is használ).
@@ -1266,23 +1300,9 @@ async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismet
       } catch (_) {}
     }
   }
-  if (!email) throw new Error('Nincs beállított email cím ehhez a céghez — a demo számlát nem lehetett kiküldeni.');
+  if (!email) throw new Error(`A számla (${szamlaSorszam}) elkészült és eltárolva, de nincs beállított email cím ehhez a céghez — nem lehetett kiküldeni.`);
 
-  const cegNev = anySite?.nev || cegKulcs;
-  const adoszam = anySite?.adoszam || '';
-  const datum = todayIsoServer();
-  const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(cegKulcs);
-  const cimSzoveg = billingRow ? formatNavAddress({
-    iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
-    kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
-    hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
-  }) : '';
   const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
-  const szamlaSorszam = nextInvoiceNumber();
-  try {
-    licenseDb.prepare(`UPDATE license_payments SET szamla_sorszam = ? WHERE order_id = ? OR order_id LIKE ?`).run(szamlaSorszam, orderId, `${orderId}-%`);
-  } catch (_) {}
-  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, szamlaSorszam, ismetlodo });
   const tetelSorokHtml = tetelek.map((t) => `<li>${escapeHtmlForEmail(t.nev)} — ${t.osszeg.toLocaleString('hu-HU')} ${penznem}</li>`).join('');
   await sendBrevoEmail({
     toEmail: email, toName: cegNev,
@@ -3439,6 +3459,99 @@ route('GET', '/api/admin/payments', async (req, res, query) => {
       allapot: p.allapot, myposTrnref: p.mypos_trnref, szamlaSorszam: p.szamla_sorszam, letrehozva: p.letrehozva, lezarva: p.lezarva,
     })),
   });
+});
+
+// ---------------------------------------------------------------------------
+// PÉNZÜGYEK — admin áttekintés az előfizetésekből befolyó összegekről,
+// cégenként/funkciónként/havonta lebontva, plusz a ténylegesen kiküldött
+// (és lemezen eltárolt) PDF-számlák listája, letölthető formában.
+// ---------------------------------------------------------------------------
+route('GET', '/api/admin/finance/overview', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const successfulPayments = licenseDb.prepare(`SELECT * FROM license_payments WHERE allapot = 'SIKERES'`).all();
+
+  const cegNevByKulcs = new Map();
+  for (const entry of companyIndex.values()) cegNevByKulcs.set(entry.cegKulcs, entry.nev);
+  const featureNevByKey = new Map(licenseDb.prepare(`SELECT key, nev FROM license_features`).all().map((f) => [f.key, f.nev]));
+
+  const byCompany = new Map();
+  const byFeature = new Map();
+  const byMonth = new Map();
+  let osszesenMindenIdok = 0, osszesenIdeiEv = 0, osszesenEHonap = 0;
+  const now = new Date();
+  const ezHonap = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const ideiEv = String(now.getFullYear());
+
+  for (const p of successfulPayments) {
+    osszesenMindenIdok += p.osszeg;
+    if (p.letrehozva.startsWith(ideiEv)) osszesenIdeiEv += p.osszeg;
+    if (p.letrehozva.startsWith(ezHonap)) osszesenEHonap += p.osszeg;
+
+    const cegNev = cegNevByKulcs.get(p.ceg_kulcs) || p.ceg_kulcs;
+    if (!byCompany.has(p.ceg_kulcs)) byCompany.set(p.ceg_kulcs, { cegKulcs: p.ceg_kulcs, cegNev, osszeg: 0, darab: 0 });
+    const c = byCompany.get(p.ceg_kulcs); c.osszeg += p.osszeg; c.darab += 1;
+
+    const fKey = p.feature_key || p.cel;
+    const featureNev = featureNevByKey.get(p.feature_key) || fKey;
+    if (!byFeature.has(fKey)) byFeature.set(fKey, { featureKey: fKey, featureNev, osszeg: 0, darab: 0 });
+    const f = byFeature.get(fKey); f.osszeg += p.osszeg; f.darab += 1;
+
+    const honap = p.letrehozva.slice(0, 7);
+    if (!byMonth.has(honap)) byMonth.set(honap, { honap, osszeg: 0, darab: 0 });
+    const m = byMonth.get(honap); m.osszeg += p.osszeg; m.darab += 1;
+  }
+
+  sendJson(res, 200, {
+    osszesenMindenIdok, osszesenIdeiEv, osszesenEHonap,
+    cegenkent: [...byCompany.values()].sort((a, b) => b.osszeg - a.osszeg),
+    funkciononkent: [...byFeature.values()].sort((a, b) => b.osszeg - a.osszeg),
+    havonta: [...byMonth.values()].sort((a, b) => b.honap.localeCompare(a.honap)).slice(0, 12),
+  });
+});
+
+// A kiállított számlák listája — telephely+funkció szinten tárolt sorokat
+// SZÁMLA-SORSZÁM szerint csoportosítva mutatja (egy fizetés több tételt/
+// funkciót is tartalmazhatott egyetlen közös számlán).
+route('GET', '/api/admin/finance/invoices', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const limit = Math.min(parseInt(query.limit || '200', 10) || 200, 1000);
+  const rows = licenseDb.prepare(`SELECT * FROM license_payments WHERE szamla_sorszam IS NOT NULL ORDER BY letrehozva DESC LIMIT 5000`).all();
+
+  const cegNevByKulcs = new Map();
+  for (const entry of companyIndex.values()) cegNevByKulcs.set(entry.cegKulcs, entry.nev);
+  const featureNevByKey = new Map(licenseDb.prepare(`SELECT key, nev FROM license_features`).all().map((f) => [f.key, f.nev]));
+
+  const bySzamla = new Map();
+  for (const p of rows) {
+    if (!bySzamla.has(p.szamla_sorszam)) {
+      bySzamla.set(p.szamla_sorszam, {
+        szamlaSorszam: p.szamla_sorszam, cegKulcs: p.ceg_kulcs, cegNev: cegNevByKulcs.get(p.ceg_kulcs) || p.ceg_kulcs,
+        letrehozva: p.letrehozva, allapot: p.allapot, penznem: p.penznem, osszeg: 0, tetelek: [],
+        pdfElerheto: !!p.szamla_pdf_fajlnev, pdfFajlnev: p.szamla_pdf_fajlnev,
+      });
+    }
+    const inv = bySzamla.get(p.szamla_sorszam);
+    inv.osszeg += p.osszeg;
+    inv.tetelek.push({ nev: featureNevByKey.get(p.feature_key) || p.feature_key || p.cel, osszeg: p.osszeg });
+  }
+  const invoices = [...bySzamla.values()].sort((a, b) => b.letrehozva.localeCompare(a.letrehozva)).slice(0, limit);
+  sendJson(res, 200, { invoices });
+});
+
+// A ténylegesen lemezen eltárolt PDF-számla letöltése/megnyitása.
+route('GET', '/api/admin/finance/invoice-pdf', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const fajlnev = String(query.fajlnev || '').replace(/[^a-zA-Z0-9.\-]/g, '');
+  if (!fajlnev) return sendJson(res, 400, { error: 'Hiányzó fájlnév.' });
+  const exists = licenseDb.prepare(`SELECT 1 FROM license_payments WHERE szamla_pdf_fajlnev = ?`).get(fajlnev);
+  if (!exists) return sendJson(res, 404, { error: 'Nincs ilyen számla.' });
+  const filePath = path.join(INVOICES_DIR, fajlnev);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A számla PDF-fájlja nem található a szerveren.' });
+  res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${fajlnev}"`, 'Cache-Control': 'private, max-age=3600' });
+  res.end(fs.readFileSync(filePath));
 });
 
 // ---------------------------------------------------------------------------

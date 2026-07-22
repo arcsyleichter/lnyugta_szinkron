@@ -991,3 +991,8 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 /* Hivatalos (NAV-szerű) cím-mezők rácsa — profil és telephely adatoknál */
 .nav-address-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px 14px; margin:10px 0; }
+
+/* Pénzügyek admin nézet — összesítő kártyák */
+.finance-summary-row{ display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; margin-bottom:20px; }
+.finance-summary-card{ text-align:center; padding:20px 16px; }
+.finance-summary-value{ font-family:var(--font-mono); font-size:26px; font-weight:700; color:var(--jade-deep); margin-top:6px; }

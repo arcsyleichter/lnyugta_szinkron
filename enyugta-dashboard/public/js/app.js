@@ -263,6 +263,7 @@ document.querySelectorAll('.admin-nav-item').forEach((btn) => {
     if (btn.dataset.adminView === 'felhasznalok') loadAdminUsers();
     if (btn.dataset.adminView === 'licenc') loadLicenseData();
     if (btn.dataset.adminView === 'regisztraciok') loadAdminRegistrations();
+    if (btn.dataset.adminView === 'penzugyek') loadFinanceView();
   });
 });
 
@@ -288,6 +289,52 @@ listen('admin-mobile-tab-more', 'click', () => {
 let licenseFeaturesCache = [];
 let licenseCompaniesCache = [];
 let licensePackagesCache = [];
+
+async function loadFinanceView() {
+  try {
+    const [overview, invoicesData] = await Promise.all([
+      api('/api/admin/finance/overview'),
+      api('/api/admin/finance/invoices'),
+    ]);
+    document.getElementById('finance-honap-osszeg').textContent = fmtHuf(overview.osszesenEHonap);
+    document.getElementById('finance-ev-osszeg').textContent = fmtHuf(overview.osszesenIdeiEv);
+    document.getElementById('finance-total-osszeg').textContent = fmtHuf(overview.osszesenMindenIdok);
+
+    const monthNames = ['január', 'február', 'március', 'április', 'május', 'június', 'július', 'augusztus', 'szeptember', 'október', 'november', 'december'];
+    const monthlyBody = document.querySelector('#finance-monthly-table tbody');
+    monthlyBody.innerHTML = overview.havonta.length
+      ? overview.havonta.map((h) => {
+          const [ev, honap] = h.honap.split('-');
+          return `<tr><td>${monthNames[parseInt(honap, 10) - 1]} ${ev}</td><td class="td-right">${h.darab}</td><td class="td-right">${fmtHuf(h.osszeg)}</td></tr>`;
+        }).join('')
+      : '<tr><td colspan="3" class="empty-state">Még nincs egyetlen sikeres fizetés sem.</td></tr>';
+
+    const companyBody = document.querySelector('#finance-company-table tbody');
+    companyBody.innerHTML = overview.cegenkent.length
+      ? overview.cegenkent.map((c) => `<tr><td>${escapeHtml(c.cegNev)}</td><td class="td-right">${c.darab}</td><td class="td-right">${fmtHuf(c.osszeg)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty-state">Még nincs egyetlen sikeres fizetés sem.</td></tr>';
+
+    const featureBody = document.querySelector('#finance-feature-table tbody');
+    featureBody.innerHTML = overview.funkciononkent.length
+      ? overview.funkciononkent.map((f) => `<tr><td>${escapeHtml(f.featureNev)}</td><td class="td-right">${f.darab}</td><td class="td-right">${fmtHuf(f.osszeg)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty-state">Még nincs egyetlen sikeres fizetés sem.</td></tr>';
+
+    const invoicesBody = document.querySelector('#finance-invoices-table tbody');
+    invoicesBody.innerHTML = invoicesData.invoices.length
+      ? invoicesData.invoices.map((inv) => `
+        <tr>
+          <td class="ntak-uuid">${escapeHtml(inv.szamlaSorszam)}</td>
+          <td>${escapeHtml(inv.cegNev)}</td>
+          <td>${fmtDateTime(inv.letrehozva)}</td>
+          <td>${inv.tetelek.map((t) => escapeHtml(t.nev)).join(', ')}</td>
+          <td class="td-right">${fmtHuf(inv.osszeg)}</td>
+          <td>${inv.pdfElerheto ? `<a class="btn-tiny" href="/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(inv.pdfFajlnev)}" target="_blank">⬇ PDF</a>` : '<span class="muted">nincs fájl</span>'}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
+  } catch (e) {
+    alert('Nem sikerült betölteni a pénzügyi adatokat: ' + e.message);
+  }
+}
 
 async function loadLicenseData() {
   await Promise.all([loadLicenseFeatures(), loadLicenseCompanies(), loadLicensePackages(), loadAdminPayments(), loadLicenseEnforceToggle()]);
