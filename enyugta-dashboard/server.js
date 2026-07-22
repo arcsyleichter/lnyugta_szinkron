@@ -4874,7 +4874,27 @@ function registerOrCheckDevice(cegKulcs, eszkozAzonosito) {
 // EZ a közös, egyetlen forrás, amit MIND az androidos /api/license/status,
 // MIND az admin felület "tényleges állapot" lekérdezése használ, hogy a
 // kettő SOHA ne térhessen el egymástól.
+// Igaz, ha ennek a cégnek VALÓBAN van már adata a szerveren (tehát
+// legalább egyszer ténylegesen feltöltött egy adatbázist) — ez különbözik
+// attól, hogy csak LÉTEZIK-e egy adószám, amit valaki lekérdezett.
+function companyHasAnyData(cegKulcs) {
+  for (const entry of companyIndex.values()) {
+    if (entry.cegKulcs === cegKulcs) return true;
+  }
+  return false;
+}
+
 function computeEffectiveLicense(cegKulcs, eszkoz) {
+  // Ha ennek a cégnek MÉG SOHA nem érkezett feltöltése (csak lekérdezték
+  // a regisztrációját/licenc-állapotát), sem az alap-előfizetést, sem az
+  // eszköz-regisztrációt nem szabad "aktívnak" mutatni — korábban ez a
+  // két mező hibásan `true`-ra állt egy ilyen, valójában nem is létező
+  // cégnél, és egy puszta lekérdezés (mellékhatásként) automatikusan
+  // regisztrálta volna is az eszközt, ami szintén nem helyes egy csak-
+  // olvasó művelet során.
+  if (!companyHasAnyData(cegKulcs)) {
+    return { alapElofizetesAktiv: false, funkciok: [], eszkozRegisztralva: eszkoz ? false : null, inTrial: false };
+  }
   const eszkozRegisztralva = eszkoz ? registerOrCheckDevice(cegKulcs, eszkoz) : null;
   const alapElofizetesAktiv = isBaseSubscriptionActive(cegKulcs);
   const catalog = licenseDb.prepare('SELECT key, aktiv FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev').all();

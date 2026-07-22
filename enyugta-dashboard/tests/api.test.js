@@ -333,6 +333,33 @@ test('Cikktörzs — termékfotó és göngyöleg-kapcsolás', async (t) => {
   });
 });
 
+test('Licenc-lekérdezés — soha nem szinkronizált cég', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  await t.test('egy olyan adószámra, aminek MÉG SOSEM érkezett feltöltése, mindkét mezőnek false-nak kell lennie', async () => {
+    const res = await fetch(
+      `${server.baseUrl}/api/license/status?adoszam=99999999-1-42&eszkoz=ismeretlen-uuid-1234`,
+      { headers: { 'x-api-key': server.syncApiKey } }
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.alapElofizetesAktiv, false, 'egy soha nem szinkronizált cégnél az alap-előfizetés NEM lehet aktív');
+    assert.equal(body.eszkozRegisztralva, false, 'egy soha nem szinkronizált cégnél az eszköz NEM lehet regisztrálva');
+    assert.deepEqual(body.funkciok, []);
+  });
+
+  await t.test('egy MÁR ténylegesen szinkronizált cégnél a szokásos logika érvényesül továbbra is', async () => {
+    const res = await fetch(
+      `${server.baseUrl}/api/license/status?adoszam=18774455-1-42&eszkoz=uj-eszkoz-elso-lekerdezes`,
+      { headers: { 'x-api-key': server.syncApiKey } }
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.alapElofizetesAktiv, true, 'egy valóban létező, szinkronizált cégnél az alap-előfizetésnek alapból aktívnak kell lennie');
+  });
+});
+
 test('Admin — cég végleges törlése', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());
