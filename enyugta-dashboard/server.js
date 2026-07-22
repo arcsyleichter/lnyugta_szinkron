@@ -2962,14 +2962,16 @@ route('POST', '/api/payment/demo-pay', async (req, res) => {
   const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
   logActivity({ type: 'payment_demo', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `Demo fizetés (${session.telephelyKod}): ${tetelek.map((t) => t.nev).join(', ')} — összesen ${osszesen} HUF (${orderId})` });
 
+  let emailWarning = null;
   try {
     await sendDemoInvoiceEmail({ cegKulcs: session.cegKulcs, tetelek: tetelek.map((t) => ({ nev: `${t.nev} (${session.telephelyKod} telephely) - havi előfizetés (demo)`, osszeg: t.osszeg })), penznem: 'HUF', orderId, ismetlodo: false });
   } catch (e) {
     console.error('[fizetés] demo számla-email hiba:', e.message);
     logActivity({ type: 'payment_invoice_email', ok: false, companyKey: session.cegKulcs, nev: null, detail: e.message });
+    emailWarning = e.message;
   }
 
-  sendJson(res, 200, { ok: true, orderId, lejarat, osszesen });
+  sendJson(res, 200, { ok: true, orderId, lejarat, osszesen, emailWarning });
 });
 
 // A vásárló böngészője ide tér vissza a fizetés után (URL_OK/URL_Cancel) —

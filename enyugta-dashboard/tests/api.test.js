@@ -598,6 +598,11 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
     const body = await res.json();
     assert.ok(body.orderId);
     assert.ok(body.lejarat);
+    // A teszt-környezetben nincs Brevo (email) beállítva — ez pontosan azt
+    // a hibát reprodukálja, amit a fejlesztő élesben jelzett ("nem kaptam
+    // emailt a számlával"): a fizetés sikeres, de a válasznak jeleznie
+    // kell, hogy a számla-email küldése meghiúsult, ne csendben nyeljük el.
+    assert.ok(body.emailWarning, 'a válasznak jeleznie kell, ha a demo-számla emailt nem sikerült kiküldeni');
 
     const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
     const profileBody = await profileRes.json();

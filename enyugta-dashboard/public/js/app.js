@@ -4349,10 +4349,13 @@ function openDemoPaymentModal() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Feldolgozás…';
     try {
-      await api('/api/payment/demo-pay', { method: 'POST', body: JSON.stringify({ featureKeys: [...profilFeaturesCart] }) });
+      const result = await api('/api/payment/demo-pay', { method: 'POST', body: JSON.stringify({ featureKeys: [...profilFeaturesCart] }) });
       profilFeaturesCart.clear();
       document.getElementById('demo-payment-modal-backdrop').hidden = true;
       loadProfilFeatures();
+      if (result.emailWarning) {
+        alert(`A fizetés sikeres volt, a funkciók aktiválva vannak — de a demo-számla emailt NEM sikerült kiküldeni:\n\n${result.emailWarning}\n\nSzólj az üzemeltetőnek, ha ez rendszeresen előfordul.`);
+      }
     } catch (err) {
       msg.textContent = err.message;
       msg.style.color = 'var(--brick)';
