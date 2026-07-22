@@ -431,6 +431,62 @@ test('Licenc-lekérdezés — soha nem szinkronizált cég', async (t) => {
   });
 });
 
+test('NAV-formátumú cím — számlázási cím és telephely-cím', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('a számlázási cím elmenthető és pontosan visszaolvasható', async () => {
+    const cookie = await getCompanySession();
+    const saveRes = await fetch(`${server.baseUrl}/api/profile/billing-address`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ iranyitoszam: '1053', telepules: 'Budapest', kozteruletNev: 'Kossuth Lajos', kozteruletJelleg: 'utca', hazszam: '12', emelet: '2. em. 3. ajtó' }),
+    });
+    assert.equal(saveRes.status, 200);
+    const getRes = await fetch(`${server.baseUrl}/api/profile/billing-address`, { headers: { Cookie: cookie } });
+    const body = await getRes.json();
+    assert.equal(body.telepules, 'Budapest');
+    assert.equal(body.hazszam, '12');
+    assert.ok(body.kozteruletJellegek.includes('utca'), 'a válasznak tartalmaznia kell a közterület-jelleg listát');
+  });
+
+  await t.test('érvénytelen irányítószám elutasításra kerül', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/billing-address`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ iranyitoszam: 'ABC12', telepules: 'Budapest' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  await t.test('új telephely strukturált címmel jön létre, és a megjelenített cím helyesen formázott', async () => {
+    const cookie = await getCompanySession();
+    const createRes = await fetch(`${server.baseUrl}/api/telephely/create`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ kod: '03', nev: 'Belvárosi bolt', iranyitoszam: '6000', telepules: 'Kecskemét', kozteruletNev: 'Fő', kozteruletJelleg: 'tér', hazszam: '3' }),
+    });
+    assert.equal(createRes.status, 200);
+
+    const listRes = await fetch(`${server.baseUrl}/api/telephelyek`, { headers: { Cookie: cookie } });
+    const listBody = await listRes.json();
+    const site = listBody.telephelyek.find((t) => t.kod === '03');
+    assert.equal(site.cim, '6000 Kecskemét, Fő tér 3.');
+    assert.equal(site.cimReszletek.telepules, 'Kecskemét');
+  });
+});
+
 test('Telephelyenkénti önkiszolgáló funkció-választás', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

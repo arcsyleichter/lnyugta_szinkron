@@ -123,6 +123,24 @@ function dbFileForKey(siteKey) {
 // ---------------------------------------------------------------------------
 const TELEPHELYEK_PATH = path.join(DATA_DIR, 'telephelyek.json');
 
+// A hivatalos, NAV-szerű címformátumhoz — a magyar címzésben szokásos,
+// leggyakoribb közterület-jellegek. Nem teljes, kimerítő hivatalos
+// kódtár (ilyen nincs is egységesen), ezért mindig van egy "egyéb, kézi
+// bevitel" lehetőség is, hogy semmilyen valós cím ne legyen kizárva.
+const KOZTERULET_JELLEGEK = [
+  'utca', 'út', 'tér', 'körút', 'sétány', 'köz', 'sor', 'dűlő', 'part',
+  'rakpart', 'liget', 'fasor', 'udvar', 'park', 'lejtő', 'ösvény',
+];
+function formatNavAddress(a) {
+  if (!a) return '';
+  const kozterulet = [a.kozteruletNev, a.kozteruletJelleg].filter(Boolean).join(' ');
+  const line1 = [
+    [a.iranyitoszam, a.telepules].filter(Boolean).join(' '),
+    [kozterulet, a.hazszam ? `${a.hazszam}.` : ''].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ');
+  return [line1, a.emelet || ''].filter(Boolean).join(' ');
+}
+
 function readTelephelyek() {
   try { return JSON.parse(fs.readFileSync(TELEPHELYEK_PATH, 'utf8')); }
   catch (_) { return {}; }
@@ -596,6 +614,12 @@ licenseDb.exec(`
   CREATE TABLE IF NOT EXISTS company_settings (
     ceg_kulcs TEXT PRIMARY KEY,
     ntak_aktiv INTEGER NOT NULL DEFAULT 0,
+    szamlazasi_iranyitoszam TEXT,
+    szamlazasi_telepules TEXT,
+    szamlazasi_kozterulet_nev TEXT,
+    szamlazasi_kozterulet_jelleg TEXT,
+    szamlazasi_hazszam TEXT,
+    szamlazasi_emelet TEXT,
     updated_at TEXT NOT NULL
   );
 
@@ -667,6 +691,16 @@ licenseDb.exec(`
   for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0']]) {
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
+    }
+  }
+}
+// Migráció — a NAV-formátumú, strukturált számlázási cím mezői a
+// company_settings táblához (korábbi telepítéseknél hiányozhatnak).
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(company_settings)`).all();
+  for (const name of ['szamlazasi_iranyitoszam', 'szamlazasi_telepules', 'szamlazasi_kozterulet_nev', 'szamlazasi_kozterulet_jelleg', 'szamlazasi_hazszam', 'szamlazasi_emelet']) {
+    if (!cols.some((c) => c.name === name)) {
+      licenseDb.exec(`ALTER TABLE company_settings ADD COLUMN ${name} TEXT`);
     }
   }
 }
@@ -1040,15 +1074,30 @@ function sanitizePdfText(s) {
     .replace(/[^\x00-\xFF]/g, '?') // minden más, WinAnsi-n kívüli karakter
     .replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
-function buildSimplePdf(lines) {
-  // lines: [{ text, size, y, bold }] — y: pont a lap tetejétől lefelé mérve.
+function buildSimplePdf(elements) {
+  // elements: kevert lista — { type:'text', text, size, y, x, bold, color:[r,g,b] }
+  //                        vagy { type:'rect', x, y, w, h, fill:[r,g,b] }
+  //                        vagy { type:'line', x1, y1, x2, y2, color:[r,g,b], width }
+  // y mindenhol a lap TETEJÉTŐL lefelé mérve (természetesebb elrendezéshez),
+  // a függvény belül számolja át PDF-koordinátára (lentről felfelé).
   const PAGE_H = 842, PAGE_W = 595;
-  const content = lines.map((l) => {
-    const font = l.bold ? '/F2' : '/F1';
-    const size = l.size || 11;
-    const y = PAGE_H - l.y;
-    return `BT ${font} ${size} Tf 50 ${y} Td (${sanitizePdfText(l.text)}) Tj ET`;
-  }).join('\n');
+  const toPdfY = (y) => PAGE_H - y;
+  const parts = [];
+  for (const el of elements) {
+    if (el.type === 'rect') {
+      const [r, g, b] = el.fill || [0, 0, 0];
+      parts.push(`${r} ${g} ${b} rg ${el.x} ${toPdfY(el.y + el.h)} ${el.w} ${el.h} re f`);
+    } else if (el.type === 'line') {
+      const [r, g, b] = el.color || [0, 0, 0];
+      parts.push(`${el.width || 1} w ${r} ${g} ${b} RG ${el.x1} ${toPdfY(el.y1)} m ${el.x2} ${toPdfY(el.y2)} l S`);
+    } else {
+      const font = el.bold ? '/F2' : '/F1';
+      const size = el.size || 11;
+      const [r, g, b] = el.color || [0, 0, 0];
+      parts.push(`${r} ${g} ${b} rg BT ${font} ${size} Tf ${el.x || 50} ${toPdfY(el.y)} Td (${sanitizePdfText(el.text)}) Tj ET`);
+    }
+  }
+  const content = parts.join('\n');
   const objects = [];
   objects.push('<< /Type /Catalog /Pages 2 0 R >>');
   objects.push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
@@ -1076,30 +1125,62 @@ function buildSimplePdf(lines) {
 // Egyszerű, tájékoztató jellegű "demo számla" PDF egy sikeres funkció-
 // előfizetési díjról. NEM hivatalos, számvitelileg elfogadott bizonylat —
 // a kérésnek megfelelően csak egy áttekinthető, letölthető/emailezhető
-// összefoglaló.
-function buildDemoInvoicePdf({ cegNev, adoszam, tetelek, penznem, datum, orderId, ismetlodo }) {
+// összefoglaló, most már rendezettebb, "hivatalos számlaszerű" elrendezéssel.
+function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, ismetlodo }) {
   const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
-  const lines = [
-    { text: 'L-NYUGTA - Dijbekero / demo szamla', size: 16, y: 60, bold: true },
-    { text: '(Tajekoztato jellegu bizonylat, nem hivatalos szamviteli szamla)', size: 9, y: 82 },
-    { text: `Kiállítás dátuma: ${datum}`, size: 11, y: 120 },
-    { text: `Bizonylatszám: ${orderId}`, size: 11, y: 140 },
-    { text: `Vevő: ${cegNev}`, size: 11, y: 175 },
-    { text: `Adószám: ${adoszam}`, size: 11, y: 195 },
-    { text: 'Tételek', size: 11, y: 240, bold: true },
-  ];
-  let y = 262;
+  const JADE = [0.35, 0.58, 0.79]; const INK = [0.16, 0.2, 0.28]; const DIM = [0.45, 0.48, 0.53]; const AMBER = [0.94, 0.66, 0.24];
+  const els = [];
+  // Fejléc-sáv
+  els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 90, fill: JADE });
+  els.push({ type: 'text', x: 50, y: 40, text: 'L-NYUGTA', size: 22, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 50, y: 62, text: 'Dijbekero / demo szamla', size: 11, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 400, y: 40, text: `Bizonylatszam:`, size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 400, y: 54, text: orderId, size: 10, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 400, y: 70, text: `Datum: ${datum}`, size: 9, color: [1, 1, 1] });
+
+  // Kiállító / Vevő, két oszlopban
+  const infoTop = 130;
+  els.push({ type: 'text', x: 50, y: infoTop, text: 'KIALLITO', size: 9, bold: true, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 18, text: 'L-NYUGTA rendszer', size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 50, y: infoTop + 34, text: '(demo / tajekoztato bizonylat kiallitoja)', size: 9, color: DIM });
+
+  els.push({ type: 'text', x: 320, y: infoTop, text: 'VEVO', size: 9, bold: true, color: DIM });
+  els.push({ type: 'text', x: 320, y: infoTop + 18, text: cegNev, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 320, y: infoTop + 34, text: `Adoszam: ${adoszam || '-'}`, size: 9, color: DIM });
+  if (cimSzoveg) els.push({ type: 'text', x: 320, y: infoTop + 48, text: cimSzoveg, size: 9, color: DIM });
+
+  els.push({ type: 'line', x1: 50, y1: infoTop + 65, x2: 545, y2: infoTop + 65, color: [0.85, 0.85, 0.85], width: 1 });
+
+  // Tételes rész — fejléc sáv, majd soronként
+  const tableTop = infoTop + 90;
+  els.push({ type: 'rect', x: 50, y: tableTop - 18, w: 495, h: 24, fill: [0.95, 0.96, 0.97] });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Tetel megnevezese', size: 10, bold: true, color: INK });
+  els.push({ type: 'text', x: 460, y: tableTop, text: 'Osszeg', size: 10, bold: true, color: INK });
+  let rowY = tableTop + 26;
   for (const t of tetelek) {
-    lines.push({ text: `${t.nev} - ${t.osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 10.5, y });
-    y += 20;
+    els.push({ type: 'text', x: 55, y: rowY, text: t.nev, size: 10, color: INK });
+    els.push({ type: 'text', x: 460, y: rowY, text: `${t.osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 10, color: INK });
+    els.push({ type: 'line', x1: 50, y1: rowY + 10, x2: 545, y2: rowY + 10, color: [0.92, 0.92, 0.92], width: 0.5 });
+    rowY += 24;
   }
-  y += 10;
-  lines.push({ text: `Összesen: ${osszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, y, bold: true });
-  y += 25;
-  lines.push({ text: ismetlodo ? 'Ismétlődő, havi előfizetési díj - a következő terhelés kb. 1 hónap múlva esedékes.' : 'Kezdeti előfizetési díj - a szolgáltatás mostantól havonta automatikusan megújul.', size: 10, y });
-  y += 22;
-  lines.push({ text: 'Fizetési mód: demo fizetés (nincs valódi bankkártya-terhelés)', size: 10, y });
-  return buildSimplePdf(lines);
+  rowY += 6;
+  els.push({ type: 'line', x1: 50, y1: rowY, x2: 545, y2: rowY, color: INK, width: 1.2 });
+  rowY += 22;
+  els.push({ type: 'text', x: 400, y: rowY, text: 'Osszesen', size: 12, bold: true, color: INK });
+  els.push({ type: 'text', x: 460, y: rowY, text: `${osszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: JADE });
+
+  rowY += 40;
+  els.push({ type: 'rect', x: 50, y: rowY, w: 495, h: 46, fill: [0.98, 0.95, 0.88] });
+  els.push({
+    type: 'text', x: 60, y: rowY + 18, size: 9.5, color: [0.54, 0.35, 0.08],
+    text: ismetlodo
+      ? 'Ismetlodo, havi elofizetesi dij - a kovetkezo terheles kb. 1 honap mulva esedekes.'
+      : 'Kezdeti elofizetesi dij - a szolgaltatas mostantol havonta automatikusan megujul.',
+  });
+  els.push({ type: 'text', x: 60, y: rowY + 34, text: 'Fizetesi mod: demo fizetes (nincs valodi bankkartya-terheles)', size: 9, color: [0.54, 0.35, 0.08] });
+
+  els.push({ type: 'text', x: 50, y: 800, text: '(Tajekoztato jellegu bizonylat, nem hivatalos szamviteli szamla.)', size: 8, color: DIM });
+  return buildSimplePdf(els);
 }
 
 async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
@@ -1123,8 +1204,14 @@ async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismet
   const cegNev = anySite?.nev || cegKulcs;
   const adoszam = anySite?.adoszam || '';
   const datum = todayIsoServer();
+  const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(cegKulcs);
+  const cimSzoveg = billingRow ? formatNavAddress({
+    iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
+    kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
+    hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
+  }) : '';
   const osszesen = tetelek.reduce((s, t) => s + t.osszeg, 0);
-  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, tetelek, penznem, datum, orderId, ismetlodo });
+  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, ismetlodo });
   const tetelSorokHtml = tetelek.map((t) => `<li>${escapeHtmlForEmail(t.nev)} — ${t.osszeg.toLocaleString('hu-HU')} ${penznem}</li>`).join('');
   await sendBrevoEmail({
     toEmail: email, toName: cegNev,
@@ -1617,7 +1704,7 @@ route('GET', '/api/telephelyek', async (req, res) => {
     const siteKey = makeSiteKey(session.cegKulcs, t.kod);
     const site = companyIndex.get(siteKey);
     return {
-      kod: t.kod, nev: t.nev, cim: t.cim || (site ? site.cim : ''),
+      kod: t.kod, nev: t.nev, cim: t.cimSzoveg || (site ? site.cim : ''), cimReszletek: t.cim || null,
       vanAdat: !!site,
       // csak akkor mutatunk szinkron-időpontot, ha a telephelynek TÉNYLEGESEN
       // van élő adata is — különben egy elárvult sync-meta bejegyzés (pl.
@@ -1661,6 +1748,19 @@ route('POST', '/api/telephely/select', async (req, res) => {
 // Új telephely felvétele (telephely-karbantartó). Cég-szintű hitelesítés
 // is elég — ki lehet bővíteni a telephely-választó képernyőről is,
 // anélkül hogy előbb ki kéne választani egy meglévőt.
+function parseNavAddressBody(body) {
+  const iranyitoszam = clampStr(body.iranyitoszam, 10);
+  if (iranyitoszam && !/^\d{4}$/.test(iranyitoszam)) throw new Error('Az irányítószám 4 számjegyből áll.');
+  return {
+    iranyitoszam: iranyitoszam || '',
+    telepules: clampStr(body.telepules, 80) || '',
+    kozteruletNev: clampStr(body.kozteruletNev, 80) || '',
+    kozteruletJelleg: clampStr(body.kozteruletJelleg, 30) || '',
+    hazszam: clampStr(body.hazszam, 20) || '',
+    emelet: clampStr(body.emelet, 60) || '',
+  };
+}
+
 route('POST', '/api/telephely/create', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
@@ -1668,15 +1768,16 @@ route('POST', '/api/telephely/create', async (req, res) => {
   const body = await readJsonBody(req);
   const kod = normalizeTelephelyKod(body.kod);
   const nev = clampStr(body.nev, 100);
-  const cim = String(body.cim || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+  let cim;
+  try { cim = parseNavAddressBody(body); } catch (e) { return sendJson(res, 400, { error: e.message }); }
 
   const data = readTelephelyek();
   if (!data[session.cegKulcs]) data[session.cegKulcs] = [];
   if (data[session.cegKulcs].some((t) => t.kod === kod)) {
     return sendJson(res, 400, { error: `Már létezik telephely "${kod}" kóddal — válassz másikat.` });
   }
-  data[session.cegKulcs].push({ kod, nev, cim, letrehozva: new Date().toISOString() });
+  data[session.cegKulcs].push({ kod, nev, cim, cimSzoveg: formatNavAddress(cim), letrehozva: new Date().toISOString() });
   writeTelephelyek(data);
   logActivity({ type: 'telephely_create', ok: true, companyKey: session.cegKulcs, nev: session.nev, detail: `Új telephely: ${nev} (${kod})` });
   sendJson(res, 200, { ok: true, kod, nev, cim });
@@ -1695,14 +1796,15 @@ route('POST', '/api/telephely/update', async (req, res) => {
     return sendJson(res, 403, { error: 'Üzletvezetőként csak a saját telephelyed adatait szerkesztheted.' });
   }
   const nev = clampStr(body.nev, 100);
-  const cim = String(body.cim || '').trim();
   if (!nev) return sendJson(res, 400, { error: 'A telephely neve kötelező.' });
+  let cim;
+  try { cim = parseNavAddressBody(body); } catch (e) { return sendJson(res, 400, { error: e.message }); }
 
   const data = readTelephelyek();
   const list = data[session.cegKulcs] || [];
   const t = list.find((x) => x.kod === kod);
   if (!t) return sendJson(res, 404, { error: 'Ismeretlen telephely.' });
-  t.nev = nev; t.cim = cim;
+  t.nev = nev; t.cim = cim; t.cimSzoveg = formatNavAddress(cim);
   writeTelephelyek(data);
   logActivity({ type: 'telephely_update', ok: true, companyKey: makeSiteKey(session.cegKulcs, kod), nev: session.nev, detail: `Telephely frissítve: ${nev} (${kod})` });
   sendJson(res, 200, { ok: true, kod, nev, cim });
@@ -1721,7 +1823,7 @@ route('GET', '/api/profile', async (req, res) => {
     const siteKey = makeSiteKey(session.cegKulcs, t.kod);
     const s = companyIndex.get(siteKey);
     return {
-      kod: t.kod, nev: t.nev, cim: t.cim || (s ? s.cim : ''),
+      kod: t.kod, nev: t.nev, cim: t.cimSzoveg || (s ? s.cim : ''), cimReszletek: t.cim || null,
       vanAdat: !!s, aktiv: t.kod === session.telephelyKod,
       utolsoSzinkron: s ? (meta[siteKey]?.lastSync || null) : null,
     };
@@ -2146,6 +2248,47 @@ route('POST', '/api/profile/ntak-setting', async (req, res) => {
   `).run(session.cegKulcs, ntakAktiv ? 1 : 0, new Date().toISOString());
   logActivity({ type: 'ntak_setting_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: ntakAktiv ? 'NTAK-mezők bekapcsolva a Cikktörzsben.' : 'NTAK-mezők kikapcsolva a Cikktörzsben.' });
   sendJson(res, 200, { ok: true, ntakAktiv: !!ntakAktiv });
+});
+
+// Cég saját, strukturált (NAV-formátumú) számlázási címe — ezt használja a
+// demo-számla PDF is. Csak a cégtulajdonos módosíthatja, mindenki (owner +
+// manager) lekérdezheti.
+route('GET', '/api/profile/billing-address', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const row = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(session.cegKulcs);
+  sendJson(res, 200, {
+    iranyitoszam: row?.szamlazasi_iranyitoszam || '',
+    telepules: row?.szamlazasi_telepules || '',
+    kozteruletNev: row?.szamlazasi_kozterulet_nev || '',
+    kozteruletJelleg: row?.szamlazasi_kozterulet_jelleg || '',
+    hazszam: row?.szamlazasi_hazszam || '',
+    emelet: row?.szamlazasi_emelet || '',
+    kozteruletJellegek: KOZTERULET_JELLEGEK,
+  });
+});
+route('POST', '/api/profile/billing-address', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Csak a cégtulajdonos módosíthatja a számlázási címet.' });
+  const body = await readJsonBody(req);
+  const iranyitoszam = clampStr(body.iranyitoszam, 10);
+  if (iranyitoszam && !/^\d{4}$/.test(iranyitoszam)) return sendJson(res, 400, { error: 'Az irányítószám 4 számjegyből áll.' });
+  const telepules = clampStr(body.telepules, 80);
+  const kozteruletNev = clampStr(body.kozteruletNev, 80);
+  const kozteruletJelleg = clampStr(body.kozteruletJelleg, 30);
+  const hazszam = clampStr(body.hazszam, 20);
+  const emelet = clampStr(body.emelet, 60);
+  licenseDb.prepare(`
+    INSERT INTO company_settings (ceg_kulcs, szamlazasi_iranyitoszam, szamlazasi_telepules, szamlazasi_kozterulet_nev, szamlazasi_kozterulet_jelleg, szamlazasi_hazszam, szamlazasi_emelet, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET
+      szamlazasi_iranyitoszam = excluded.szamlazasi_iranyitoszam, szamlazasi_telepules = excluded.szamlazasi_telepules,
+      szamlazasi_kozterulet_nev = excluded.szamlazasi_kozterulet_nev, szamlazasi_kozterulet_jelleg = excluded.szamlazasi_kozterulet_jelleg,
+      szamlazasi_hazszam = excluded.szamlazasi_hazszam, szamlazasi_emelet = excluded.szamlazasi_emelet, updated_at = excluded.updated_at
+  `).run(session.cegKulcs, iranyitoszam || null, telepules || null, kozteruletNev || null, kozteruletJelleg || null, hazszam || null, emelet || null, new Date().toISOString());
+  logActivity({ type: 'billing_address_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Számlázási cím frissítve.' });
+  sendJson(res, 200, { ok: true });
 });
 
 // ---------------------------------------------------------------------------

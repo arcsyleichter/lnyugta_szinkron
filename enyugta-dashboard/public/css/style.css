@@ -984,3 +984,6 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .profil-feature-desc{ font-size:12px; color:var(--text-dim); margin-top:2px; }
 .profil-feature-price{ font-family:var(--font-mono); font-size:12.5px; color:var(--text-dim); white-space:nowrap; }
 .profil-feature-toggle{ width:20px; height:20px; flex:none; cursor:pointer; }
+
+/* Hivatalos (NAV-szerű) cím-mezők rácsa — profil és telephely adatoknál */
+.nav-address-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px 14px; margin:10px 0; }

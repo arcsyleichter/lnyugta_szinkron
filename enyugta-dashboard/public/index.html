@@ -246,6 +246,23 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="telephely-address-modal-backdrop" hidden>
+  <div class="modal">
+    <button class="modal-close" id="telephely-address-modal-close">✕</button>
+    <div class="card-title" style="margin-bottom:4px;">Telephely szerkesztése</div>
+    <p class="card-subtitle" style="margin-bottom:16px;">A hivatalos, NAV-formátumú cím megadása segít, hogy a kiállított bizonylatokon is helyesen szerepeljen.</p>
+    <form id="telephely-address-form">
+      <div class="stock-field stock-field-wide">
+        <label for="telephely-address-nev">Telephely neve</label>
+        <input id="telephely-address-nev" required>
+      </div>
+      <div id="telephely-address-fields"></div>
+      <button type="submit" class="btn-primary" style="width:100%;margin-top:8px;">Mentés</button>
+      <p class="login-footnote" id="telephely-address-msg"></p>
+    </form>
+  </div>
+</div>
+
 <!-- ===================== DASHBOARD ===================== -->
 <div id="app-screen" class="app-shell" hidden>
 
@@ -1105,7 +1122,7 @@
           <form id="profil-telephely-new-form" autocomplete="off">
             <input id="profil-telephely-new-kod" placeholder="Rövid kód (pl. 02)" maxlength="12" required>
             <input id="profil-telephely-new-nev" placeholder="Telephely neve (pl. Belvárosi bolt)" required>
-            <input id="profil-telephely-new-cim" placeholder="Cím (opcionális)">
+            <div id="profil-telephely-new-address"></div>
             <button type="submit" class="btn-secondary">Létrehozás</button>
           </form>
           <div class="profile-form-msg" id="profil-telephely-new-msg"></div>
@@ -1135,6 +1152,18 @@
         <div class="card-title">Eszközök</div>
         <p class="card-subtitle" style="margin-bottom:14px;">a szinkronizáló eszközök (kasszák) listája — adj nekik egyedi nevet, hogy könnyebben megkülönböztesd őket (pl. "1-es kassza")</p>
         <div id="profil-device-list"></div>
+      </div>
+
+      <div class="card" id="profil-billing-address-card">
+        <div class="card-title">Számlázási cím</div>
+        <p class="card-subtitle" style="margin-bottom:14px;">
+          Ez a cím jelenik meg a kiállított demo-számlákon. Csak a cégtulajdonos módosíthatja.
+        </p>
+        <form id="profil-billing-address-form">
+          <div id="profil-billing-address-fields"></div>
+          <button type="submit" class="btn-secondary" id="profil-billing-address-save-btn">Mentés</button>
+        </form>
+        <div class="profile-form-msg" id="profil-billing-address-msg"></div>
       </div>
 
       <div class="card" id="profil-ntak-card">

@@ -2356,6 +2356,73 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Hivatalos, NAV-szerű címmezők — újrahasznosítva a számlázási cím és a
+// telephelyek címének bevitelénél is. `prefix` adja az egyedi id-eket,
+// `vals` az esetleges kezdőértékeket, `jellegek` a közterület-jelleg
+// legördülő listájának elemeit (a szerver adja vissza).
+function navAddressFieldsHtml(prefix, vals = {}, jellegek = []) {
+  const jellegOptions = jellegek.map((j) => `<option value="${escapeHtml(j)}" ${vals.kozteruletJelleg === j ? 'selected' : ''}>${escapeHtml(j)}</option>`).join('');
+  return `
+    <div class="nav-address-grid">
+      <div class="stock-field">
+        <label for="${prefix}-irsz">Irányítószám</label>
+        <input id="${prefix}-irsz" maxlength="4" inputmode="numeric" placeholder="pl. 1053" value="${escapeHtml(vals.iranyitoszam)}">
+      </div>
+      <div class="stock-field">
+        <label for="${prefix}-telepules">Település</label>
+        <input id="${prefix}-telepules" placeholder="pl. Budapest" value="${escapeHtml(vals.telepules)}">
+      </div>
+      <div class="stock-field">
+        <label for="${prefix}-kozterulet-nev">Közterület neve</label>
+        <input id="${prefix}-kozterulet-nev" placeholder="pl. Kossuth Lajos" value="${escapeHtml(vals.kozteruletNev)}">
+      </div>
+      <div class="stock-field">
+        <label for="${prefix}-kozterulet-jelleg">Közterület jellege</label>
+        <select id="${prefix}-kozterulet-jelleg">
+          <option value="">— válassz —</option>
+          ${jellegOptions}
+          <option value="_egyeb" ${vals.kozteruletJelleg && !jellegek.includes(vals.kozteruletJelleg) ? 'selected' : ''}>Egyéb (kézi bevitel)</option>
+        </select>
+      </div>
+      <div class="stock-field" id="${prefix}-kozterulet-jelleg-egyeb-field" ${vals.kozteruletJelleg && !jellegek.includes(vals.kozteruletJelleg) ? '' : 'hidden'}>
+        <label for="${prefix}-kozterulet-jelleg-egyeb">Közterület jellege (kézi bevitel)</label>
+        <input id="${prefix}-kozterulet-jelleg-egyeb" placeholder="pl. sétány" value="${vals.kozteruletJelleg && !jellegek.includes(vals.kozteruletJelleg) ? escapeHtml(vals.kozteruletJelleg) : ''}">
+      </div>
+      <div class="stock-field">
+        <label for="${prefix}-hazszam">Házszám</label>
+        <input id="${prefix}-hazszam" placeholder="pl. 12" value="${escapeHtml(vals.hazszam)}">
+      </div>
+      <div class="stock-field">
+        <label for="${prefix}-emelet">Emelet / ajtó / lépcsőház</label>
+        <input id="${prefix}-emelet" placeholder="pl. 2. em. 3. ajtó (opcionális)" value="${escapeHtml(vals.emelet)}">
+      </div>
+    </div>`;
+}
+function wireNavAddressJellegCustom(prefix, jellegek) {
+  const sel = document.getElementById(`${prefix}-kozterulet-jelleg`);
+  const customField = document.getElementById(`${prefix}-kozterulet-jelleg-egyeb-field`);
+  const customInput = document.getElementById(`${prefix}-kozterulet-jelleg-egyeb`);
+  if (sel.value === '_egyeb') {
+    customField.hidden = false;
+    // Ha a betöltött érték nem szerepel az ismert listában, ide kerül át.
+  }
+  sel.addEventListener('change', () => { customField.hidden = sel.value !== '_egyeb'; });
+}
+function readNavAddressFields(prefix) {
+  const jellegSel = document.getElementById(`${prefix}-kozterulet-jelleg`).value;
+  const kozteruletJelleg = jellegSel === '_egyeb'
+    ? document.getElementById(`${prefix}-kozterulet-jelleg-egyeb`).value.trim()
+    : jellegSel;
+  return {
+    iranyitoszam: document.getElementById(`${prefix}-irsz`).value.trim(),
+    telepules: document.getElementById(`${prefix}-telepules`).value.trim(),
+    kozteruletNev: document.getElementById(`${prefix}-kozterulet-nev`).value.trim(),
+    kozteruletJelleg,
+    hazszam: document.getElementById(`${prefix}-hazszam`).value.trim(),
+    emelet: document.getElementById(`${prefix}-emelet`).value.trim(),
+  };
+}
+
 /* ============================================================
    Táblázat-rendezés — általános, bármelyik táblázatra ráépíthető.
    Az oszlop fejlécére kattintva növekvő/csökkenő sorrendbe rendezi a
@@ -4277,6 +4344,9 @@ async function loadProfilView() {
     loadProfilSubscription();
     loadProfilNtakSetting(isManager);
     loadProfilFeatures();
+    await loadProfilBillingAddress(isManager);
+    document.getElementById('profil-telephely-new-address').innerHTML = navAddressFieldsHtml('profil-telephely-new', {}, navKozteruletJellegekCache);
+    wireNavAddressJellegCustom('profil-telephely-new', navKozteruletJellegekCache);
   } catch (e) {
     alert('Nem sikerült betölteni a profilt: ' + e.message);
   }
@@ -4568,31 +4638,39 @@ function renderProfilTelephelyek(telephelyek, isManager) {
     btn.addEventListener('click', () => {
       const tr = btn.closest('tr');
       const kod = tr.dataset.kod;
-      const nevCell = tr.querySelector('.profil-telephely-nev-cell');
-      const cimCell = tr.querySelector('.profil-telephely-cim-cell');
-      const currentNev = nevCell.textContent;
-      const currentCim = cimCell.textContent === '—' ? '' : cimCell.textContent;
-      nevCell.innerHTML = `<input type="text" class="profil-telephely-edit-nev" value="${escapeHtml(currentNev)}" style="width:100%;">`;
-      cimCell.innerHTML = `<input type="text" class="profil-telephely-edit-cim" value="${escapeHtml(currentCim)}" style="width:100%;">`;
-      btn.textContent = 'Mentés';
-      btn.classList.add('btn-profil-telephely-save');
-      btn.classList.remove('btn-profil-telephely-edit');
-      btn.onclick = async () => {
-        const nev = tr.querySelector('.profil-telephely-edit-nev').value.trim();
-        const cim = tr.querySelector('.profil-telephely-edit-cim').value.trim();
-        if (!nev) { alert('A telephely neve nem lehet üres.'); return; }
-        btn.disabled = true;
-        try {
-          await api('/api/telephely/update', { method: 'POST', body: JSON.stringify({ kod, nev, cim }) });
-          loadProfilView();
-        } catch (e) {
-          alert('Nem sikerült menteni: ' + e.message);
-          btn.disabled = false;
-        }
-      };
+      const t = telephelyek.find((x) => x.kod === kod);
+      openTelephelyAddressModal(t);
     });
   });
 }
+
+function openTelephelyAddressModal(t) {
+  document.getElementById('telephely-address-nev').value = t.nev;
+  document.getElementById('telephely-address-fields').innerHTML = navAddressFieldsHtml('telephely-address', t.cimReszletek || {}, navKozteruletJellegekCache);
+  wireNavAddressJellegCustom('telephely-address', navKozteruletJellegekCache);
+  const msg = document.getElementById('telephely-address-msg');
+  msg.textContent = ''; msg.className = 'login-footnote';
+  document.getElementById('telephely-address-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const nev = document.getElementById('telephely-address-nev').value.trim();
+    if (!nev) { msg.textContent = 'A telephely neve nem lehet üres.'; msg.style.color = 'var(--brick)'; return; }
+    const cim = readNavAddressFields('telephely-address');
+    try {
+      await api('/api/telephely/update', { method: 'POST', body: JSON.stringify({ kod: t.kod, nev, ...cim }) });
+      document.getElementById('telephely-address-modal-backdrop').hidden = true;
+      loadProfilView();
+    } catch (err) {
+      msg.textContent = err.message; msg.style.color = 'var(--brick)';
+    }
+  };
+  document.getElementById('telephely-address-modal-backdrop').hidden = false;
+}
+listen('telephely-address-modal-close', 'click', () => {
+  document.getElementById('telephely-address-modal-backdrop').hidden = true;
+});
+listen('telephely-address-modal-backdrop', 'click', (e) => {
+  if (e.target.id === 'telephely-address-modal-backdrop') e.target.hidden = true;
+});
 
 listen('profil-email-form', 'submit', async (e) => {
   e.preventDefault();
@@ -4606,6 +4684,38 @@ listen('profil-email-form', 'submit', async (e) => {
   }
 });
 
+let navKozteruletJellegekCache = [];
+
+async function loadProfilBillingAddress(isManager) {
+  const fieldsBox = document.getElementById('profil-billing-address-fields');
+  const saveBtn = document.getElementById('profil-billing-address-save-btn');
+  try {
+    const data = await api('/api/profile/billing-address');
+    navKozteruletJellegekCache = data.kozteruletJellegek || [];
+    fieldsBox.innerHTML = navAddressFieldsHtml('profil-billing', data, navKozteruletJellegekCache);
+    wireNavAddressJellegCustom('profil-billing', navKozteruletJellegekCache);
+    saveBtn.hidden = isManager;
+    if (isManager) {
+      fieldsBox.querySelectorAll('input, select').forEach((el) => { el.disabled = true; });
+    }
+  } catch (e) {
+    fieldsBox.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+  }
+}
+listen('profil-billing-address-form', 'submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('profil-billing-address-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const body = readNavAddressFields('profil-billing');
+    await api('/api/profile/billing-address', { method: 'POST', body: JSON.stringify(body) });
+    msg.textContent = '✓ Számlázási cím mentve.'; msg.className = 'profile-form-msg ok';
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+
+
 listen('profil-telephely-new-form', 'submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('profil-telephely-new-msg');
@@ -4613,8 +4723,8 @@ listen('profil-telephely-new-form', 'submit', async (e) => {
   try {
     const kod = document.getElementById('profil-telephely-new-kod').value.trim();
     const nev = document.getElementById('profil-telephely-new-nev').value.trim();
-    const cim = document.getElementById('profil-telephely-new-cim').value.trim();
-    await api('/api/telephely/create', { method: 'POST', body: JSON.stringify({ kod, nev, cim }) });
+    const cim = readNavAddressFields('profil-telephely-new');
+    await api('/api/telephely/create', { method: 'POST', body: JSON.stringify({ kod, nev, ...cim }) });
     document.getElementById('profil-telephely-new-form').reset();
     msg.textContent = '✓ Telephely létrehozva.'; msg.className = 'profile-form-msg ok';
     loadProfilView();
