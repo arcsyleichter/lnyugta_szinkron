@@ -431,6 +431,82 @@ test('Licenc-lekérdezés — soha nem szinkronizált cég', async (t) => {
   });
 });
 
+test('Telephelyenkénti önkiszolgáló funkció-választás', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+
+  await t.test('a cég maga bekapcsolhat egy funkciót a saját telephelyére, és ez azonnal látszik az adminnak is', async () => {
+    const cookie = await getCompanySession();
+    const beforeRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const beforeBody = await beforeRes.json();
+    assert.equal(beforeBody.telephelyKod, '01');
+    assert.ok(!beforeBody.features.find((f) => f.key === 'NTAK').kivalasztva, 'kezdetben nem szabad kiválasztva lennie');
+
+    const toggleRes = await fetch(`${server.baseUrl}/api/profile/features/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKey: 'NTAK', kivalasztva: true }),
+    });
+    assert.equal(toggleRes.status, 200);
+
+    const afterRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const afterBody = await afterRes.json();
+    assert.ok(afterBody.features.find((f) => f.key === 'NTAK').kivalasztva, 'a bekapcsolás után kiválasztottnak kell mutatkoznia');
+
+    // Az adminnak telephely-bontásban, azonnal látnia kell.
+    const adminCookie = await getAdminCookie();
+    const adminRes = await fetch(`${server.baseUrl}/api/admin/license/companies`, { headers: { Cookie: adminCookie } });
+    const adminBody = await adminRes.json();
+    const company = adminBody.companies.find((c) => c.cegKulcs === '18774455');
+    const site = company.telephelyek.find((t) => t.kod === '01');
+    const ntakOnSite = site.licenses.find((f) => f.key === 'NTAK');
+    assert.equal(ntakOnSite.kiosztva, true);
+    assert.equal(ntakOnSite.aktiv, true);
+    assert.equal(ntakOnSite.sajatTelephelySpecifikus, true, 'ennek telephely-specifikus kiosztásnak kell lennie, nem cégszintűnek');
+  });
+
+  await t.test('admin oldali, cégszintű kiosztás is helyesen érvényesül egy telephelyen, ha nincs saját, felülíró beállítása', async () => {
+    const adminCookie = await getAdminCookie();
+    // Cégszintű kiosztás (nincs telephelyKod megadva) egy MÁSIK funkcióra.
+    const grantRes = await fetch(`${server.baseUrl}/api/admin/license/grant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', featureKey: 'SZAMLSZEM', ar: 500 }),
+    });
+    assert.equal(grantRes.status, 200);
+
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const body = await res.json();
+    const found = body.features.find((f) => f.key === 'SZAMLSZEM');
+    assert.equal(found.kivalasztva, true, 'a cégszintű kiosztásnak érvényesülnie kell a telephelyen, ha nincs saját felülírás');
+    assert.equal(found.sajatTelephelySpecifikus, false, 'ez a cégszintű öröklött kiosztás, nem a telephely saját beállítása');
+  });
+});
+
 test('Admin — cég végleges törlése', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

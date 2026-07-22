@@ -827,6 +827,56 @@ function openLicenseGrantModal(c) {
     }
   });
   document.getElementById('license-grant-modal-backdrop').hidden = false;
+  renderLicenseTelephelyBreakdown(c);
+}
+
+function renderLicenseTelephelyBreakdown(c) {
+  const box = document.getElementById('license-telephely-breakdown');
+  if (!c.telephelyek || !c.telephelyek.length) {
+    box.innerHTML = '<p class="muted">Ennek a cégnek nincs regisztrált telephelye.</p>';
+    return;
+  }
+  box.innerHTML = c.telephelyek.map((t) => `
+    <div style="margin-bottom:16px;">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px;">📍 ${escapeHtml(t.nev || t.kod)} <span class="muted" style="font-weight:400;">(${escapeHtml(t.kod)})</span></div>
+      ${t.licenses.map((l) => `
+        <label class="license-site-row" data-kod="${escapeHtml(t.kod)}" data-key="${escapeHtml(l.key)}"
+               style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" class="license-site-toggle" ${l.aktiv ? 'checked' : ''}>
+          <span style="flex:1;">${escapeHtml(l.nev)}</span>
+          ${l.sajatTelephelySpecifikus
+            ? '<span class="licenc-badge licenc-badge--ok" style="font-size:10px;">saját</span>'
+            : (l.aktiv ? '<span class="licenc-badge licenc-badge--none" style="font-size:10px;">cégszintűről örökölt</span>' : '')}
+        </label>`).join('')}
+    </div>`).join('');
+
+  box.querySelectorAll('.license-site-toggle').forEach((cb) => {
+    cb.addEventListener('change', async (e) => {
+      const row = e.target.closest('.license-site-row');
+      const telephelyKod = row.dataset.kod;
+      const featureKey = row.dataset.key;
+      const aktiv = e.target.checked;
+      e.target.disabled = true;
+      try {
+        if (aktiv) {
+          const feature = licenseFeaturesCache.find((f) => f.key === featureKey);
+          await api('/api/admin/license/grant', {
+            method: 'POST',
+            body: JSON.stringify({ cegKulcs: c.cegKulcs, telephelyKod, featureKey, ar: feature?.alapAr || 0 }),
+          });
+        } else {
+          await api('/api/admin/license/revoke', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, telephelyKod, featureKey }) });
+        }
+        await loadLicenseCompanies();
+        const fresh = licenseCompaniesCache.find((x) => x.cegKulcs === c.cegKulcs);
+        renderLicenseTelephelyBreakdown(fresh);
+      } catch (err) {
+        alert('Nem sikerült menteni: ' + err.message);
+        e.target.checked = !aktiv;
+        e.target.disabled = false;
+      }
+    });
+  });
 }
 listen('license-grant-modal-close', 'click', () => {
   document.getElementById('license-grant-modal-backdrop').hidden = true;
@@ -4289,6 +4339,7 @@ async function loadProfilView() {
     loadProfilDeviceList();
     loadProfilSubscription();
     loadProfilNtakSetting(isManager);
+    loadProfilFeatures();
   } catch (e) {
     alert('Nem sikerült betölteni a profilt: ' + e.message);
   }
@@ -4327,6 +4378,49 @@ listen('profil-ntak-toggle', 'change', async (e) => {
     toggle.disabled = false;
   }
 });
+
+async function loadProfilFeatures() {
+  const list = document.getElementById('profil-features-list');
+  const subtitle = document.getElementById('profil-features-subtitle');
+  try {
+    const data = await api('/api/profile/features');
+    subtitle.textContent = `Válaszd ki, mely funkciókra van szükséged a(z) ${data.telephelyKod} telephelyen — a beállítás csak erre a telephelyre vonatkozik, a többi telephelyed külön állítható.`;
+    if (!data.features.length) {
+      list.innerHTML = '<p class="muted">Jelenleg nincs elérhető funkció a katalógusban.</p>';
+      return;
+    }
+    list.innerHTML = data.features.map((f) => `
+      <div class="profil-feature-row ${f.kivalasztva ? 'is-on' : ''}" data-key="${escapeHtml(f.key)}">
+        <div>
+          <div class="profil-feature-name">${escapeHtml(f.nev)}</div>
+          ${f.leiras ? `<div class="profil-feature-desc">${escapeHtml(f.leiras)}</div>` : ''}
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span class="profil-feature-price">${f.alapAr ? fmtHuf(f.alapAr) + ' / hó' : 'díjmentes'}</span>
+          <input type="checkbox" class="profil-feature-toggle" ${f.kivalasztva ? 'checked' : ''}>
+        </div>
+      </div>`).join('');
+    list.querySelectorAll('.profil-feature-toggle').forEach((cb) => {
+      cb.addEventListener('change', async (e) => {
+        const row = e.target.closest('.profil-feature-row');
+        const key = row.dataset.key;
+        const kivalasztva = e.target.checked;
+        e.target.disabled = true;
+        try {
+          await api('/api/profile/features/toggle', { method: 'POST', body: JSON.stringify({ featureKey: key, kivalasztva }) });
+          row.classList.toggle('is-on', kivalasztva);
+        } catch (err) {
+          alert('Nem sikerült menteni: ' + err.message);
+          e.target.checked = !kivalasztva;
+        } finally {
+          e.target.disabled = false;
+        }
+      });
+    });
+  } catch (e) {
+    list.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+  }
+}
 
 const PAYMENT_STATUS_LABELS = { FUGGOBEN: 'függőben', SIKERES: 'sikeres', SIKERTELEN: 'sikertelen' };
 
