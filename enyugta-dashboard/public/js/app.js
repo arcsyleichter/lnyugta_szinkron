@@ -589,10 +589,19 @@ function renderLicenseCompanies() {
   const tbody = document.querySelector('#admin-licenc-table tbody');
   if (!licenseCompaniesCache.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">Még nincs egyetlen ismert cég sem.</td></tr>'; return; }
   tbody.innerHTML = licenseCompaniesCache.map((c) => {
-    const kiosztott = c.licenses.filter((l) => l.kiosztva);
+    // Az összesítő jelvénynek az AKTÍV funkciókat kell mutatnia, akárhol
+    // is lettek kiosztva — akár cégszinten (admin), akár egy konkrét
+    // telephelyen (a cég saját, önkiszolgáló Profil-választása). Korábban
+    // ez csak a cégszintű kiosztásokat számolta, ezért egy telephelyen
+    // önkiszolgálóan bekapcsolt funkció tévesen "nincs kiosztva"-ként
+    // jelent meg az áttekintésben.
+    const aktivKulcsok = new Set(c.licenses.filter((l) => l.kiosztva).map((l) => l.key));
+    for (const t of (c.telephelyek || [])) {
+      for (const l of t.licenses) { if (l.kiosztva) aktivKulcsok.add(l.key); }
+    }
     const osszesFunkcio = c.licenses.length;
-    const summary = kiosztott.length
-      ? `<span class="licenc-badge licenc-badge--ok">${kiosztott.length} / ${osszesFunkcio} funkció</span>`
+    const summary = aktivKulcsok.size
+      ? `<span class="licenc-badge licenc-badge--ok">${aktivKulcsok.size} / ${osszesFunkcio} funkció</span>`
       : '<span class="licenc-badge licenc-badge--none">nincs kiosztott funkció</span>';
     // Figyelmeztető jelvények CSAK akkor, ha tényleg van mire figyelni —
     // ez tartja rövidnek a sort a legtöbb cégnél.
