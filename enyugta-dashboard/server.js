@@ -5683,7 +5683,7 @@ function navTimestampMasked(date = new Date()) {
   return `${date.getUTCFullYear()}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}`;
 }
 function navTimestampIso(date = new Date()) {
-  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return date.toISOString(); // pl. 2026-07-22T21:00:00.000Z — az ezredmásodperceket és a 'Z'-t MEG KELL TARTANI
 }
 function navRequestId() {
   // Előírás: max. 30 karakter, adózónként/technikai felhasználónként
@@ -5742,20 +5742,20 @@ function navXmlFieldAll(xml, tag) {
 }
 
 function navHeaderXml(requestId, timestampIso) {
-  return `<header>
-    <requestId>${requestId}</requestId>
-    <timestamp>${timestampIso}</timestamp>
-    <requestVersion>3.0</requestVersion>
-    <headerVersion>1.0</headerVersion>
-  </header>`;
+  return `<common:header>
+    <common:requestId>${requestId}</common:requestId>
+    <common:timestamp>${timestampIso}</common:timestamp>
+    <common:requestVersion>3.0</common:requestVersion>
+    <common:headerVersion>1.0</common:headerVersion>
+  </common:header>`;
 }
 function navUserXml(requestSignature) {
-  return `<user>
-    <login>${escapeXml(process.env.NAV_TECH_USER)}</login>
-    <passwordHash cryptoType="SHA-512">${navPasswordHash(process.env.NAV_TECH_PASSWORD)}</passwordHash>
-    <taxNumber>${escapeXml(process.env.NAV_TAXNUMBER)}</taxNumber>
-    <requestSignature cryptoType="SHA3-512">${requestSignature}</requestSignature>
-  </user>`;
+  return `<common:user>
+    <common:login>${escapeXml(process.env.NAV_TECH_USER)}</common:login>
+    <common:passwordHash cryptoType="SHA-512">${navPasswordHash(process.env.NAV_TECH_PASSWORD)}</common:passwordHash>
+    <common:taxNumber>${escapeXml(process.env.NAV_TAXNUMBER)}</common:taxNumber>
+    <common:requestSignature cryptoType="SHA3-512">${requestSignature}</common:requestSignature>
+  </common:user>`;
 }
 function navSoftwareXml() {
   return `<software>
@@ -5797,7 +5797,7 @@ async function navTokenExchange() {
   const timestampIso = navTimestampIso(now);
   const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
 
-  const bodyXml = `<TokenExchangeRequest xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+  const bodyXml = `<TokenExchangeRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
 ${navUserXml(requestSignature)}
 ${navSoftwareXml()}
