@@ -775,11 +775,12 @@ function renderLicenseTelephelyBreakdown(c) {
   box.innerHTML = c.telephelyek.map((t) => `
     <div style="margin-bottom:16px;">
       <div style="font-weight:700;font-size:13px;margin-bottom:6px;">📍 ${escapeHtml(t.nev || t.kod)} <span class="muted" style="font-weight:400;">(${escapeHtml(t.kod)})</span></div>
-      ${t.licenses.map((l) => `
+      ${t.licenses.filter((l) => l.katalogusAktiv || l.kiosztva).map((l) => `
         <label class="license-site-row" data-kod="${escapeHtml(t.kod)}" data-key="${escapeHtml(l.key)}"
                style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12.5px;cursor:pointer;">
           <input type="checkbox" class="license-site-toggle" ${l.aktiv ? 'checked' : ''}>
-          <span style="flex:1;">${escapeHtml(l.nev)}</span>
+          <span style="flex:1;">${escapeHtml(l.nev)}${!l.katalogusAktiv ? ' <span class="muted">(törölve a katalógusból)</span>' : ''}</span>
+          ${l.fizetosElofizetes ? `<span class="licenc-badge licenc-badge--ok" style="font-size:10px;" title="myPOS kártya-tokennel, havonta automatikusan megújuló előfizetés">💳 fizetett${l.lejarat ? ` (${escapeHtml(l.lejarat)}-ig)` : ''}</span>` : ''}
           ${l.sajatTelephelySpecifikus
             ? '<span class="licenc-badge licenc-badge--ok" style="font-size:10px;">saját</span>'
             : (l.aktiv ? '<span class="licenc-badge licenc-badge--none" style="font-size:10px;">cégszintűről örökölt</span>' : '')}
@@ -4315,6 +4316,38 @@ listen('profil-ntak-toggle', 'change', async (e) => {
   }
 });
 
+function openDemoPaymentModal({ telephelyKod, featureKey, feature, checkbox }) {
+  document.getElementById('demo-payment-feature-name').textContent = feature.nev;
+  document.getElementById('demo-payment-telephely').textContent = `${telephelyKod} telephely`;
+  document.getElementById('demo-payment-price').textContent = `${fmtHuf(feature.alapAr)} / hó`;
+  const msg = document.getElementById('demo-payment-msg');
+  msg.textContent = '';
+  const confirmBtn = document.getElementById('demo-payment-confirm-btn');
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = 'Demo fizetés megerősítése';
+  confirmBtn.onclick = async () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Feldolgozás…';
+    try {
+      await api('/api/payment/demo-pay', { method: 'POST', body: JSON.stringify({ cel: `funkcio_telephely:${telephelyKod}:${featureKey}` }) });
+      document.getElementById('demo-payment-modal-backdrop').hidden = true;
+      loadProfilFeatures();
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.style.color = 'var(--brick)';
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Demo fizetés megerősítése';
+    }
+  };
+  document.getElementById('demo-payment-modal-backdrop').hidden = false;
+}
+listen('demo-payment-modal-close', 'click', () => {
+  document.getElementById('demo-payment-modal-backdrop').hidden = true;
+});
+listen('demo-payment-modal-backdrop', 'click', (e) => {
+  if (e.target.id === 'demo-payment-modal-backdrop') e.target.hidden = true;
+});
+
 async function loadProfilFeatures() {
   const list = document.getElementById('profil-features-list');
   const subtitle = document.getElementById('profil-features-subtitle');
@@ -4340,7 +4373,17 @@ async function loadProfilFeatures() {
       cb.addEventListener('change', async (e) => {
         const row = e.target.closest('.profil-feature-row');
         const key = row.dataset.key;
+        const feature = data.features.find((f) => f.key === key);
         const kivalasztva = e.target.checked;
+
+        // Fizetős funkció BEKAPCSOLÁSA — egy demo fizetési lépést mutatunk
+        // (nincs mögötte valódi bankkártya-terhelés), a tényleges
+        // bekapcsolás csak a megerősítés után történik meg.
+        if (kivalasztva && feature.alapAr > 0) {
+          e.target.checked = false; // amíg a demo fizetés nincs megerősítve, ne mutassa bekapcsoltnak
+          openDemoPaymentModal({ telephelyKod: data.telephelyKod, featureKey: key, feature, checkbox: e.target });
+          return;
+        }
         e.target.disabled = true;
         try {
           await api('/api/profile/features/toggle', { method: 'POST', body: JSON.stringify({ featureKey: key, kivalasztva }) });

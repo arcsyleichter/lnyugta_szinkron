@@ -456,6 +456,7 @@ licenseDb.exec(`
     lejarat TEXT,
     aktiv INTEGER NOT NULL DEFAULT 1,
     jovahagyta TEXT,
+    kartya_token TEXT,
     updated_at TEXT NOT NULL,
     UNIQUE(ceg_kulcs, telephely_kod, feature_key)
   );
@@ -507,11 +508,15 @@ licenseDb.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT UNIQUE NOT NULL,
     ceg_kulcs TEXT NOT NULL,
+    telephely_kod TEXT,
+    feature_key TEXT,
     cel TEXT NOT NULL,
     osszeg NUMERIC NOT NULL,
     penznem TEXT NOT NULL DEFAULT 'HUF',
     allapot TEXT NOT NULL DEFAULT 'FUGGOBEN',
     mypos_trnref TEXT,
+    kartya_token TEXT,
+    ismetlodo INTEGER NOT NULL DEFAULT 0,
     letrehozva TEXT NOT NULL,
     lezarva TEXT
   );
@@ -638,6 +643,7 @@ licenseDb.exec(`
         lejarat TEXT,
         aktiv INTEGER NOT NULL DEFAULT 1,
         jovahagyta TEXT,
+        kartya_token TEXT,
         updated_at TEXT NOT NULL,
         UNIQUE(ceg_kulcs, telephely_kod, feature_key)
       );
@@ -647,6 +653,21 @@ licenseDb.exec(`
       ALTER TABLE company_licenses_new RENAME TO company_licenses;
       CREATE INDEX IF NOT EXISTS idx_company_licenses_ceg ON company_licenses(ceg_kulcs);
     `);
+  } else if (!cols.some((c) => c.name === 'kartya_token')) {
+    // Egyszerű oszlop-hozzáadás elég, ha a telephely_kod már megvan (a fenti
+    // teljes tábla-újraépítés csak akkor kell, ha az UNIQUE megkötés is változik).
+    licenseDb.exec(`ALTER TABLE company_licenses ADD COLUMN kartya_token TEXT`);
+  }
+}
+// Migráció — a license_payments táblához új, a telephely-specifikus
+// funkció-előfizetésekhez szükséges oszlopok (korábbi telepítéseknél
+// hiányozhatnak).
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(license_payments)`).all();
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0']]) {
+    if (!cols.some((c) => c.name === name)) {
+      licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
+    }
   }
 }
 {
@@ -1002,19 +1023,131 @@ function escapeHtmlServer(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-async function sendBrevoEmail({ toEmail, toName, subject, html }) {
+// ---------------------------------------------------------------------------
+// Minimális, FÜGGŐSÉG NÉLKÜLI PDF-generátor — a projekt szándékosan zéró
+// külső npm-csomaggal fut, ezért nem használhatunk PDF-könyvtárat. Ez egy
+// kézzel összerakott, egyoldalas, szöveges PDF (beépített Helvetica betűvel),
+// pont elég egy egyszerű, TÁJÉKOZTATÓ jellegű "számla" (nem hivatalos
+// számviteli bizonylat) előállításához.
+// FONTOS, ŐSZINTE MEGJEGYZÉS: a PDF beépített Helvetica fontja a standard
+// WinAnsi kódolást használja, ami NEM tartalmazza a magyar ő/ű hosszú
+// magánhangzókat — ezek "o"/"u"-ra egyszerűsödnek a PDF-ben (lásd
+// sanitizePdfText). Minden más ékezet (á é í ó ö ú ü) helyesen jelenik meg.
+function sanitizePdfText(s) {
+  return String(s ?? '')
+    .replace(/ő/g, 'o').replace(/Ő/g, 'O')
+    .replace(/ű/g, 'u').replace(/Ű/g, 'U')
+    .replace(/[^\x00-\xFF]/g, '?') // minden más, WinAnsi-n kívüli karakter
+    .replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+function buildSimplePdf(lines) {
+  // lines: [{ text, size, y, bold }] — y: pont a lap tetejétől lefelé mérve.
+  const PAGE_H = 842, PAGE_W = 595;
+  const content = lines.map((l) => {
+    const font = l.bold ? '/F2' : '/F1';
+    const size = l.size || 11;
+    const y = PAGE_H - l.y;
+    return `BT ${font} ${size} Tf 50 ${y} Td (${sanitizePdfText(l.text)}) Tj ET`;
+  }).join('\n');
+  const objects = [];
+  objects.push('<< /Type /Catalog /Pages 2 0 R >>');
+  objects.push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  objects.push(`<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /MediaBox [0 0 ${PAGE_W} ${PAGE_H}] /Contents 6 0 R >>`);
+  objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+  const streamBytes = Buffer.from(content, 'latin1');
+  objects.push(`<< /Length ${streamBytes.length} >>\nstream\n${content}\nendstream`);
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objects.forEach((obj, i) => {
+    offsets.push(Buffer.byteLength(pdf, 'latin1'));
+    pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xrefStart = Buffer.byteLength(pdf, 'latin1');
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objects.length; i++) {
+    pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+  return Buffer.from(pdf, 'latin1');
+}
+
+// Egyszerű, tájékoztató jellegű "demo számla" PDF egy sikeres funkció-
+// előfizetési díjról. NEM hivatalos, számvitelileg elfogadott bizonylat —
+// a kérésnek megfelelően csak egy áttekinthető, letölthető/emailezhető
+// összefoglaló.
+function buildDemoInvoicePdf({ cegNev, adoszam, tetelNev, osszeg, penznem, datum, orderId, ismetlodo }) {
+  const lines = [
+    { text: 'L-NYUGTA - Dijbekero / demo szamla', size: 16, y: 60, bold: true },
+    { text: '(Tajekoztato jellegu bizonylat, nem hivatalos szamviteli szamla)', size: 9, y: 82 },
+    { text: `Kiállítás dátuma: ${datum}`, size: 11, y: 120 },
+    { text: `Bizonylatszám: ${orderId}`, size: 11, y: 140 },
+    { text: `Vevő: ${cegNev}`, size: 11, y: 175 },
+    { text: `Adószám: ${adoszam}`, size: 11, y: 195 },
+    { text: 'Tétel', size: 11, y: 240, bold: true },
+    { text: tetelNev, size: 11, y: 262 },
+    { text: `Összeg: ${osszeg.toLocaleString('hu-HU')} ${penznem}`, size: 13, y: 290, bold: true },
+    { text: ismetlodo ? 'Ismétlődő, havi előfizetési díj - a következő terhelés kb. 1 hónap múlva esedékes.' : 'Kezdeti előfizetési díj - a szolgáltatás mostantól havonta automatikusan megújul.', size: 10, y: 315 },
+    { text: 'Fizetési mód: bankkártya (myPOS)', size: 10, y: 340 },
+  ];
+  return buildSimplePdf(lines);
+}
+
+async function sendDemoInvoiceEmail({ cegKulcs, tetelNev, osszeg, penznem, orderId, ismetlodo }) {
+  const codes = readAccessCodes();
+  let email = codes[cegKulcs]?.email || '';
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
+  // Ha az access-codes.json-ban nincs email, próbáljuk a cég saját,
+  // szinkronizált adatbázisában tárolt címet (ugyanaz a tartalék-logika,
+  // amit az admin cégek-lista is használ).
+  if (!email) {
+    for (const [siteKey, entry] of companyIndex.entries()) {
+      if (entry.cegKulcs !== cegKulcs) continue;
+      try {
+        const row = get(siteKey, 'SELECT email FROM szallitot LIMIT 1');
+        if (row?.email) { email = row.email; break; }
+      } catch (_) {}
+    }
+  }
+  if (!email) throw new Error('Nincs beállított email cím ehhez a céghez — a demo számlát nem lehetett kiküldeni.');
+
+  const cegNev = anySite?.nev || cegKulcs;
+  const adoszam = anySite?.adoszam || '';
+  const datum = todayIsoServer();
+  const pdf = buildDemoInvoicePdf({ cegNev, adoszam, tetelNev, osszeg, penznem, datum, orderId, ismetlodo });
+  await sendBrevoEmail({
+    toEmail: email, toName: cegNev,
+    subject: `L-NYUGTA — demo számla (${orderId})`,
+    html: `<p>Kedves ${escapeHtmlForEmail(cegNev)}!</p>
+      <p>Sikeres fizetés történt: <b>${escapeHtmlForEmail(tetelNev)}</b> — ${osszeg.toLocaleString('hu-HU')} ${penznem}.</p>
+      <p>A tájékoztató jellegű demo számlát csatoltan küldjük.</p>
+      <p style="color:#888;font-size:12px;">Ez egy automatikus üzenet, nem hivatalos számviteli bizonylatról.</p>`,
+    attachments: [{ name: `demo-szamla-${orderId}.pdf`, content: pdf }],
+  });
+  logActivity({ type: 'payment_invoice_email', ok: true, companyKey: cegKulcs, nev: null, detail: `Demo számla kiküldve: ${email} (${orderId})` });
+}
+function escapeHtmlForEmail(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function sendBrevoEmail({ toEmail, toName, subject, html, attachments }) {
   if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL) {
     throw new Error('Nincs beállítva a Brevo email küldés (BREVO_API_KEY / BREVO_SENDER_EMAIL hiányzik).');
+  }
+  const body = {
+    sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
+    to: [{ email: toEmail, name: toName || undefined }],
+    subject,
+    htmlContent: html,
+  };
+  if (attachments && attachments.length) {
+    body.attachment = attachments.map((a) => ({ name: a.name, content: a.content.toString('base64') }));
   }
   const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({
-      sender: { name: BREVO_SENDER_NAME, email: BREVO_SENDER_EMAIL },
-      to: [{ email: toEmail, name: toName || undefined }],
-      subject,
-      htmlContent: html,
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     let detail = await resp.text();
@@ -2023,7 +2156,18 @@ route('GET', '/api/profile/features', async (req, res) => {
   if (!session.telephelyKod) return sendJson(res, 400, { error: 'Előbb válassz telephelyet — a funkciók telephelyenként külön választhatók.' });
   const catalog = licenseDb.prepare(`SELECT key, nev, leiras, alap_ar FROM license_features WHERE aktiv = 1 ORDER BY sorrend, nev`).all();
   const grants = getCompanyLicenseGrants(session.cegKulcs, session.telephelyKod);
-  const features = catalog.map((f) => {
+  // Ha a cégnek/telephelynek VAN már aktív kiosztása egy olyan funkcióra,
+  // amit admin időközben inaktiválta a katalógusban, azt is meg kell
+  // mutatnunk — különben egy ténylegesen még aktív funkció "eltűnne"
+  // a cég szeméből, miközben a rendszer háttérben továbbra is
+  // engedélyezettként kezeli. Enélkül épp ez okozta korábban, hogy az
+  // admin és az ügyfél nézete eltért egymástól.
+  const catalogKeys = new Set(catalog.map((f) => f.key));
+  const orphanedGrantedKeys = [...grants.keys()].filter((k) => !catalogKeys.has(k) && grants.get(k).aktiv);
+  const orphanedFeatures = orphanedGrantedKeys.length
+    ? licenseDb.prepare(`SELECT key, nev, leiras, alap_ar FROM license_features WHERE key IN (${orphanedGrantedKeys.map(() => '?').join(',')})`).all(...orphanedGrantedKeys)
+    : [];
+  const features = [...catalog, ...orphanedFeatures].map((f) => {
     const row = grants.get(f.key);
     const status = licenseRowStatus(row);
     return {
@@ -2561,10 +2705,11 @@ route('GET', '/api/admin/license/companies', async (req, res) => {
           const row = siteGrants.get(f.key);
           const status = licenseRowStatus(row);
           return {
-            key: f.key, nev: f.nev, alapAr: f.alap_ar,
+            key: f.key, nev: f.nev, alapAr: f.alap_ar, katalogusAktiv: !!f.aktiv,
             kiosztva: !!row, ar: row ? row.ar : null, lejarat: row ? row.lejarat : null,
             aktiv: row ? !!row.aktiv : false,
             sajatTelephelySpecifikus: !!row && row.telephely_kod === t.kod,
+            fizetosElofizetes: !!row && !!row.kartya_token,
             ...status,
           };
         }),
@@ -2681,6 +2826,17 @@ function resolvePaymentTarget(cel) {
     if (!f.alap_ar) throw new Error('Ennek a funkciónak nincs ára beállítva.');
     return { osszeg: f.alap_ar, penznem: 'HUF', leiras: `Funkció: ${f.nev}` };
   }
+  // Telephely-specifikus, HAVONTA ISMÉTLŐDŐ funkció-előfizetés — ezt
+  // indítja a cég a Profil oldalán, ha egy fizetős funkciót választ ki
+  // magának. Formátum: "funkcio_telephely:<telephelyKod>:<featureKey>".
+  if (cel.startsWith('funkcio_telephely:')) {
+    const [, telephelyKod, key] = cel.split(':');
+    if (!telephelyKod || !key) throw new Error('Érvénytelen fizetési cél.');
+    const f = licenseDb.prepare('SELECT key, nev, alap_ar FROM license_features WHERE key = ? AND aktiv = 1').get(key);
+    if (!f) throw new Error('Ismeretlen vagy inaktív funkció.');
+    if (!f.alap_ar) throw new Error('Ennek a funkciónak nincs ára beállítva.');
+    return { osszeg: f.alap_ar, penznem: 'HUF', leiras: `Funkció (${telephelyKod} telephely): ${f.nev}`, telephelyKod, featureKey: key };
+  }
   throw new Error('Ismeretlen fizetési cél.');
 }
 
@@ -2700,12 +2856,13 @@ route('POST', '/api/payment/start', async (req, res) => {
   try { target = resolvePaymentTarget(String(cel || '')); }
   catch (e) { return sendJson(res, 400, { error: e.message }); }
 
+  const isRecurring = String(cel || '').startsWith('funkcio_telephely:');
   const orderId = `LNY${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
   licenseDb.prepare(`
-    INSERT INTO license_payments (order_id, ceg_kulcs, cel, osszeg, penznem, allapot, letrehozva)
-    VALUES (?, ?, ?, ?, ?, 'FUGGOBEN', ?)
-  `).run(orderId, session.cegKulcs, cel, target.osszeg, target.penznem, now);
+    INSERT INTO license_payments (order_id, ceg_kulcs, telephely_kod, feature_key, cel, osszeg, penznem, allapot, ismetlodo, letrehozva)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'FUGGOBEN', ?, ?)
+  `).run(orderId, session.cegKulcs, target.telephelyKod || null, target.featureKey || null, cel, target.osszeg, target.penznem, isRecurring ? 1 : 0, now);
 
   const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0];
   const origin = `${proto}://${req.headers.host}`;
@@ -2721,7 +2878,14 @@ route('POST', '/api/payment/start', async (req, res) => {
     ['URL_OK', `${origin}/api/payment/return?order=${orderId}`],
     ['URL_Cancel', `${origin}/api/payment/return?order=${orderId}&cancelled=1`],
     ['URL_Notify', `${origin}/api/payment/notify`],
-    ['CardTokenRequest', '0'],
+    // Havi, ismétlődő funkció-előfizetésnél KÁRTYA-TOKENT kérünk (1), hogy a
+    // következő havi terhelést a vásárló újbóli átirányítása nélkül,
+    // szerver-szerver hívással (IPCIAPurchase) tudjuk elindítani. FONTOS,
+    // ŐSZINTE MEGJEGYZÉS: a myPOS dokumentációja szerint a tokenes,
+    // automatikus terhelés ÉLES környezetben myPOS-os jóváhagyást igényel a
+    // kereskedői fiókhoz — sandbox/demo módban (MYPOS_SANDBOX=1) ez
+    // enélkül is tesztelhető.
+    ['CardTokenRequest', isRecurring ? '1' : '0'],
     ['KeyIndex', process.env.MYPOS_KEY_INDEX || '1'],
     ['PaymentParametersRequired', '1'],
     ['PaymentMethod', '1'],
@@ -2732,6 +2896,68 @@ route('POST', '/api/payment/start', async (req, res) => {
 
   logActivity({ type: 'payment_start', ok: true, companyKey: session.cegKulcs, nev: session.nev, detail: `Fizetés indítva: ${target.leiras}, ${target.osszeg} ${target.penznem} (${orderId})` });
   sendJson(res, 200, { ok: true, checkoutUrl: MYPOS_CHECKOUT_URL, fields: postFields, orderId, leiras: target.leiras, osszeg: target.osszeg, penznem: target.penznem });
+});
+
+// A vásárló böngészője ide tér vissza a fizetés után (URL_OK/URL_Cancel) —
+// ez NEM megbízható visszaigazolás (a myPOS dokumentációja is kifejezetten
+// figyelmeztet erre), csak egy egyszerű "köszönjük, ellenőrizzük" oldalt
+// mutat. A TÉNYLEGES visszaigazolás a lenti /api/payment/notify
+// szerver-szerver hívásból érkezik.
+// ---------------------------------------------------------------------------
+// DEMO FIZETÉS — nincs mögötte valódi fizetési átjáró (myPOS nélkül is
+// használható). A fejlesztő kifejezett kérésére: a fizetési LÉPÉS meg van
+// jelenítve (ár, tétel, megerősítő gomb), de a tényleges terhelés csak
+// szimulált — azonnal "sikeresnek" jelöljük. A funkció innentől ugyanúgy
+// HAVONTA "megújul" (a napi ütemezett feladat automatikusan, valódi
+// terhelés nélkül meghosszabbítja), amíg a cég ki nem kapcsolja.
+// ---------------------------------------------------------------------------
+const DEMO_CARD_TOKEN = 'DEMO_TOKEN';
+
+route('POST', '/api/payment/demo-pay', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cel } = await readJsonBody(req);
+  let target;
+  try { target = resolvePaymentTarget(String(cel || '')); }
+  catch (e) { return sendJson(res, 400, { error: e.message }); }
+  if (!target.telephelyKod || !target.featureKey) {
+    return sendJson(res, 400, { error: 'A demo fizetés csak telephely-specifikus funkció-előfizetéshez használható.' });
+  }
+  // A demo-fizetés csak a SAJÁT telephelyére engedélyezett a bejelentkezett
+  // felhasználónak — ne lehessen más telephely nevében fizetést indítani.
+  if (target.telephelyKod !== session.telephelyKod) {
+    return sendJson(res, 403, { error: 'Csak a saját telephelyedre indíthatsz fizetést.' });
+  }
+
+  const orderId = `LNYDEMO${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  const lejarat = addDaysISO(todayIsoServer(), 30);
+  licenseDb.prepare(`
+    INSERT INTO license_payments (order_id, ceg_kulcs, telephely_kod, feature_key, cel, osszeg, penznem, allapot, kartya_token, ismetlodo, letrehozva, lezarva)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'SIKERES', ?, 1, ?, ?)
+  `).run(orderId, session.cegKulcs, target.telephelyKod, target.featureKey, cel, target.osszeg, target.penznem, DEMO_CARD_TOKEN, now, now);
+
+  licenseDb.prepare(`
+    INSERT INTO company_licenses (ceg_kulcs, telephely_kod, feature_key, ar, lejarat, aktiv, jovahagyta, kartya_token, updated_at)
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET
+      lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, kartya_token = excluded.kartya_token, updated_at = excluded.updated_at
+  `).run(session.cegKulcs, target.telephelyKod, target.featureKey, target.osszeg, lejarat, `demo fizetés (${session.nev})`, DEMO_CARD_TOKEN, now);
+
+  logActivity({ type: 'payment_demo', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `Demo fizetés: ${target.leiras}, ${target.osszeg} ${target.penznem} (${orderId})` });
+
+  try {
+    const feature = licenseDb.prepare('SELECT nev FROM license_features WHERE key = ?').get(target.featureKey);
+    await sendDemoInvoiceEmail({
+      cegKulcs: session.cegKulcs, osszeg: target.osszeg, penznem: target.penznem, orderId, ismetlodo: false,
+      tetelNev: `${feature?.nev || target.featureKey} (${target.telephelyKod} telephely) - havi előfizetés (demo)`,
+    });
+  } catch (e) {
+    console.error('[fizetés] demo számla-email hiba:', e.message);
+    logActivity({ type: 'payment_invoice_email', ok: false, companyKey: session.cegKulcs, nev: null, detail: e.message });
+  }
+
+  sendJson(res, 200, { ok: true, orderId, lejarat });
 });
 
 // A vásárló böngészője ide tér vissza a fizetés után (URL_OK/URL_Cancel) —
@@ -2786,10 +3012,11 @@ route('POST', '/api/payment/notify', async (req, res) => {
   }
 
   const now = new Date().toISOString();
-  licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERES', mypos_trnref = ?, lezarva = ? WHERE order_id = ?`)
-    .run(body.IPC_Trnref || null, now, body.OrderID);
+  licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERES', mypos_trnref = ?, kartya_token = ?, lezarva = ? WHERE order_id = ?`)
+    .run(body.IPC_Trnref || null, body.CardToken || null, now, body.OrderID);
 
   // A fizetés tárgyának tényleges jóváírása.
+  let invoiceInfo = null;
   try {
     if (payment.cel === 'alap_elofizetes') {
       const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
@@ -2801,14 +3028,30 @@ route('POST', '/api/payment/notify', async (req, res) => {
       const packageId = parseInt(payment.cel.slice(7), 10);
       const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
       grantPackageToCompany(payment.ceg_kulcs, packageId, addDaysISO(todayIsoServer(), napok), `myPOS fizetés (${body.IPC_Trnref})`);
+    } else if (payment.cel.startsWith('funkcio_telephely:')) {
+      // Telephely-specifikus, HAVONTA ISMÉTLŐDŐ funkció-előfizetés — az
+      // első, sikeres fizetéskor kapott kártya-tokent is elmentjük, hogy a
+      // következő havi terhelést automatikusan, a vásárló újbóli
+      // átirányítása nélkül tudjuk elindítani (lásd a lenti, napi
+      // ütemezett újraterhelő feladatot).
+      const napok = 30;
+      const lejarat = addDaysISO(todayIsoServer(), napok);
+      const feature = licenseDb.prepare('SELECT nev FROM license_features WHERE key = ?').get(payment.feature_key);
+      licenseDb.prepare(`
+        INSERT INTO company_licenses (ceg_kulcs, telephely_kod, feature_key, ar, lejarat, aktiv, jovahagyta, kartya_token, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET
+          lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, kartya_token = excluded.kartya_token, updated_at = excluded.updated_at
+      `).run(payment.ceg_kulcs, payment.telephely_kod, payment.feature_key, payment.osszeg, lejarat, `myPOS fizetés (${body.IPC_Trnref})`, body.CardToken || null, now);
+      invoiceInfo = { tetelNev: `${feature?.nev || payment.feature_key} (${payment.telephely_kod} telephely) - havi előfizetés`, ismetlodo: false };
     } else if (payment.cel.startsWith('funkcio:')) {
       const key = payment.cel.slice(8);
       const napok = parseInt(process.env.ALAP_ELOFIZETES_IDOTARTAM_NAP || '30', 10);
       const lejarat = addDaysISO(todayIsoServer(), napok);
       licenseDb.prepare(`
-        INSERT INTO company_licenses (ceg_kulcs, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
-        VALUES (?, ?, 0, ?, 1, ?, ?)
-        ON CONFLICT(ceg_kulcs, feature_key) DO UPDATE SET lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
+        INSERT INTO company_licenses (ceg_kulcs, telephely_kod, feature_key, ar, lejarat, aktiv, jovahagyta, updated_at)
+        VALUES (?, '', ?, 0, ?, 1, ?, ?)
+        ON CONFLICT(ceg_kulcs, telephely_kod, feature_key) DO UPDATE SET lejarat = excluded.lejarat, aktiv = 1, jovahagyta = excluded.jovahagyta, updated_at = excluded.updated_at
       `).run(payment.ceg_kulcs, key, lejarat, `myPOS fizetés (${body.IPC_Trnref})`, now);
     }
     logActivity({ type: 'payment_notify', ok: true, companyKey: payment.ceg_kulcs, nev: null, detail: `Sikeres fizetés jóváírva: ${payment.cel}, ${payment.osszeg} ${payment.penznem} (OrderID: ${body.OrderID})` });
@@ -2817,8 +3060,142 @@ route('POST', '/api/payment/notify', async (req, res) => {
     logActivity({ type: 'payment_notify', ok: false, companyKey: payment.ceg_kulcs, nev: null, detail: `Fizetés sikeres volt, de a jóváírás hibázott: ${e.message}` });
   }
 
+  // A demo-számla PDF kiküldése — ez SOHA nem akaszthatja meg a fizetés
+  // jóváírását, ezért teljesen külön, saját try/catch-ben fut, és a hibája
+  // csak naplózásra kerül.
+  if (invoiceInfo) {
+    try { await sendDemoInvoiceEmail({ cegKulcs: payment.ceg_kulcs, osszeg: payment.osszeg, penznem: payment.penznem, orderId: body.OrderID, ...invoiceInfo }); }
+    catch (e) { console.error('[fizetés] számla-email hiba:', e.message); logActivity({ type: 'payment_invoice_email', ok: false, companyKey: payment.ceg_kulcs, nev: null, detail: e.message }); }
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('OK');
+});
+
+// Admin: fizetési előzmények — minden kísérlet, nem csak a sikeresek.
+// ---------------------------------------------------------------------------
+// HAVI, AUTOMATIKUS ÚJRATERHELÉS — a myPOS IPCIAPurchase ("In-App Purchase")
+// hívásával, a korábban (CardTokenRequest=1 mellett) kapott, tárolt kártya-
+// tokennel. Ez KÖZVETLEN, szerver-szerver hívás, NEM böngésző-átirányítás —
+// a vásárlónak nem kell újra megadnia a kártyaadatait.
+//
+// ŐSZINTE, FONTOS MEGJEGYZÉS: ez a rész a myPOS hivatalos dokumentációjában
+// leírt módszert követi (IPCPurchase CardTokenRequest=1 → IPCIAPurchase
+// CardToken-nel), de mivel élő myPOS-fiók/sandbox nélkül nem tudtuk
+// ténylegesen tesztelni a szerver-válasz PONTOS mezőszerkezetét, ez egy
+// jóhiszemű, a dokumentáció alapján legjobb tudásunk szerinti implementáció
+// — élesítés előtt MINDENKÉPP tesztelendő a myPOS sandbox-fiókkal, és a
+// myPOS-szal is egyeztetendő (ők explicit jelzik, hogy a tokenes,
+// kártyabirtokos-jelenlét nélküli terhelést éles fiókhoz jóvá kell hagyniuk).
+function parseSimpleXmlField(xml, tag) {
+  const m = new RegExp(`<${tag}>([^<]*)<\\/${tag}>`, 'i').exec(xml);
+  return m ? m[1] : null;
+}
+async function chargeRecurringToken({ cardToken, amount, currency, orderId, note }) {
+  const fields = [
+    ['IPCmethod', 'IPCIAPurchase'],
+    ['IPCVersion', '1.4'],
+    ['IPCLanguage', 'HU'],
+    ['SID', process.env.MYPOS_SID],
+    ['WalletNumber', process.env.MYPOS_WALLET],
+    ['Amount', amount.toFixed(2)],
+    ['Currency', currency],
+    ['OrderID', orderId],
+    ['CardToken', cardToken],
+    ['KeyIndex', process.env.MYPOS_KEY_INDEX || '1'],
+    ['Note', note || ''],
+  ];
+  const signature = myposSign(fields, myposPrivateKey());
+  const params = new URLSearchParams();
+  for (const [k, v] of fields) params.append(k, String(v ?? ''));
+  params.append('Signature', signature);
+
+  const resp = await fetch(MYPOS_CHECKOUT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const text = await resp.text();
+  const status = parseSimpleXmlField(text, 'Status');
+  const trnref = parseSimpleXmlField(text, 'IPC_Trnref') || parseSimpleXmlField(text, 'Trn_ref');
+  const statusMsg = parseSimpleXmlField(text, 'StatusMsg');
+  return { success: status === '0', trnref, statusMsg: statusMsg || 'ismeretlen válasz', raw: text };
+}
+
+// Napi ütemezett feladat — megkeresi azokat a telephely-specifikus,
+// kártya-tokennel rendelkező funkció-előfizetéseket, amiknek MA jár le
+// (vagy már lejárt) a hozzáférése, és megpróbálja újraterhelni őket.
+// Sikeres terhelés: +30 nap, új demo-számla emailben. Sikertelen terhelés:
+// a funkció LETILTÁSRA kerül (pontosan ahogy a fejlesztő kérte).
+async function runRecurringBillingCycle() {
+  const today = todayIsoServer();
+  const expiring = licenseDb.prepare(`
+    SELECT * FROM company_licenses
+    WHERE kartya_token IS NOT NULL AND aktiv = 1 AND lejarat IS NOT NULL AND lejarat <= ?
+  `).all(today);
+
+  for (const row of expiring) {
+    const feature = licenseDb.prepare('SELECT nev, alap_ar FROM license_features WHERE key = ?').get(row.feature_key);
+    const amount = row.ar || feature?.alap_ar || 0;
+    if (!amount) continue; // időközben ingyenessé vált — nincs mit terhelni
+    const isDemo = row.kartya_token === DEMO_CARD_TOKEN;
+    if (!isDemo && !myposConfigured()) continue; // valódi tokenhez myPOS-konfiguráció is kell
+    const orderId = `LNYR${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
+    const now = new Date().toISOString();
+    licenseDb.prepare(`
+      INSERT INTO license_payments (order_id, ceg_kulcs, telephely_kod, feature_key, cel, osszeg, penznem, allapot, kartya_token, ismetlodo, letrehozva)
+      VALUES (?, ?, ?, ?, ?, ?, 'HUF', 'FUGGOBEN', ?, 1, ?)
+    `).run(orderId, row.ceg_kulcs, row.telephely_kod, row.feature_key, `funkcio_telephely:${row.telephely_kod}:${row.feature_key}`, amount, row.kartya_token, now);
+
+    try {
+      // DEMO-tokennel rendelkező előfizetésnél nincs valódi fizetési átjáró
+      // — a fejlesztő kérésének megfelelően ez a "megújítás" mindig
+      // szimuláltan sikeres, valódi terhelési kísérlet nélkül.
+      const result = isDemo
+        ? { success: true, trnref: `DEMO-${orderId}` }
+        : await chargeRecurringToken({
+            cardToken: row.kartya_token, amount, currency: 'HUF', orderId,
+            note: `Havi megujitas: ${feature?.nev || row.feature_key} (${row.telephely_kod})`,
+          });
+      if (result.success) {
+        const ujLejarat = addDaysISO(today, 30);
+        licenseDb.prepare(`UPDATE company_licenses SET lejarat = ?, updated_at = ? WHERE id = ?`).run(ujLejarat, now, row.id);
+        licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERES', mypos_trnref = ?, lezarva = ? WHERE order_id = ?`).run(result.trnref, now, orderId);
+        logActivity({ type: 'payment_recurring', ok: true, companyKey: row.ceg_kulcs, nev: null, detail: `Havi megújítás sikeres${isDemo ? ' (demo)' : ''}: ${feature?.nev || row.feature_key} (${row.telephely_kod}), ${amount} HUF` });
+        try {
+          await sendDemoInvoiceEmail({
+            cegKulcs: row.ceg_kulcs, osszeg: amount, penznem: 'HUF', orderId, ismetlodo: true,
+            tetelNev: `${feature?.nev || row.feature_key} (${row.telephely_kod} telephely) - havi megújítás${isDemo ? ' (demo)' : ''}`,
+          });
+        } catch (e) { console.error('[fizetés] ismétlődő számla-email hiba:', e.message); }
+      } else {
+        licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERTELEN', lezarva = ? WHERE order_id = ?`).run(now, orderId);
+        licenseDb.prepare(`UPDATE company_licenses SET aktiv = 0, updated_at = ? WHERE id = ?`).run(now, row.id);
+        logActivity({ type: 'payment_recurring', ok: false, companyKey: row.ceg_kulcs, nev: null, detail: `Havi megújítás sikertelen (${result.statusMsg}) — a funkció letiltva: ${feature?.nev || row.feature_key} (${row.telephely_kod})` });
+      }
+    } catch (e) {
+      licenseDb.prepare(`UPDATE license_payments SET allapot = 'SIKERTELEN', lezarva = ? WHERE order_id = ?`).run(new Date().toISOString(), orderId);
+      licenseDb.prepare(`UPDATE company_licenses SET aktiv = 0, updated_at = ? WHERE id = ?`).run(new Date().toISOString(), row.id);
+      logActivity({ type: 'payment_recurring', ok: false, companyKey: row.ceg_kulcs, nev: null, detail: `Havi megújítás hiba miatt sikertelen (${e.message}) — a funkció letiltva: ${feature?.nev || row.feature_key} (${row.telephely_kod})` });
+    }
+  }
+}
+// Naponta egyszer ellenőrzi a lejáró, tokenes előfizetéseket — csak akkor
+// fut ténylegesen érdemben, ha van myPOS-konfiguráció.
+setInterval(() => { runRecurringBillingCycle().catch((e) => console.error('[fizetés] ismétlődő terhelési ciklus hiba:', e.message)); }, 24 * 60 * 60 * 1000).unref();
+
+// Admin: a napi ismétlődő-terhelési ciklus KÉZI elindítása — hasznos
+// teszteléshez, és éles hibaelhárításhoz is (nem kell megvárni a napi
+// automatikus futást, ha valamit ellenőrizni kell).
+route('POST', '/api/admin/license/run-recurring-billing', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  try {
+    await runRecurringBillingCycle();
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
 });
 
 // Admin: fizetési előzmények — minden kísérlet, nem csak a sikeresek.

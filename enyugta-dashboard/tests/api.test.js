@@ -507,6 +507,267 @@ test('Telephelyenkénti önkiszolgáló funkció-választás', async (t) => {
   });
 });
 
+test('Funkció-katalógus inaktiválás — a cég és az admin nézete ne térjen el', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+  async function getCompanySession() {
+    const adminCookie = await getAdminCookie();
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('ha a cégnek van aktív kiosztása egy azóta a katalógusból inaktivált funkcióra, az a saját nézetében is látszódjon', async () => {
+    const cookie = await getCompanySession();
+    await fetch(`${server.baseUrl}/api/profile/features/toggle`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKey: 'MERLEGELES', kivalasztva: true }),
+    });
+
+    const adminCookie = await getAdminCookie();
+    // Admin inaktiválja a funkciót a KATALÓGUSBAN — a meglévő kiosztás
+    // ettől függetlenül megmarad a company_licenses táblában.
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'MERLEGELES', nev: 'Mérlegelés', alapAr: 0, aktiv: false }),
+    });
+
+    const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const profileBody = await profileRes.json();
+    const found = profileBody.features.find((f) => f.key === 'MERLEGELES');
+    assert.ok(found, 'a cégnek látnia kell ezt a funkciót, mivel ténylegesen aktívan ki van osztva neki, még ha a katalógusból törölték is');
+    assert.equal(found.kivalasztva, true);
+
+    const adminOverviewRes = await fetch(`${server.baseUrl}/api/admin/license/companies`, { headers: { Cookie: adminCookie } });
+    const adminOverviewBody = await adminOverviewRes.json();
+    const company = adminOverviewBody.companies.find((c) => c.cegKulcs === '18774455');
+    const site = company.telephelyek.find((t) => t.kod === '01');
+    const adminFound = site.licenses.find((f) => f.key === 'MERLEGELES');
+    assert.equal(adminFound.aktiv, true, 'az adminnak is aktívnak kell mutatnia — ugyanaz a kiosztás, csak a katalógus-állapot változott');
+    assert.equal(adminFound.katalogusAktiv, false, 'jeleznie kell, hogy a katalógusban már inaktív');
+  });
+});
+
+test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+
+  await t.test('a demo-fizetés azonnal aktiválja a funkciót, valódi fizetési átjáró nélkül', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'MERLEGELES', nev: 'Mérlegelés', alapAr: 1500 }),
+    });
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ cel: 'funkcio_telephely:01:MERLEGELES' }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.orderId);
+    assert.ok(body.lejarat);
+
+    const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const profileBody = await profileRes.json();
+    assert.equal(profileBody.features.find((f) => f.key === 'MERLEGELES').kivalasztva, true);
+  });
+
+  await t.test('másik telephely nevében nem indítható demo-fizetés', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ cel: 'funkcio_telephely:99:MERLEGELES' }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  await t.test('a demo-előfizetés is havonta automatikusan megújul, myPOS-konfiguráció nélkül is, valódi terhelési kísérlet nélkül', async () => {
+    const adminCookie = await getAdminCookie();
+    // A lejáratot mesterségesen a múltba állítjuk.
+    await fetch(`${server.baseUrl}/api/admin/license/grant`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', telephelyKod: '01', featureKey: 'MERLEGELES', ar: 1500, lejarat: '2020-01-01' }),
+    });
+    const runRes = await fetch(`${server.baseUrl}/api/admin/license/run-recurring-billing`, { method: 'POST', headers: { Cookie: adminCookie } });
+    assert.equal(runRes.status, 200);
+
+    const afterRes = await fetch(`${server.baseUrl}/api/admin/license/companies`, { headers: { Cookie: adminCookie } });
+    const afterBody = await afterRes.json();
+    const site = afterBody.companies.find((c) => c.cegKulcs === '18774455').telephelyek.find((t) => t.kod === '01');
+    const merlegeles = site.licenses.find((f) => f.key === 'MERLEGELES');
+    assert.equal(merlegeles.aktiv, true, 'a demo-tokennel rendelkező előfizetésnek MINDIG sikeresen meg kell újulnia, valódi terhelés nélkül');
+    assert.ok(merlegeles.lejarat > '2020-01-01', 'a lejáratnak előre kellett kerülnie');
+  });
+});
+
+test('myPOS-alapú fizetés — telephely-specifikus, ismétlődő funkció-előfizetés', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+  const crypto = require('node:crypto');
+
+  function signMyposFields(orderedFields) {
+    const concatenated = orderedFields.map(([, v]) => String(v)).join('-');
+    const base64Input = Buffer.from(concatenated, 'utf8').toString('base64');
+    return crypto.sign('RSA-SHA256', Buffer.from(base64Input, 'utf8'), server.myposPrivateKey).toString('base64');
+  }
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+
+  await t.test('a fizetés indítása kártya-tokent kér az ismétlődő funkció-előfizetéshez', async () => {
+    const adminCookie = await getAdminCookie();
+    // Adjunk árat a funkciónak, hogy fizetőssé váljon.
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'NTAK', nev: 'NTAK', alapAr: 2500 }),
+    });
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/payment/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ cel: 'funkcio_telephely:01:NTAK' }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.fields.CardTokenRequest, '1', 'ismétlődő előfizetésnél kártya-tokent kell kérni');
+    assert.equal(body.osszeg, 2500);
+  });
+
+  await t.test('sikeres myPOS notify után a funkció aktiválódik a helyes telephelyen, kártya-tokennel elmentve', async () => {
+    const cookie = await getCompanySession();
+    const startRes = await fetch(`${server.baseUrl}/api/payment/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ cel: 'funkcio_telephely:01:NTAK' }),
+    });
+    const startBody = await startRes.json();
+    const orderId = startBody.orderId;
+
+    const notifyFields = [
+      ['IPCmethod', 'IPCPurchaseNotify'], ['SID', 'teszt-sid-000000000010'],
+      ['Amount', '2500.00'], ['Currency', 'HUF'], ['OrderID', orderId],
+      ['IPC_Trnref', 'TESZT-TRN-001'], ['RequestSTAN', '1'], ['RequestDateTime', '20260722120000'],
+    ];
+    const signature = signMyposFields(notifyFields);
+    const form = new URLSearchParams();
+    for (const [k, v] of notifyFields) form.append(k, v);
+    form.append('Signature', signature);
+    form.append('CardToken', 'teszt-kartya-token-abc123');
+
+    const notifyRes = await fetch(`${server.baseUrl}/api/payment/notify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString(),
+    });
+    assert.equal(notifyRes.status, 200);
+    assert.equal(await notifyRes.text(), 'OK');
+
+    const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const profileBody = await profileRes.json();
+    const ntak = profileBody.features.find((f) => f.key === 'NTAK');
+    assert.equal(ntak.kivalasztva, true, 'a sikeres fizetés után a funkciónak aktívnak kell lennie');
+
+    const adminCookie = await getAdminCookie();
+    const adminRes = await fetch(`${server.baseUrl}/api/admin/license/companies`, { headers: { Cookie: adminCookie } });
+    const adminBody = await adminRes.json();
+    const site = adminBody.companies.find((c) => c.cegKulcs === '18774455').telephelyek.find((t) => t.kod === '01');
+    const ntakAdmin = site.licenses.find((f) => f.key === 'NTAK');
+    assert.equal(ntakAdmin.fizetosElofizetes, true, 'az adminnak jeleznie kell, hogy ez egy kártya-tokennel rendelkező, fizetett előfizetés');
+  });
+
+  await t.test('hibás aláírású notify hívás elutasításra kerül, semmi nem íródik jóvá', async () => {
+    const notifyFields = [
+      ['IPCmethod', 'IPCPurchaseNotify'], ['SID', 'teszt-sid-000000000010'],
+      ['Amount', '2500.00'], ['Currency', 'HUF'], ['OrderID', 'HAMIS-ORDER-ID'],
+      ['IPC_Trnref', 'HAMIS'], ['RequestSTAN', '1'], ['RequestDateTime', '20260722120000'],
+    ];
+    const form = new URLSearchParams();
+    for (const [k, v] of notifyFields) form.append(k, v);
+    form.append('Signature', 'ervenytelen-alairas-base64');
+    const notifyRes = await fetch(`${server.baseUrl}/api/payment/notify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString(),
+    });
+    assert.equal(await notifyRes.text(), 'NOK');
+  });
+
+  await t.test('sikertelen havi újraterhelés esetén a funkció automatikusan letiltásra kerül', async () => {
+    // Ebben a teszt-környezetben nincs valódi hálózati elérés a myPOS felé,
+    // így a terhelési kísérlet garantáltan hibával elszáll — ez pontosan
+    // a "sikertelen terhelés esetén letiltás" ágat gyakorolja be.
+    const cookie = await getCompanySession();
+    const beforeRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookie } });
+    const beforeBody = await beforeRes.json();
+    assert.ok(beforeBody.features.find((f) => f.key === 'NTAK').kivalasztva, 'az előző tesztből aktívnak kell lennie a kiindulási állapotban');
+
+    const adminCookie = await getAdminCookie();
+    // A lejáratot mesterségesen a múltba állítjuk, hogy a ciklus
+    // "esedékesnek" lássa — ehhez visszavonjuk, majd újra kiosztjuk lejárt
+    // dátummal (admin jogon, közvetlenül).
+    await fetch(`${server.baseUrl}/api/admin/license/grant`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', telephelyKod: '01', featureKey: 'NTAK', ar: 2500, lejarat: '2020-01-01' }),
+    });
+
+    const runRes = await fetch(`${server.baseUrl}/api/admin/license/run-recurring-billing`, { method: 'POST', headers: { Cookie: adminCookie } });
+    assert.equal(runRes.status, 200);
+
+    const afterRes = await fetch(`${server.baseUrl}/api/admin/license/companies`, { headers: { Cookie: adminCookie } });
+    const afterBody = await afterRes.json();
+    const site = afterBody.companies.find((c) => c.cegKulcs === '18774455').telephelyek.find((t) => t.kod === '01');
+    const ntak = site.licenses.find((f) => f.key === 'NTAK');
+    assert.equal(ntak.aktiv, false, 'sikertelen (ez esetben hálózat nélküli) terhelés után a funkciónak le kell tiltódnia');
+
+    const activityRes = await fetch(`${server.baseUrl}/api/admin/activity`, { headers: { Cookie: adminCookie } });
+    const activityBody = await activityRes.json();
+    assert.ok(activityBody.entries.some((e) => e.type === 'payment_recurring' && !e.ok), 'a sikertelen újraterhelésnek meg kell jelennie a tevékenység-naplóban');
+  });
+});
+
 test('Admin — cég végleges törlése', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());
