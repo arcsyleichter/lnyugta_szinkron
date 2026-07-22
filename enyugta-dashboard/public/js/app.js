@@ -743,30 +743,6 @@ function openLicenseGrantModal(c) {
 
   loadLicenseDeviceList(c.cegKulcs);
 
-  const pkgSelect = document.getElementById('license-package-grant-select');
-  const activePkgs = licensePackagesCache.filter((p) => p.aktiv);
-  pkgSelect.innerHTML = activePkgs.length
-    ? activePkgs.map((p) => `<option value="${p.id}">${escapeHtml(p.nev)}${p.ar ? ` (${p.ar.toLocaleString('hu-HU')} Ft)` : ''}</option>`).join('')
-    : '<option value="">nincs elérhető csomag</option>';
-  document.getElementById('license-package-grant-lejarat').value = '';
-  const pkgMsg = document.getElementById('license-package-grant-msg');
-  pkgMsg.textContent = '';
-  document.getElementById('license-package-grant-btn').onclick = async () => {
-    const packageId = Number(pkgSelect.value);
-    if (!packageId) return;
-    pkgMsg.textContent = 'Kiosztás…'; pkgMsg.style.color = 'var(--text-dim)';
-    try {
-      const res = await api('/api/admin/license/packages/grant', {
-        method: 'POST',
-        body: JSON.stringify({ cegKulcs: c.cegKulcs, packageId, lejarat: document.getElementById('license-package-grant-lejarat').value }),
-      });
-      pkgMsg.textContent = `✓ ${res.featureCount} funkció kiosztva`; pkgMsg.style.color = 'var(--jade-deep)';
-      loadLicenseData();
-    } catch (e) {
-      pkgMsg.textContent = e.message; pkgMsg.style.color = 'var(--brick)';
-    }
-  };
-
   const subCheckbox = document.getElementById('license-subscription-aktiv');
   const subMegjegyzes = document.getElementById('license-subscription-megjegyzes');
   const subMsg = document.getElementById('license-subscription-msg');
@@ -786,55 +762,6 @@ function openLicenseGrantModal(c) {
       subMsg.textContent = e.message; subMsg.style.color = 'var(--brick)';
     }
   };
-  const list = document.getElementById('license-grant-list');
-  list.innerHTML = c.licenses.map((l) => `
-    <div class="license-grant-row" data-key="${escapeHtml(l.key)}" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--line);">
-      <label style="flex:1 1 220px;display:flex;align-items:center;gap:8px;font-size:13px;">
-        <input type="checkbox" class="lg-aktiv" ${l.aktiv ? 'checked' : ''}> ${escapeHtml(l.nev)}
-      </label>
-      <input type="number" class="lg-ar" min="0" step="100" value="${l.ar != null ? l.ar : l.alapAr}" style="width:100px;padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;" title="Ár (Ft)">
-      <input type="date" class="lg-lejarat" value="${l.lejarat || ''}" style="padding:6px 8px;border:1.5px solid var(--line);border-radius:6px;" title="Lejárat (üresen: nincs lejárat)">
-      <span class="licenc-badge licenc-badge--${l.allapot}">${escapeHtml(l.allapotSzoveg)}</span>
-      <button class="btn-tiny lg-save">Mentés</button>
-      ${l.kiosztva ? '<button class="btn-tiny lg-revoke">Visszavonás</button>' : ''}
-    </div>`).join('');
-
-  list.querySelectorAll('.license-grant-row').forEach((row) => {
-    const featureKey = row.dataset.key;
-    row.querySelector('.lg-save').addEventListener('click', async () => {
-      try {
-        await api('/api/admin/license/grant', {
-          method: 'POST',
-          body: JSON.stringify({
-            cegKulcs: c.cegKulcs,
-            featureKey,
-            ar: Number(row.querySelector('.lg-ar').value) || 0,
-            lejarat: row.querySelector('.lg-lejarat').value || null,
-            aktiv: row.querySelector('.lg-aktiv').checked,
-          }),
-        });
-        await loadLicenseCompanies();
-        const fresh = licenseCompaniesCache.find((x) => x.cegKulcs === c.cegKulcs);
-        openLicenseGrantModal(fresh);
-      } catch (e) {
-        alert('Nem sikerült menteni: ' + e.message);
-      }
-    });
-    const revokeBtn = row.querySelector('.lg-revoke');
-    if (revokeBtn) {
-      revokeBtn.addEventListener('click', async () => {
-        if (!confirm('Biztosan visszavonod ezt a funkciót ettől a cégtől?')) return;
-        try {
-          await api('/api/admin/license/revoke', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, featureKey }) });
-          await loadLicenseCompanies();
-          const fresh = licenseCompaniesCache.find((x) => x.cegKulcs === c.cegKulcs);
-          openLicenseGrantModal(fresh);
-        } catch (e) {
-          alert('Nem sikerült visszavonni: ' + e.message);
-        }
-      });
-    }
-  });
   document.getElementById('license-grant-modal-backdrop').hidden = false;
   renderLicenseTelephelyBreakdown(c);
 }
