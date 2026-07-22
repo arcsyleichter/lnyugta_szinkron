@@ -153,9 +153,10 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
   padding:10px; border:none; border-radius:8px; background:var(--jade); color:#fff; font-weight:600; font-size:13.5px;
 }
 #telephely-new-btn:hover{ background:var(--jade-deep); }
-.telephely-current{ display:flex; align-items:center; gap:6px; }
+.telephely-current{ display:flex; align-items:center; gap:6px; max-width:none !important; overflow:visible !important; }
+.telephely-current-nev-text{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 .telephely-current a{
-  display:inline-flex; align-items:center; color:var(--amber); font-weight:700; font-size:11.5px;
+  display:inline-flex; align-items:center; flex:none; color:var(--amber); font-weight:700; font-size:11.5px;
   text-decoration:none; padding:3px 10px; border-radius:14px;
   border:1px solid rgba(240,169,62,0.4); background:rgba(240,169,62,0.1);
   transition:background .15s, border-color .15s;
@@ -183,11 +184,11 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .brand--sidebar .brand-sub{ color:rgba(250,249,245,0.55); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:150px; }
 .nav{ display:flex; flex-direction:column; gap:2px; flex:1; }
 .nav-item{
-  text-align:left; background:transparent; border:none; color:rgba(250,249,245,0.72);
-  padding:10px 12px; border-radius:7px; font-size:13.5px; font-weight:500; transition:background .12s,color .12s;
+  text-align:left; background:transparent; border:none; border-left:3px solid transparent; color:rgba(250,249,245,0.72);
+  padding:10px 12px; border-radius:7px; font-size:13.5px; font-weight:500; transition:background .12s,color .12s,border-color .12s;
 }
 .nav-item:hover{ background:rgba(250,249,245,0.06); color:#fff; }
-.nav-item.is-active{ background:var(--jade); color:#fff; }
+.nav-item.is-active{ background:var(--jade); color:#fff; border-left-color:var(--amber); }
 .nav-subitem{ padding-left:26px; font-size:12.5px; opacity:0.85; margin-top:-4px; }
 .sidebar-footer{ display:flex; flex-direction:column; gap:10px; }
 .sync-pill{ display:flex; align-items:center; gap:7px; font-size:11.5px; color:rgba(250,249,245,0.65); padding:0 2px; }
@@ -554,11 +555,11 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .login-card--rich{ box-shadow:none; padding:0; max-width:360px; width:100%; }
 .login-secondary-links{ margin-top:22px; text-align:center; font-size:12.5px; display:flex; justify-content:center; gap:10px; flex-wrap:wrap; }
 .login-secondary-links a{
-  display:inline-block; color:var(--jade-deep); font-weight:600; text-decoration:none;
-  padding:6px 14px; border-radius:16px; border:1px solid var(--line);
+  display:inline-block; color:#8A5A0F; font-weight:700; text-decoration:none;
+  padding:6px 14px; border-radius:16px; border:1.5px solid rgba(240,169,62,0.5); background:#FEF9EE;
   transition:background .15s, border-color .15s, color .15s;
 }
-.login-secondary-links a:hover{ background:#FEF6E9; border-color:var(--amber); color:#8A5A0F; }
+.login-secondary-links a:hover{ background:#FBEDD1; border-color:var(--amber); }
 .login-secondary-sep{ display:none; }
 .login-secondary-sep{ color:var(--line); margin:0 8px; }
 @media (max-width:760px){
@@ -583,12 +584,12 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 .admin-entry a{
   display:inline-flex; align-items:center; gap:4px;
-  color:rgba(250,249,245,0.9); font-size:12px; font-weight:600;
+  color:#F0A93E; font-size:12px; font-weight:700;
   text-decoration:none; padding:7px 14px; border-radius:20px;
-  border:1px solid rgba(240,169,62,0.35); background:rgba(240,169,62,0.08);
+  border:1.5px solid rgba(240,169,62,0.55); background:rgba(240,169,62,0.12);
   transition:background .15s, border-color .15s, color .15s;
 }
-.admin-entry a:hover{ background:rgba(240,169,62,0.2); border-color:rgba(240,169,62,0.65); color:#fff; }
+.admin-entry a:hover{ background:rgba(240,169,62,0.28); border-color:rgba(240,169,62,0.85); color:#fff; }
 
 .admin-shell{ display:grid; grid-template-columns:224px 1fr; min-height:100vh; background:var(--paper-dim); }
 .admin-nav-item{ } /* a .nav-item stílust örökli, ez csak egy elkülönített JS-hook */
@@ -896,3 +897,25 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .invite-legal-check{ display:flex; align-items:flex-start; gap:8px; font-size:12.5px; color:var(--text-dim); margin-bottom:10px; cursor:pointer; }
 .invite-legal-check input[type="checkbox"]{ margin-top:2px; flex:none; width:16px; height:16px; }
 .invite-legal-check a{ color:var(--jade-deep); text-decoration:underline; }
+
+/* ============================================================
+   Belépő animáció — visszafogott, elegáns "megjelenés" a kártyáknak
+   és a bejelentkező-panelnek, amikor egy oldal megnyílik. Kizárólag
+   transform+opacity (GPU-gyorsított, nem terheli a böngészőt), és
+   a fenti prefers-reduced-motion szabály automatikusan szinte
+   azonnalira rövidíti annak, aki ezt kéri a rendszerében.
+   ============================================================ */
+@keyframes lnyugtaFadeInUp{
+  from{ opacity:0; transform:translateY(10px); }
+  to{ opacity:1; transform:translateY(0); }
+}
+.card, .login-card{
+  animation:lnyugtaFadeInUp .45s cubic-bezier(0.16,1,0.3,1) both;
+}
+/* Enyhe lépcsőzetes megjelenés, ha több kártya van egymás alatt/mellett
+   egy oldalon — finom kaszkád-hatás, nem egyszerre "csapódik be" minden. */
+.main .card:nth-of-type(2){ animation-delay:.04s; }
+.main .card:nth-of-type(3){ animation-delay:.08s; }
+.main .card:nth-of-type(4){ animation-delay:.12s; }
+.main .card:nth-of-type(5){ animation-delay:.16s; }
+.main .card:nth-of-type(n+6){ animation-delay:.2s; }

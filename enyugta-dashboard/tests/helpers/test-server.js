@@ -26,7 +26,7 @@ async function startTestServer({ port } = {}) {
     nev: 'Teszt Kávézó Kft.',
   });
 
-  const actualPort = port || 4000 + Math.floor(Math.random() * 5000);
+  const actualPort = port || 10000 + (process.pid % 5000) + Math.floor(Math.random() * 5000);
 
   const child = spawn('node', ['server.js'], {
     cwd: APP_ROOT,
@@ -50,7 +50,7 @@ async function startTestServer({ port } = {}) {
   const baseUrl = `http://127.0.0.1:${actualPort}`;
 
   // Várakozás, amíg a szerver ténylegesen válaszol — legfeljebb ~8 másodpercig.
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 15000;
   let ready = false;
   while (Date.now() < deadline) {
     try {
@@ -66,7 +66,7 @@ async function startTestServer({ port } = {}) {
 
   async function stop() {
     child.kill();
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 300));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
