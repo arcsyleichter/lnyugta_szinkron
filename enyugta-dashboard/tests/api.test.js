@@ -270,6 +270,121 @@ test('Alapvető adat-végpontok', async (t) => {
   });
 });
 
+test('Cikktörzs — termékfotó és göngyöleg-kapcsolás', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('valódi PNG-fotó feltöltése és megjelenése a Cikktörzsben', async () => {
+    const cookie = await getCompanySession();
+    // Legkisebb érvényes PNG (1x1 pixel), hogy a mágikus-bájtos ellenőrzés átengedje.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const uploadRes = await fetch(`${server.baseUrl}/api/products/image`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'Espresso', fajlAdat: `data:image/png;base64,${png}` }),
+    });
+    assert.equal(uploadRes.status, 200);
+
+    const masterRes = await fetch(`${server.baseUrl}/api/products/master`, { headers: { Cookie: cookie } });
+    const masterBody = await masterRes.json();
+    const espresso = masterBody.items.find((it) => it.nev === 'Espresso');
+    assert.ok(espresso.kepFajlnev, 'a feltöltött fotónak meg kell jelennie a cikk adatai közt');
+
+    const imgRes = await fetch(`${server.baseUrl}/api/products/image?fajlnev=${espresso.kepFajlnev}`, { headers: { Cookie: cookie } });
+    assert.equal(imgRes.status, 200);
+    assert.match(imgRes.headers.get('content-type'), /^image\//);
+  });
+
+  await t.test('göngyöleg-kapcsolás egy meglévő termékre sikeres, ismeretlenre elutasított', async () => {
+    const cookie = await getCompanySession();
+    const masterRes = await fetch(`${server.baseUrl}/api/products/master`, { headers: { Cookie: cookie } });
+    const masterBody = await masterRes.json();
+    assert.ok(masterBody.packagingOptions.length > 0, 'a göngyöleg-választónak fel kell ajánlania a meglévő cikkeket');
+    const espressoAzon = masterBody.items.find((it) => it.nev === 'Espresso').azon;
+
+    const okRes = await fetch(`${server.baseUrl}/api/products/change`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'Cappuccino', originalMegnevezes: 'Cappuccino', bruttoar: 950, afakod: '27%', gongyolegAzon: espressoAzon }),
+    });
+    assert.equal(okRes.status, 200);
+
+    const badRes = await fetch(`${server.baseUrl}/api/products/change`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ megnevezes: 'Latte Macchiato', originalMegnevezes: 'Latte Macchiato', bruttoar: 950, afakod: '27%', gongyolegAzon: 'nemletezo-azon-9999' }),
+    });
+    assert.equal(badRes.status, 400, 'nem létező göngyöleg-termékre hivatkozást el kell utasítani');
+  });
+});
+
+test('Admin — cég végleges törlése', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getAdminCookie() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    return extractCookie(loginRes);
+  }
+
+  await t.test('rossz megerősítő névvel a törlés elutasításra kerül, az adatok megmaradnak', async () => {
+    const adminCookie = await getAdminCookie();
+    const res = await fetch(`${server.baseUrl}/api/admin/company/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', megerositoNev: 'Rossz Név Kft.' }),
+    });
+    assert.equal(res.status, 400);
+
+    // Az adatoknak érintetlennek kell maradniuk — az admin áttekintésben továbbra is szerepelnie kell.
+    const overviewRes = await fetch(`${server.baseUrl}/api/admin/overview`, { headers: { Cookie: adminCookie } });
+    const overviewBody = await overviewRes.json();
+    assert.ok(overviewBody.companies.some((c) => c.cegKulcs === '18774455'), 'a cégnek továbbra is léteznie kell a rossz megerősítés után');
+  });
+
+  await t.test('helyes megerősítő névvel a törlés sikeres, és az adatok valóban eltűnnek', async () => {
+    const adminCookie = await getAdminCookie();
+    const res = await fetch(`${server.baseUrl}/api/admin/company/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ cegKulcs: '18774455', megerositoNev: 'Teszt Kávézó Kft.' }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.backupDir, 'a válasznak tartalmaznia kell a biztonsági mentés helyét');
+
+    const overviewRes = await fetch(`${server.baseUrl}/api/admin/overview`, { headers: { Cookie: adminCookie } });
+    const overviewBody = await overviewRes.json();
+    assert.ok(!overviewBody.companies.some((c) => c.cegKulcs === '18774455'), 'törlés után a cégnek már nem szabad szerepelnie az admin listában');
+
+    // A törlés MAGA (mint admin-tevékenység) nyomon követhető kell maradjon.
+    const activityRes = await fetch(`${server.baseUrl}/api/admin/activity`, { headers: { Cookie: adminCookie } });
+    assert.equal(activityRes.status, 200);
+    const activityBody = await activityRes.json();
+    const deleteLogEntry = activityBody.entries.find((e) => e.type === 'company_deleted');
+    assert.ok(deleteLogEntry, 'a törlésnek meg kell jelennie a tevékenység-naplóban');
+  });
+});
+
 test('NTAK — cégenkénti kapcsoló és a Cikktörzs kötelező mezői', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());

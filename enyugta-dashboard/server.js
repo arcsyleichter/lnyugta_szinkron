@@ -19,6 +19,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
@@ -283,6 +284,19 @@ stockDb.exec(`
     nev TEXT NOT NULL,
     kuszob NUMERIC NOT NULL,
     PRIMARY KEY (company_key, scope, nev)
+  );
+
+  -- Termékfotók — SZÁNDÉKOSAN csak a weben tárolt, kiegészítő adat, NEM
+  -- szinkronizálódik az androidos alkalmazással. A cikkt tábla valódi
+  -- sémájában nincs kép-mező, és az androidos szinkron elutasítaná az
+  -- egész frissítést egy ismeretlen mezőnévre — ezért ez a funkció itt,
+  -- teljesen elkülönítve, csak a webes felület megjelenítését szolgálja.
+  CREATE TABLE IF NOT EXISTS termek_kepek (
+    company_key TEXT NOT NULL,
+    cikk_nev TEXT NOT NULL,
+    fajlnev TEXT NOT NULL,
+    feltoltve TEXT NOT NULL,
+    PRIMARY KEY (company_key, cikk_nev)
   );
 `);
 {
@@ -3732,18 +3746,25 @@ route('GET', '/api/products/master', async (req, res) => {
   const session = requireAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
   const ntakAktiv = isCompanyNtakActive(session.cegKulcs);
-  // A "fokatjson"/"alkatjson"/"ntakszorzo"/"ntakme" oszlopok NEM léteznek
-  // minden cég cikkt-sémájában (régebbi androidos alkalmazás-verzióknál
-  // hiányozhatnak) — ha rájuk hivatkoznánk, amikor nincsenek ott, a teljes
-  // Cikktörzs-nézet egy szerverhibával elszállna. Ezért előbb ellenőrizzük.
+  // A "fokatjson"/"alkatjson"/"ntakszorzo"/"ntakme"/"azon"/"gongyolegazon"
+  // oszlopok NEM léteznek minden cég cikkt-sémájában (régebbi androidos
+  // alkalmazás-verzióknál hiányozhatnak) — ha rájuk hivatkoznánk, amikor
+  // nincsenek ott, a teljes Cikktörzs-nézet egy szerverhibával elszállna.
+  // Ezért előbb ellenőrizzük.
   const cikktColumns = all(session.companyKey, `PRAGMA table_info(cikkt)`);
   const hasNtakCols = ['fokatjson', 'alkatjson', 'ntakszorzo', 'ntakme'].every((col) => cikktColumns.some((c) => c.name === col));
+  const hasGongyoleg = cikktColumns.some((c) => c.name === 'gongyolegazon') && cikktColumns.some((c) => c.name === 'azon');
   const ntakSelect = hasNtakCols
     ? `c.fokatjson AS fokat, c.alkatjson AS alkat, c.ntakszorzo AS ntakSzorzo, c.ntakme AS ntakMe,`
     : `NULL AS fokat, NULL AS alkat, NULL AS ntakSzorzo, NULL AS ntakMe,`;
+  const gongyolegSelect = hasGongyoleg
+    ? `c.azon, c.gongyolegazon,
+       (SELECT c2.megnevezes FROM cikkt c2 WHERE c2.azon = c.gongyolegazon AND c.gongyolegazon IS NOT NULL AND c.gongyolegazon != '') AS gongyolegNev,`
+    : `NULL AS azon, NULL AS gongyolegazon, NULL AS gongyolegNev,`;
   const rows = all(session.companyKey,
     `SELECT c.megnevezes AS nev, c.me, c.bruttoar, c.afakod, c.vonalkod, c.status, c.afakodelv AS afakodElviteli,
             ${ntakSelect}
+            ${gongyolegSelect}
             IFNULL(g.megnevezes, 'Nincs csoport') AS csoportNev
      FROM cikkt c LEFT JOIN cikkcsop g ON g.azon = c.csopazon
      WHERE c.status = 'A' ORDER BY c.megnevezes`
@@ -3766,10 +3787,20 @@ route('GET', '/api/products/master', async (req, res) => {
   // olyan cikk is legyen látható, ami még csak függőben van (androidon még nem létezik)
   const existingNames = new Set(rows.map((r) => r.nev));
   for (const [nev, pl] of pendingMap) {
-    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, fokat: pl.fokatjson || null, alkat: pl.alkatjson || null, ntakSzorzo: pl.ntakszorzo ?? null, ntakMe: pl.ntakme || null, pendingChange: pl, isNewPending: true });
+    if (!existingNames.has(nev)) items.push({ nev, me: pl.me, bruttoar: pl.bruttoar, afakod: pl.afakod, vonalkod: pl.vonalkod, status: 'A', csoportNev: pl.csoportNev || 'Nincs csoport', afakodElviteli: pl.afakodelv, fokat: pl.fokatjson || null, alkat: pl.alkatjson || null, ntakSzorzo: pl.ntakszorzo ?? null, ntakMe: pl.ntakme || null, azon: null, gongyolegazon: pl.gongyolegazon || null, gongyolegNev: null, pendingChange: pl, isNewPending: true });
   }
   items.sort((a, b) => a.nev.localeCompare(b.nev, 'hu'));
-  sendJson(res, 200, { items, ntakAktiv });
+  // A termékfotók egy MÁSIK adatbázisban (stockDb) vannak, mert a cikkt
+  // saját sémájában nincs kép-mező — itt fésüljük össze név szerint.
+  const imageRows = stockDb.prepare(`SELECT cikk_nev, fajlnev FROM termek_kepek WHERE company_key = ?`).all(session.companyKey);
+  const imageMap = new Map(imageRows.map((r) => [r.cikk_nev, r.fajlnev]));
+  for (const it of items) it.kepFajlnev = imageMap.get(it.nev) || null;
+  // A göngyöleg-választóhoz (más termék hozzákapcsolása "tapadó
+  // göngyölegként") csak a MÁR TÉNYLEGESEN LÉTEZŐ (nem függőben lévő)
+  // cikkeket ajánljuk fel — egy még nem szinkronizált termékre nem lehet
+  // hivatkozni, mert annak nincs még valódi "azon" azonosítója.
+  const packagingOptions = rows.filter((r) => r.azon).map((r) => ({ azon: r.azon, nev: r.nev }));
+  sendJson(res, 200, { items, ntakAktiv, packagingOptions });
 });
 
 route('GET', '/api/products/groups', async (req, res) => {
@@ -3812,19 +3843,20 @@ route('GET', '/api/products/groups', async (req, res) => {
 // ... } mezőt mostantól KÜLÖN, nem-generikus logikával dolgozzák fel az
 // androidos oldalon (nem a cikkt tábla generikus, mezőnév=oszlopnév alapú
 // illesztőjén keresztül) — ezért ismét belekerülhet a payloadba.
-function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat, ntakSzorzo, ntakMe }) {
+function buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat, ntakSzorzo, ntakMe, gongyolegAzon }) {
   const payload = { megnevezes, me, bruttoar, afakod, vonalkod: vonalkod || null, afakodelv: afakodelv || null };
   if (csoportNev) payload.csoport = { megnevezes: csoportNev };
   // FONTOS: a mezőnevek itt PONTOSAN a cikkt tábla valódi oszlopneveit
-  // követik (fokatjson/alkatjson/ntakszorzo/ntakme) — az androidos
-  // alkalmazás a payload minden kulcsát mezőnév=oszlopnév alapon,
-  // generikusan illeszti a cikkt táblára, és bármilyen ismeretlen
+  // követik (fokatjson/alkatjson/ntakszorzo/ntakme/gongyolegazon) — az
+  // androidos alkalmazás a payload minden kulcsát mezőnév=oszlopnév
+  // alapon, generikusan illeszti a cikkt táblára, és bármilyen ismeretlen
   // mezőnév esetén elutasítja az EGÉSZ szinkront, ezért itt nem lehet
   // "szebb", eltérő elnevezést használni.
   if (fokat !== undefined) payload.fokatjson = fokat || null;
   if (alkat !== undefined) payload.alkatjson = alkat || null;
   if (ntakSzorzo !== undefined) payload.ntakszorzo = ntakSzorzo ?? null;
   if (ntakMe !== undefined) payload.ntakme = ntakMe || null;
+  if (gongyolegAzon !== undefined) payload.gongyolegazon = gongyolegAzon || null;
   return payload;
 }
 
@@ -3863,8 +3895,81 @@ route('POST', '/api/products/change', async (req, res) => {
     if (!fokat) return sendJson(res, 400, { error: 'Az NTAK-főkategória megadása kötelező (a cég NTAK-os üzemmódban van — ez a Profil menüpontban kapcsolható ki).' });
     if (!alkat) return sendJson(res, 400, { error: 'Az NTAK-alkategória megadása kötelező (a cég NTAK-os üzemmódban van — ez a Profil menüpontban kapcsolható ki).' });
   }
-  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat }), 'web_form');
+  const ntakSzorzoRaw = body.ntakSzorzo;
+  let ntakSzorzo = null;
+  if (ntakSzorzoRaw !== undefined && ntakSzorzoRaw !== null && ntakSzorzoRaw !== '') {
+    ntakSzorzo = parseFloat(ntakSzorzoRaw);
+    if (!Number.isFinite(ntakSzorzo) || ntakSzorzo <= 0) return sendJson(res, 400, { error: 'Az NTAK-szorzó, ha meg van adva, pozitív számnak kell lennie.' });
+  }
+  const ntakMe = clampStr(body.ntakMe, 20) || null;
+  const gongyolegAzon = clampStr(body.gongyolegAzon, 40) || null;
+  if (gongyolegAzon) {
+    let csomagolo = null;
+    try { csomagolo = get(session.companyKey, `SELECT azon FROM cikkt WHERE azon = ? AND status = 'A'`, [gongyolegAzon]); } catch (_) {}
+    if (!csomagolo) return sendJson(res, 400, { error: 'A kiválasztott göngyöleg-termék nem található — válassz egy meglévő cikket.' });
+  }
+  addProductChange(session.companyKey, 'cikk_upsert', buildCikkPayload({ megnevezes, me, bruttoar, afakod, vonalkod, afakodelv, csoportNev, fokat, alkat, ntakSzorzo, ntakMe, gongyolegAzon }), 'web_form');
   logActivity({ type: 'product_change_add', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `${megnevezes} → ${bruttoar} Ft` });
+  sendJson(res, 200, { ok: true });
+});
+
+// Termékfotó feltöltése — CSAK weben tárolt, kiegészítő adat (lásd fenti
+// megjegyzés a termek_kepek táblánál). Ugyanaz a szigorú, tartalom-alapú
+// típusellenőrzés védi, mint a bevételezési számla-fotókat.
+route('POST', '/api/products/image', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cikkNev = clampStr(body.megnevezes, 120);
+  if (!cikkNev) return sendJson(res, 400, { error: 'Hiányzó cikknév.' });
+  if (!body.fajlAdat) return sendJson(res, 400, { error: 'Hiányzó fájl.' });
+  const MAX_BYTES = 5 * 1024 * 1024;
+  const match = /^data:([^;]+);base64,(.+)$/.exec(body.fajlAdat);
+  const b64 = match ? match[2] : body.fajlAdat;
+  const buf = Buffer.from(b64, 'base64');
+  if (buf.length > MAX_BYTES) return sendJson(res, 400, { error: 'A kép túl nagy (max. 5 MB).' });
+  const detectedExt = detectSafeFileType(buf);
+  if (!detectedExt || detectedExt === '.pdf') return sendJson(res, 400, { error: 'Csak kép (JPG, PNG, WEBP, HEIC) tölthető fel.' });
+
+  const safeDir = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'), 'termekkepek');
+  if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
+  const oldRow = stockDb.prepare(`SELECT fajlnev FROM termek_kepek WHERE company_key = ? AND cikk_nev = ?`).get(session.companyKey, cikkNev);
+  if (oldRow) { try { fs.unlinkSync(path.join(safeDir, oldRow.fajlnev)); } catch (_) {} }
+  const fajlnev = `${crypto.randomBytes(12).toString('hex')}${detectedExt}`;
+  fs.writeFileSync(path.join(safeDir, fajlnev), buf);
+  stockDb.prepare(`
+    INSERT INTO termek_kepek (company_key, cikk_nev, fajlnev, feltoltve) VALUES (?, ?, ?, ?)
+    ON CONFLICT(company_key, cikk_nev) DO UPDATE SET fajlnev = excluded.fajlnev, feltoltve = excluded.feltoltve
+  `).run(session.companyKey, cikkNev, fajlnev, new Date().toISOString());
+  sendJson(res, 200, { ok: true, fajlnev });
+});
+
+route('GET', '/api/products/image', async (req, res, query) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const fajlnev = String(query.fajlnev || '').replace(/[^a-zA-Z0-9.]/g, '');
+  if (!fajlnev) return sendJson(res, 400, { error: 'Hiányzó fájlnév.' });
+  const row = stockDb.prepare(`SELECT fajlnev FROM termek_kepek WHERE company_key = ? AND fajlnev = ?`).get(session.companyKey, fajlnev);
+  if (!row) return sendJson(res, 404, { error: 'Nincs ilyen kép.' });
+  const filePath = path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'), 'termekkepek', row.fajlnev);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található.' });
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.heic': 'image/heic' }[ext] || 'application/octet-stream';
+  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' });
+  res.end(fs.readFileSync(filePath));
+});
+
+route('POST', '/api/products/image/delete', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const body = await readJsonBody(req);
+  const cikkNev = clampStr(body.megnevezes, 120);
+  if (!cikkNev) return sendJson(res, 400, { error: 'Hiányzó cikknév.' });
+  const row = stockDb.prepare(`SELECT fajlnev FROM termek_kepek WHERE company_key = ? AND cikk_nev = ?`).get(session.companyKey, cikkNev);
+  if (row) {
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, session.companyKey.replace(/[^a-zA-Z0-9_-]/g, '_'), 'termekkepek', row.fajlnev)); } catch (_) {}
+    stockDb.prepare(`DELETE FROM termek_kepek WHERE company_key = ? AND cikk_nev = ?`).run(session.companyKey, cikkNev);
+  }
   sendJson(res, 200, { ok: true });
 });
 
@@ -4987,6 +5092,131 @@ route('GET', '/api/admin/overview', async (req, res, query) => {
   };
 
   sendJson(res, 200, { companies, ntak, resellers: resellerRows, emailReady: !!(BREVO_API_KEY && BREVO_SENDER_EMAIL), stats });
+});
+
+// ---------------------------------------------------------------------------
+// CÉG TELJES TÖRLÉSE — visszafordíthatatlan, ezért mindig előbb egy
+// cégenkénti biztonsági mentést készítünk (a data/companies/ mappájáról +
+// az összes kapcsolódó adatbázis-sor JSON-dumpjáról), és csak utána
+// töröljük ténylegesen. A mentés a ~/lnyugta_backups/ mappába kerül,
+// UGYANOTT, ahol a napi automatikus mentések is vannak — de KÜLÖN néven,
+// hogy egy adott cég visszaállítása ne igényelje a teljes rendszer
+// visszaállítását.
+// ---------------------------------------------------------------------------
+function backupCompanyBeforeDelete(cegKulcs) {
+  const backupRoot = process.env.LNYUGTA_BACKUP_DIR
+    ? path.resolve(process.env.LNYUGTA_BACKUP_DIR)
+    : path.join(os.homedir(), 'lnyugta_backups');
+  if (!fs.existsSync(backupRoot)) fs.mkdirSync(backupRoot, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(backupRoot, `torolt_ceg_${cegKulcs}_${ts}`);
+  fs.mkdirSync(backupDir, { recursive: true });
+
+  const companyDataDir = path.join(DATA_DIR, 'companies', cegKulcs);
+  if (fs.existsSync(companyDataDir)) {
+    fs.cpSync(companyDataDir, path.join(backupDir, 'companies_db'), { recursive: true });
+  }
+  const uploadsDir = path.join(UPLOADS_DIR, cegKulcs.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  if (fs.existsSync(uploadsDir)) {
+    fs.cpSync(uploadsDir, path.join(backupDir, 'uploads'), { recursive: true });
+  }
+
+  const dump = {
+    cegKulcs,
+    torolve: new Date().toISOString(),
+    users: usersDb.prepare(`SELECT * FROM users WHERE ceg_kulcs = ?`).all(cegKulcs),
+    company_licenses: licenseDb.prepare(`SELECT * FROM company_licenses WHERE ceg_kulcs = ?`).all(cegKulcs),
+    company_device_limits: licenseDb.prepare(`SELECT * FROM company_device_limits WHERE ceg_kulcs = ?`).all(cegKulcs),
+    company_devices: licenseDb.prepare(`SELECT * FROM company_devices WHERE ceg_kulcs = ?`).all(cegKulcs),
+    company_subscription: licenseDb.prepare(`SELECT * FROM company_subscription WHERE ceg_kulcs = ?`).all(cegKulcs),
+    company_settings: licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).all(cegKulcs),
+    license_payments: licenseDb.prepare(`SELECT * FROM license_payments WHERE ceg_kulcs = ?`).all(cegKulcs),
+    product_changes: productChangesDb.prepare(`SELECT * FROM product_changes WHERE company_key = ? OR company_key LIKE ?`).all(cegKulcs, `${cegKulcs}:%`),
+    bevetelezesek: stockDb.prepare(`SELECT * FROM bevetelezesek WHERE company_key = ? OR company_key LIKE ?`).all(cegKulcs, `${cegKulcs}:%`),
+    keszlet_riasztas: stockDb.prepare(`SELECT * FROM keszlet_riasztas WHERE company_key = ? OR company_key LIKE ?`).all(cegKulcs, `${cegKulcs}:%`),
+    termek_kepek: stockDb.prepare(`SELECT * FROM termek_kepek WHERE company_key = ? OR company_key LIKE ?`).all(cegKulcs, `${cegKulcs}:%`),
+    access_code: readAccessCodes()[cegKulcs] || null,
+    telephelyek: readTelephelyek()[cegKulcs] || null,
+  };
+  try {
+    const regRow = licenseDb.prepare(`SELECT * FROM reg_companies WHERE adoszam LIKE ?`).get(`${cegKulcs}%`);
+    if (regRow) {
+      dump.reg_companies = regRow;
+      dump.reg_sites = licenseDb.prepare(`SELECT * FROM reg_sites WHERE company_id = ?`).all(regRow.id);
+      dump.reg_devices = dump.reg_sites.flatMap((s) => licenseDb.prepare(`SELECT * FROM reg_devices WHERE site_id = ?`).all(s.id));
+    }
+  } catch (_) {}
+  fs.writeFileSync(path.join(backupDir, 'adatbazis-sorok.json'), JSON.stringify(dump, null, 2));
+  return backupDir;
+}
+
+function deleteCompanyCompletely(cegKulcs) {
+  // Minden nyitva lévő adatbázis-kapcsolatot be kell zárni ehhez a
+  // céghez, mielőtt a fájlokat töröljük — Windows/Linux alatt egyaránt
+  // hibát adna a törlés, ha a fájl még nyitva van.
+  for (const key of [...dbCache.keys()]) {
+    if (key === cegKulcs || key.startsWith(`${cegKulcs}:`)) evictConnection(key);
+  }
+
+  const companyDataDir = path.join(DATA_DIR, 'companies', cegKulcs);
+  if (fs.existsSync(companyDataDir)) fs.rmSync(companyDataDir, { recursive: true, force: true });
+  const uploadsDir = path.join(UPLOADS_DIR, cegKulcs.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  if (fs.existsSync(uploadsDir)) fs.rmSync(uploadsDir, { recursive: true, force: true });
+
+  usersDb.prepare(`DELETE FROM users WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM company_licenses WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM company_device_limits WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM company_devices WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM company_subscription WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM company_settings WHERE ceg_kulcs = ?`).run(cegKulcs);
+  licenseDb.prepare(`DELETE FROM license_payments WHERE ceg_kulcs = ?`).run(cegKulcs);
+  productChangesDb.prepare(`DELETE FROM product_changes WHERE company_key = ? OR company_key LIKE ?`).run(cegKulcs, `${cegKulcs}:%`);
+  stockDb.prepare(`DELETE FROM bevetelezesek WHERE company_key = ? OR company_key LIKE ?`).run(cegKulcs, `${cegKulcs}:%`);
+  stockDb.prepare(`DELETE FROM keszlet_riasztas WHERE company_key = ? OR company_key LIKE ?`).run(cegKulcs, `${cegKulcs}:%`);
+  stockDb.prepare(`DELETE FROM termek_kepek WHERE company_key = ? OR company_key LIKE ?`).run(cegKulcs, `${cegKulcs}:%`);
+  try {
+    const regRow = licenseDb.prepare(`SELECT id FROM reg_companies WHERE adoszam LIKE ?`).get(`${cegKulcs}%`);
+    if (regRow) {
+      const siteIds = licenseDb.prepare(`SELECT id FROM reg_sites WHERE company_id = ?`).all(regRow.id).map((s) => s.id);
+      for (const sid of siteIds) licenseDb.prepare(`DELETE FROM reg_devices WHERE site_id = ?`).run(sid);
+      licenseDb.prepare(`DELETE FROM reg_sites WHERE company_id = ?`).run(regRow.id);
+      licenseDb.prepare(`DELETE FROM reg_companies WHERE id = ?`).run(regRow.id);
+    }
+  } catch (_) {}
+
+  const codes = readAccessCodes();
+  if (codes[cegKulcs]) { delete codes[cegKulcs]; writeAccessCodes(codes); }
+  const telephelyek = readTelephelyek();
+  if (telephelyek[cegKulcs]) { delete telephelyek[cegKulcs]; writeTelephelyek(telephelyek); }
+  const meta = readSyncMeta();
+  for (const key of Object.keys(meta)) { if (key === cegKulcs || key.startsWith(`${cegKulcs}:`)) delete meta[key]; }
+  writeSyncMeta(meta);
+
+  for (const key of [...companyIndex.keys()]) {
+    if (key === cegKulcs || key.startsWith(`${cegKulcs}:`)) companyIndex.delete(key);
+  }
+}
+
+route('POST', '/api/admin/company/delete', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const { cegKulcs, megerositoNev } = await readJsonBody(req);
+  const cleanKulcs = String(cegKulcs || '').trim();
+  if (!cleanKulcs) return sendJson(res, 400, { error: 'Hiányzó cégkulcs.' });
+
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cleanKulcs);
+  const cegNev = anySite?.nev || null;
+  // Kötelező, egyértelmű megerősítés — a pontos cégnevet kell begépelni,
+  // ez a végpont közvetlen hívással sem téveszthető össze véletlenül
+  // egy másik, hasonló művelettel.
+  if (!cegNev || megerositoNev !== cegNev) {
+    return sendJson(res, 400, { error: 'A megerősítő cégnév nem egyezik — a törlés biztonsági okból nem történt meg.' });
+  }
+
+  const backupDir = backupCompanyBeforeDelete(cleanKulcs);
+  deleteCompanyCompletely(cleanKulcs);
+  logActivity({ type: 'company_deleted', ok: true, companyKey: null, nev: 'admin', detail: `Cég véglegesen törölve: ${cegNev} (${cleanKulcs}). Biztonsági mentés: ${backupDir}` });
+  sendJson(res, 200, { ok: true, backupDir });
 });
 
 // Cég hozzárendelése (vagy leválasztása) egy viszonteladóhoz — admin

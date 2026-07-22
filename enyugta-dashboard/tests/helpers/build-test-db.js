@@ -26,7 +26,7 @@ function buildTestCompanyDb(outPath, { adoszam, nev, varos = 'Teszt Város', cim
     CREATE TABLE cikkt (
       azon TEXT, csopazon TEXT, megnevezes TEXT, me TEXT,
       bruttoar REAL, afakod TEXT, vonalkod TEXT, status TEXT, afakodelv TEXT,
-      fokatjson TEXT, alkatjson TEXT, ntakszorzo REAL, ntakme TEXT
+      fokatjson TEXT, alkatjson TEXT, ntakszorzo REAL, ntakme TEXT, gongyolegazon TEXT
     );
     CREATE TABLE cikkcsop (azon TEXT, megnevezes TEXT, status TEXT);
     CREATE TABLE ntaknapzaras (

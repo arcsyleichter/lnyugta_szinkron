@@ -716,79 +716,118 @@
         <div id="masterdata-pagination"></div>
       </div>
 
-      <div class="card">
+      <div class="card md-editor-card">
         <div class="card-title" id="masterdata-form-title">Új cikk / módosítás</div>
-        <form id="masterdata-form" class="stock-receipt-form">
-          <div class="stock-field stock-field-wide">
-            <label for="md-nev-input">Cikk neve</label>
-            <input id="md-nev-input" placeholder="pl. Espresso" required>
-            <span class="field-hint" id="md-nev-hint" hidden>Szerkesztéskor nem módosítható — ez azonosítja a cikket a szinkronban.</span>
+        <form id="masterdata-form" class="md-editor-form">
+
+          <div class="md-editor-hero">
+            <div class="md-photo-box">
+              <img id="md-photo-preview" hidden alt="Termékfotó">
+              <div class="md-photo-placeholder" id="md-photo-placeholder">📷</div>
+              <input type="file" id="md-photo-input" accept="image/png,image/jpeg,image/webp,image/heic" hidden>
+              <div class="md-photo-actions">
+                <button type="button" class="btn-tiny" id="md-photo-upload-btn">Fotó</button>
+                <button type="button" class="btn-tiny md-photo-remove-btn" id="md-photo-remove-btn" hidden>✕</button>
+              </div>
+            </div>
+            <div class="md-hero-fields">
+              <div class="stock-field stock-field-wide">
+                <label for="md-nev-input">Cikk neve</label>
+                <input id="md-nev-input" placeholder="pl. Espresso" required>
+                <span class="field-hint" id="md-nev-hint" hidden>Szerkesztéskor nem módosítható — ez azonosítja a cikket a szinkronban.</span>
+              </div>
+              <div class="stock-field">
+                <label for="md-ar-input">Bruttó ár</label>
+                <input type="number" id="md-ar-input" min="0" step="any" placeholder="pl. 650" required>
+              </div>
+            </div>
           </div>
-          <div class="stock-field">
-            <label for="md-ar-input">Bruttó ár</label>
-            <input type="number" id="md-ar-input" min="0" step="any" placeholder="pl. 650" required>
+
+          <div class="md-editor-section">
+            <div class="md-editor-section-title">Alapadatok</div>
+            <div class="md-editor-grid">
+              <div class="stock-field">
+                <label for="md-afa-input">ÁFA kód</label>
+                <select id="md-afa-input" required>
+                  <option value="">— válassz —</option>
+                  <option value="27%">27% (általános)</option>
+                  <option value="18%">18% (kedvezményes)</option>
+                  <option value="05%">5% (kedvezményes)</option>
+                </select>
+              </div>
+              <div class="stock-field">
+                <label for="md-afakodelv-input">Elviteli ÁFA kód</label>
+                <select id="md-afakodelv-input">
+                  <option value="">— nincs eltérés —</option>
+                  <option value="27%">27% (általános)</option>
+                  <option value="18%">18% (kedvezményes)</option>
+                  <option value="05%">5% (kedvezményes)</option>
+                </select>
+              </div>
+              <div class="stock-field">
+                <label for="md-me-input">Egység</label>
+                <input id="md-me-input" placeholder="pl. Darab">
+              </div>
+              <div class="stock-field">
+                <label for="md-csoport-input">Csoport</label>
+                <input list="md-csoport-list" id="md-csoport-input" placeholder="pl. Kávézó kínálat">
+                <datalist id="md-csoport-list"></datalist>
+              </div>
+              <div class="stock-field">
+                <label for="md-vonalkod-input">Vonalkód</label>
+                <input id="md-vonalkod-input" placeholder="opcionális">
+              </div>
+            </div>
           </div>
-          <div class="stock-field">
-            <label for="md-afa-input">ÁFA kód</label>
-            <select id="md-afa-input" required>
-              <option value="">— válassz —</option>
-              <option value="27%">27% (általános)</option>
-              <option value="18%">18% (kedvezményes)</option>
-              <option value="05%">5% (kedvezményes)</option>
-            </select>
+
+          <div class="md-editor-section md-ntak-section" id="md-ntak-section" hidden>
+            <div class="md-editor-section-title">NTAK-adatszolgáltatás</div>
+            <div class="md-editor-grid">
+              <div class="stock-field">
+                <label for="md-ntak-fokat-input">Főkategória</label>
+                <select id="md-ntak-fokat-input"></select>
+              </div>
+              <div class="stock-field" id="md-ntak-fokat-custom-field" hidden>
+                <label for="md-ntak-fokat-custom-input">Főkategória (kézi bevitel)</label>
+                <input id="md-ntak-fokat-custom-input" placeholder="pl. saját kódtár szerint">
+              </div>
+              <div class="stock-field">
+                <label for="md-ntak-alkat-input">Alkategória</label>
+                <select id="md-ntak-alkat-input"></select>
+              </div>
+              <div class="stock-field" id="md-ntak-alkat-custom-field" hidden>
+                <label for="md-ntak-alkat-custom-input">Alkategória (kézi bevitel)</label>
+                <input id="md-ntak-alkat-custom-input" placeholder="pl. saját kódtár szerint">
+              </div>
+              <div class="stock-field">
+                <label for="md-ntak-szorzo-input">NTAK-szorzó</label>
+                <input type="number" id="md-ntak-szorzo-input" min="0" step="any" placeholder="pl. 1">
+              </div>
+              <div class="stock-field">
+                <label for="md-ntak-me-input">NTAK-mennyiségi egység</label>
+                <input id="md-ntak-me-input" placeholder="pl. DARAB, LITER, KG">
+              </div>
+            </div>
+            <span class="field-hint">A fő- és alkategória az NTAK hivatalos kategorizálási segédlete alapján rögzített — ha a te termékedhez egyik sem illik pontosan, válaszd az "Egyéb (kézi bevitel)" lehetőséget.</span>
           </div>
-          <div class="stock-field">
-            <label for="md-me-input">Egység</label>
-            <input id="md-me-input" placeholder="pl. Darab">
+
+          <div class="md-editor-section">
+            <div class="md-editor-section-title">Göngyöleg <span class="md-section-optional">(opcionális)</span></div>
+            <div class="md-editor-grid">
+              <div class="stock-field stock-field-wide">
+                <label for="md-gongyoleg-input">Kapcsolt göngyöleg-termék</label>
+                <select id="md-gongyoleg-input">
+                  <option value="">— nincs —</option>
+                </select>
+                <span class="field-hint">Értékesítéskor automatikusan hozzáadódik ehhez a termékhez (pl. "tapadó" pohár/doboz díj) — a listában csak már meglévő, szinkronizált cikkek választhatók.</span>
+              </div>
+            </div>
           </div>
-          <div class="stock-field">
-            <label for="md-csoport-input">Csoport</label>
-            <input list="md-csoport-list" id="md-csoport-input" placeholder="pl. Kávézó kínálat">
-            <datalist id="md-csoport-list"></datalist>
+
+          <div class="md-editor-actions">
+            <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
+            <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
           </div>
-          <div class="stock-field">
-            <label for="md-vonalkod-input">Vonalkód</label>
-            <input id="md-vonalkod-input" placeholder="opcionális">
-          </div>
-          <div class="stock-field">
-            <label for="md-afakodelv-input">Elviteli ÁFA kód</label>
-            <select id="md-afakodelv-input">
-              <option value="">— nincs eltérés a helybenitől —</option>
-              <option value="27%">27% (általános)</option>
-              <option value="18%">18% (kedvezményes)</option>
-              <option value="05%">5% (kedvezményes)</option>
-            </select>
-          </div>
-          <div class="stock-field" id="md-ntak-fokat-field" hidden>
-            <label for="md-ntak-fokat-input">NTAK főkategória</label>
-            <input list="md-ntak-fokat-list" id="md-ntak-fokat-input" placeholder="pl. ETEL">
-            <datalist id="md-ntak-fokat-list">
-              <option value="ETEL">
-              <option value="ALKMENTESITAL_HELYBEN">
-              <option value="ALKOHOLOSITAL_HELYBEN">
-              <option value="ETEL_ELVITEL">
-              <option value="ALKMENTESITAL_ELVITEL">
-              <option value="ALKOHOLOSITAL_ELVITEL">
-            </datalist>
-          </div>
-          <div class="stock-field" id="md-ntak-alkat-field" hidden>
-            <label for="md-ntak-alkat-input">NTAK alkategória</label>
-            <input list="md-ntak-alkat-list" id="md-ntak-alkat-input" placeholder="pl. FOETEL">
-            <datalist id="md-ntak-alkat-list">
-              <option value="FOETEL">
-              <option value="LEVES">
-              <option value="DESSZERT">
-              <option value="PEKARU">
-              <option value="KAVE">
-              <option value="TEA_FORROCSOKOLADE">
-              <option value="UDITO">
-              <option value="SOR">
-              <option value="BOR">
-            </datalist>
-            <span class="field-hint">A lista csak gyakori példa — bármilyen, az NTAK hivatalos kódtárában szereplő értéket beírhatsz.</span>
-          </div>
-          <button type="submit" class="btn-primary" id="md-save-btn">Mentés (függőbe téve)</button>
-          <button type="button" class="btn-ghost-light" id="md-cancel-btn" hidden>Mégse</button>
           <div class="stock-form-msg" id="masterdata-form-msg"></div>
         </form>
       </div>
@@ -1433,6 +1472,20 @@
         <button class="btn-secondary" id="company-detail-open-btn">Megnyitás</button>
         <a class="btn-secondary" id="company-detail-download-link" href="#" target="_blank" style="text-decoration:none;text-align:center;">⬇ DB letöltése</a>
         <button class="btn-secondary" id="company-detail-license-btn" title="Adószám vágólapra másolása, majd az lszamla megnyitása">🔗 Licenc (lszamla)</button>
+      </div>
+
+      <div style="margin-top:22px;padding:14px 16px;border:1.5px solid var(--brick);border-radius:10px;background:#FCEBEB;">
+        <div style="font-weight:700;color:var(--brick);margin-bottom:4px;">⚠ Veszélyes művelet</div>
+        <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">
+          A cég VÉGLEGES törlése minden hozzá tartozó adatot eltávolít (adatbázis, felhasználók,
+          regisztráció, licenc, készlet, stb.) — ez nem vonható vissza. Egy biztonsági mentés
+          automatikusan készül a szerveren, de a visszaállításhoz manuális beavatkozás kell.
+        </p>
+        <label for="company-detail-delete-confirm" style="display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:4px;">
+          Írd be pontosan a cég nevét a törlés engedélyezéséhez:
+        </label>
+        <input id="company-detail-delete-confirm" placeholder="" style="width:100%;padding:8px 10px;border:1.5px solid var(--brick);border-radius:8px;margin-bottom:10px;">
+        <button class="btn-secondary" id="company-detail-delete-btn" style="width:100%;background:var(--brick);color:#fff;border-color:var(--brick);" disabled>Cég végleges törlése</button>
       </div>
     </div>
   </div>

@@ -919,3 +919,56 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 .main .card:nth-of-type(4){ animation-delay:.12s; }
 .main .card:nth-of-type(5){ animation-delay:.16s; }
 .main .card:nth-of-type(n+6){ animation-delay:.2s; }
+
+/* ============================================================
+   Cikktörzs-szerkesztő — teljesen újratervezett, arányos elrendezés
+   ============================================================ */
+.md-editor-card{ max-width:100%; }
+.md-editor-form{ display:flex; flex-direction:column; gap:22px; }
+
+.md-editor-hero{ display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
+.md-photo-box{
+  position:relative; width:96px; height:96px; flex:none; border-radius:12px;
+  border:1.5px dashed var(--line); background:var(--paper-dim);
+  display:flex; align-items:center; justify-content:center; overflow:hidden;
+}
+.md-photo-box img{ width:100%; height:100%; object-fit:cover; }
+.md-photo-placeholder{ font-size:28px; opacity:0.4; }
+.md-photo-actions{
+  position:absolute; bottom:0; left:0; right:0; display:flex; gap:4px; justify-content:center;
+  padding:4px; background:rgba(30,50,71,0.55); backdrop-filter:blur(2px);
+}
+.md-photo-actions .btn-tiny{ padding:3px 8px; font-size:11px; background:rgba(255,255,255,0.92); }
+.md-hero-fields{ display:flex; gap:14px; flex-wrap:wrap; flex:1 1 320px; align-items:flex-end; }
+.md-hero-fields .stock-field-wide{ flex:2 1 220px; }
+.md-hero-fields .stock-field{ flex:1 1 140px; }
+.md-hero-fields input{ font-size:15px; padding:10px 12px; }
+
+.md-editor-section{ border-top:1px solid var(--line); padding-top:18px; }
+.md-editor-section-title{
+  font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px;
+  color:var(--text-dim); margin-bottom:12px; display:flex; align-items:center; gap:8px;
+}
+.md-section-optional{ font-weight:500; text-transform:none; letter-spacing:0; color:var(--text-dim); opacity:0.7; font-size:11.5px; }
+.md-editor-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:14px 16px; }
+.md-editor-grid .stock-field-wide{ grid-column:1 / -1; }
+
+/* Az NTAK-szekció kap egy visszafogott, de jól látható borostyán
+   kiemelést — ez a "2. szín" szerepe ebben az űrlapban. */
+.md-ntak-section{
+  background:linear-gradient(180deg, rgba(240,169,62,0.07), rgba(240,169,62,0.02));
+  border:1.5px solid rgba(240,169,62,0.35); border-top:1.5px solid rgba(240,169,62,0.35);
+  border-radius:12px; padding:16px 18px 18px; margin-top:4px;
+}
+.md-ntak-section .md-editor-section-title{ color:#9A6A17; }
+.md-ntak-section .md-editor-section-title::before{ content:"●"; color:var(--amber); font-size:9px; }
+.md-ntak-section select, .md-ntak-section input{ border-color:rgba(240,169,62,0.4); }
+.md-ntak-section select:focus, .md-ntak-section input:focus{ border-color:var(--amber); outline-color:var(--amber); }
+
+.md-editor-actions{ display:flex; gap:10px; align-items:center; padding-top:4px; }
+
+@media (max-width:640px){
+  .md-editor-hero{ flex-direction:column; align-items:stretch; }
+  .md-photo-box{ align-self:center; }
+  .md-hero-fields{ flex-direction:column; align-items:stretch; }
+}

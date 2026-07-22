@@ -1913,6 +1913,32 @@ function openCompanyDetailModal(key) {
     } catch (_) { /* ha a vágólap-hozzáférés nem engedélyezett, csendben folytatjuk */ }
     window.open('https://leichter.hu/lszamla/index.php?p=reglistak', '_blank');
   };
+
+  // Veszélyes-zóna: cég végleges törlése — csak akkor engedélyezett a
+  // gomb, ha a pontos cégnév be van gépelve, és egy utolsó, szöveges
+  // megerősítő ablak is megjelenik kattintáskor.
+  const confirmInput = document.getElementById('company-detail-delete-confirm');
+  const deleteBtn = document.getElementById('company-detail-delete-btn');
+  confirmInput.value = '';
+  confirmInput.placeholder = c.nev;
+  deleteBtn.disabled = true;
+  confirmInput.oninput = () => { deleteBtn.disabled = confirmInput.value.trim() !== c.nev; };
+  deleteBtn.onclick = async () => {
+    if (!confirm(`Ez VÉGLEGESEN törli "${c.nev}" cég MINDEN adatát (adatbázis, felhasználók, regisztráció, licenc, készlet, stb.) — ez nem vonható vissza. Biztosan folytatod?`)) return;
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Törlés folyamatban…';
+    try {
+      await api('/api/admin/company/delete', { method: 'POST', body: JSON.stringify({ cegKulcs: c.cegKulcs, megerositoNev: c.nev }) });
+      document.getElementById('company-detail-modal-backdrop').hidden = true;
+      alert(`"${c.nev}" végleg törölve. A biztonsági mentés a szerveren, a ~/lnyugta_backups/ mappában található.`);
+      loadAdminOverview();
+    } catch (err) {
+      alert('Nem sikerült törölni: ' + err.message);
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = 'Cég végleges törlése';
+    }
+  };
+
   document.getElementById('company-detail-modal-backdrop').hidden = false;
 }
 listen('company-detail-modal-close', 'click', () => {
@@ -3754,6 +3780,135 @@ listen('new-group-btn', 'click', async () => {
   }
 });
 
+// NTAK hivatalos kategorizálási segédlete alapján (info.ntak.hu) — az
+// ÉRTÉKKÓDOKAT (nem a megjelenített neveket) csak azokra a fő- és
+// alkategóriákra tudjuk 100%-ig megerősíteni, amik ténylegesen
+// előfordultak már szinkronizált, éles adatban (ETEL, ALKMENTESITAL_HELYBEN,
+// ALKOHOLOSITAL_HELYBEN + néhány alkategória) — a többinél a legjobb
+// következtetésünket adjuk, ugyanazt az elnevezési mintát követve. Emiatt
+// van egy "Egyéb (kézi bevitel)" menekülő lehetőség minden szinten — soha
+// nem zárunk ki egy valós, helyes NTAK-kódot.
+const NTAK_TAXONOMY = {
+  ETEL: { label: 'Étel', alkat: {
+    REGGELI: 'Reggeli', SZENDVICS: 'Szendvics', ELOETEL: 'Előétel', LEVES: 'Leves',
+    FOETEL: 'Főétel', FOETEL_KORETTEL: 'Főétel körettel', KORET_MARTAS: 'Köret, mártások',
+    KOSTOLO: 'Kóstolóétel, kóstolófalat', SAVANYUSAG_SALATA: 'Savanyúság / saláta',
+    DESSZERT: 'Desszert, sütemény, édesség', PEKARU: 'Péksütemény, pékáru',
+    SNACK: 'Snack', ETELCSOMAG: 'Ételcsomag', EGYEB: 'Egyéb',
+  } },
+  ALKMENTESITAL_HELYBEN: { label: 'Helyben készített alkoholmentes ital', alkat: {
+    VIZ: 'Víz', LIMONADE_SZORP: 'Limonádé / szörp / frissen facsart ital',
+    ALKMENTES_KOKTEL: 'Alkoholmentes koktél, kevert ital', ITALCSOMAG: 'Italcsomag',
+    TEA_FORROCSOKOLADE: 'Tea / forrócsoki és tejalapú italok', KAVE: 'Kávé',
+  } },
+  ALKMENTESITAL_NEMHELYBEN: { label: 'Nem helyben készített alkoholmentes ital', alkat: {
+    VIZ: 'Víz', ROSTOS_UDITO: 'Rostos üdítő', SZENSAVAS_UDITO: 'Szénsavas üdítő',
+    SZENSAVMENTES_UDITO: 'Szénsavmentes üdítő', ITALCSOMAG: 'Italcsomag',
+  } },
+  ALKOHOLOSITAL_HELYBEN: { label: 'Alkoholos ital', alkat: {
+    KOKTEL: 'Koktél, kevert ital', LIKOR: 'Likőr', PARLAT: 'Párlat',
+    SOR: 'Sör', BOR: 'Bor', PEZSGO: 'Pezsgő', ITALCSOMAG: 'Italcsomag',
+  } },
+  EGYEB_FOKAT: { label: 'Egyéb', alkat: {
+    EGYEB: 'Egyéb', SZERVIZDIJ: 'Szervízdíj', BORRAVALO: 'Borravaló',
+    KISZALLITASI_DIJ: 'Kiszállítási díj', KORNYEZETBARAT_CSOMAGOLAS: 'Környezetbarát csomagolás',
+    MUANYAG_CSOMAGOLAS: 'Műanyag csomagolás', KEDVEZMENY: 'Kedvezmény', NEM_VENDEGLATAS: 'Nem vendéglátás',
+  } },
+};
+const NTAK_FOKAT_CUSTOM = '_EGYEB_KEZI';
+const NTAK_ALKAT_CUSTOM = '_EGYEB_KEZI';
+
+function populateNtakFokatSelect() {
+  const sel = document.getElementById('md-ntak-fokat-input');
+  sel.innerHTML = '<option value="">— válassz —</option>'
+    + Object.entries(NTAK_TAXONOMY).map(([code, def]) => `<option value="${code}">${escapeHtml(def.label)}</option>`).join('')
+    + `<option value="${NTAK_FOKAT_CUSTOM}">Egyéb (kézi bevitel)</option>`;
+}
+function populateNtakAlkatSelect(fokatCode, selectedAlkat) {
+  const sel = document.getElementById('md-ntak-alkat-input');
+  const customField = document.getElementById('md-ntak-alkat-custom-field');
+  const customInput = document.getElementById('md-ntak-alkat-custom-input');
+  if (fokatCode === NTAK_FOKAT_CUSTOM) {
+    sel.innerHTML = `<option value="${NTAK_ALKAT_CUSTOM}" selected>Egyéb (kézi bevitel)</option>`;
+    customField.hidden = false;
+    if (selectedAlkat) customInput.value = selectedAlkat;
+    return;
+  }
+  const def = NTAK_TAXONOMY[fokatCode];
+  if (!def) {
+    sel.innerHTML = '<option value="">— előbb válassz főkategóriát —</option>';
+    customField.hidden = true;
+    return;
+  }
+  sel.innerHTML = '<option value="">— válassz —</option>'
+    + Object.entries(def.alkat).map(([code, label]) => `<option value="${code}">${escapeHtml(label)}</option>`).join('')
+    + `<option value="${NTAK_ALKAT_CUSTOM}">Egyéb (kézi bevitel)</option>`;
+  // Ha a betöltött cikk alkategóriája nem szerepel a fenti listában
+  // (pl. mert egy más rendszerből érkezett, nem a mi választásunkból),
+  // ne veszítsük el az értékét — automatikusan a kézi bevitelre váltunk.
+  if (selectedAlkat && !def.alkat[selectedAlkat] && selectedAlkat !== NTAK_ALKAT_CUSTOM) {
+    sel.value = NTAK_ALKAT_CUSTOM;
+    customField.hidden = false;
+    customInput.value = selectedAlkat;
+  } else {
+    sel.value = selectedAlkat || '';
+    customField.hidden = sel.value !== NTAK_ALKAT_CUSTOM;
+  }
+}
+listen('md-ntak-fokat-input', 'change', (e) => {
+  document.getElementById('md-ntak-fokat-custom-field').hidden = e.target.value !== NTAK_FOKAT_CUSTOM;
+  populateNtakAlkatSelect(e.target.value, '');
+});
+listen('md-ntak-alkat-input', 'change', (e) => {
+  document.getElementById('md-ntak-alkat-custom-field').hidden = e.target.value !== NTAK_ALKAT_CUSTOM;
+});
+populateNtakFokatSelect();
+
+// Termékfotó — feltöltés/előnézet/törlés. Csak weben tárolt kiegészítő
+// adat (lásd a szerver-oldali megjegyzést), NEM megy az androidos szinkronba.
+let masterdataPhotoPendingFile = null;
+let masterdataPhotoRemoved = false;
+listen('md-photo-upload-btn', 'click', () => document.getElementById('md-photo-input').click());
+listen('md-photo-input', 'change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  masterdataPhotoPendingFile = file;
+  masterdataPhotoRemoved = false;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = document.getElementById('md-photo-preview');
+    img.src = reader.result;
+    img.hidden = false;
+    document.getElementById('md-photo-placeholder').hidden = true;
+    document.getElementById('md-photo-remove-btn').hidden = false;
+  };
+  reader.readAsDataURL(file);
+});
+listen('md-photo-remove-btn', 'click', () => {
+  masterdataPhotoPendingFile = null;
+  masterdataPhotoRemoved = true;
+  document.getElementById('md-photo-preview').hidden = true;
+  document.getElementById('md-photo-placeholder').hidden = false;
+  document.getElementById('md-photo-remove-btn').hidden = true;
+  document.getElementById('md-photo-input').value = '';
+});
+function resetMasterdataPhoto() {
+  masterdataPhotoPendingFile = null;
+  masterdataPhotoRemoved = false;
+  document.getElementById('md-photo-input').value = '';
+  document.getElementById('md-photo-preview').hidden = true;
+  document.getElementById('md-photo-placeholder').hidden = false;
+  document.getElementById('md-photo-remove-btn').hidden = true;
+}
+
+function populateGongyolegSelect(packagingOptions, currentNev, selectedAzon) {
+  const sel = document.getElementById('md-gongyoleg-input');
+  const options = (packagingOptions || []).filter((p) => p.nev !== currentNev);
+  sel.innerHTML = '<option value="">— nincs —</option>'
+    + options.map((p) => `<option value="${escapeHtml(p.azon)}">${escapeHtml(p.nev)}</option>`).join('');
+  sel.value = selectedAzon || '';
+}
+
 function fillMasterdataForm(item) {
   masterdataEditingOriginal = item.nev;
   const nevInput = document.getElementById('md-nev-input');
@@ -3767,8 +3922,39 @@ function fillMasterdataForm(item) {
   document.getElementById('md-csoport-input').value = (item.pendingChange ? item.pendingChange.csoportNev : item.csoportNev) || '';
   document.getElementById('md-vonalkod-input').value = item.vonalkod || '';
   document.getElementById('md-afakodelv-input').value = (item.pendingChange ? item.pendingChange.afakodelv : item.afakodElviteli) || '';
-  document.getElementById('md-ntak-fokat-input').value = (item.pendingChange ? item.pendingChange.fokatjson : item.fokat) || '';
-  document.getElementById('md-ntak-alkat-input').value = (item.pendingChange ? item.pendingChange.alkatjson : item.alkat) || '';
+
+  const fokatVal = (item.pendingChange ? item.pendingChange.fokatjson : item.fokat) || '';
+  const alkatVal = (item.pendingChange ? item.pendingChange.alkatjson : item.alkat) || '';
+  const fokatSel = document.getElementById('md-ntak-fokat-input');
+  const fokatCustomField = document.getElementById('md-ntak-fokat-custom-field');
+  const fokatCustomInput = document.getElementById('md-ntak-fokat-custom-input');
+  if (fokatVal && !NTAK_TAXONOMY[fokatVal]) {
+    fokatSel.value = NTAK_FOKAT_CUSTOM; // ismeretlen kód — ne vesszen el, kézi bevitelként kezeljük
+    fokatCustomField.hidden = false;
+    fokatCustomInput.value = fokatVal;
+  } else {
+    fokatSel.value = fokatVal;
+    fokatCustomField.hidden = true;
+    fokatCustomInput.value = '';
+  }
+  populateNtakAlkatSelect(fokatSel.value, alkatVal);
+
+  const ntakSzorzoVal = item.pendingChange ? item.pendingChange.ntakszorzo : item.ntakSzorzo;
+  document.getElementById('md-ntak-szorzo-input').value = (ntakSzorzoVal ?? '') === null ? '' : (ntakSzorzoVal ?? '');
+  document.getElementById('md-ntak-me-input').value = (item.pendingChange ? item.pendingChange.ntakme : item.ntakMe) || '';
+
+  const gongyolegVal = (item.pendingChange ? item.pendingChange.gongyolegazon : item.gongyolegazon) || '';
+  populateGongyolegSelect(masterdataPackagingOptions, item.nev, gongyolegVal);
+
+  resetMasterdataPhoto();
+  if (item.kepFajlnev) {
+    const img = document.getElementById('md-photo-preview');
+    img.src = `/api/products/image?fajlnev=${encodeURIComponent(item.kepFajlnev)}`;
+    img.hidden = false;
+    document.getElementById('md-photo-placeholder').hidden = true;
+    document.getElementById('md-photo-remove-btn').hidden = false;
+  }
+
   document.getElementById('masterdata-form-title').textContent = `Szerkesztés: ${item.nev}`;
   document.getElementById('md-cancel-btn').hidden = false;
   document.getElementById('masterdata-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -3782,19 +3968,21 @@ function resetMasterdataForm() {
   document.getElementById('md-nev-hint').hidden = true;
   document.getElementById('masterdata-form-title').textContent = 'Új cikk / módosítás';
   document.getElementById('md-cancel-btn').hidden = true;
+  document.getElementById('md-ntak-fokat-custom-field').hidden = true;
+  populateNtakAlkatSelect('', '');
+  populateGongyolegSelect(masterdataPackagingOptions, null, '');
+  resetMasterdataPhoto();
 }
 listen('md-cancel-btn', 'click', resetMasterdataForm);
 
 const masterdataPaginator = new Paginator();
 let masterdataSort = { key: 'nev', dir: 'asc' };
 let masterdataNtakAktiv = false;
+let masterdataPackagingOptions = [];
 
 function applyMasterdataNtakVisibility(ntakAktiv) {
   masterdataNtakAktiv = ntakAktiv;
-  const fokatField = document.getElementById('md-ntak-fokat-field');
-  const alkatField = document.getElementById('md-ntak-alkat-field');
-  fokatField.hidden = !ntakAktiv;
-  alkatField.hidden = !ntakAktiv;
+  document.getElementById('md-ntak-section').hidden = !ntakAktiv;
   document.getElementById('md-ntak-fokat-input').required = ntakAktiv;
   document.getElementById('md-ntak-alkat-input').required = ntakAktiv;
   document.querySelectorAll('#masterdata-table .md-ntak-col').forEach((th) => { th.hidden = !ntakAktiv; });
@@ -3804,6 +3992,7 @@ async function loadMasterdataView() {
   loadMasterdataGroups();
   const data = await api('/api/products/master');
   applyMasterdataNtakVisibility(data.ntakAktiv);
+  masterdataPackagingOptions = data.packagingOptions || [];
   const q = masterdataFilter.q.toLowerCase();
   let items = q ? data.items.filter((it) => it.nev.toLowerCase().includes(q)) : data.items;
 
@@ -3937,6 +4126,14 @@ listen('masterdata-form', 'submit', async (e) => {
   }
   btn.disabled = true; btn.textContent = 'Mentés…';
   try {
+    const fokatSelVal = document.getElementById('md-ntak-fokat-input').value;
+    const fokatFinal = fokatSelVal === NTAK_FOKAT_CUSTOM
+      ? document.getElementById('md-ntak-fokat-custom-input').value.trim()
+      : fokatSelVal;
+    const alkatSelVal = document.getElementById('md-ntak-alkat-input').value;
+    const alkatFinal = alkatSelVal === NTAK_ALKAT_CUSTOM
+      ? document.getElementById('md-ntak-alkat-custom-input').value.trim()
+      : alkatSelVal;
     const body = {
       megnevezes: megnevezesValue,
       originalMegnevezes: masterdataEditingOriginal || undefined,
@@ -3946,10 +4143,35 @@ listen('masterdata-form', 'submit', async (e) => {
       csoportNev: document.getElementById('md-csoport-input').value.trim(),
       vonalkod: document.getElementById('md-vonalkod-input').value.trim(),
       afakodElviteli: document.getElementById('md-afakodelv-input').value.trim(),
-      fokat: document.getElementById('md-ntak-fokat-input').value.trim(),
-      alkat: document.getElementById('md-ntak-alkat-input').value.trim(),
+      fokat: fokatFinal,
+      alkat: alkatFinal,
+      ntakSzorzo: document.getElementById('md-ntak-szorzo-input').value.trim(),
+      ntakMe: document.getElementById('md-ntak-me-input').value.trim(),
+      gongyolegAzon: document.getElementById('md-gongyoleg-input').value,
     };
     await api('/api/products/change', { method: 'POST', body: JSON.stringify(body) });
+
+    // A fotó egy KÜLÖN, csak weben tárolt adat — külön hívással mentjük,
+    // hogy egy esetleges hiba itt ne akassza meg a tényleges cikk-mentést.
+    try {
+      if (masterdataPhotoPendingFile) {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(masterdataPhotoPendingFile);
+        });
+        await api('/api/products/image', { method: 'POST', body: JSON.stringify({ megnevezes: megnevezesValue, fajlAdat: dataUrl }) });
+      } else if (masterdataPhotoRemoved) {
+        await api('/api/products/image/delete', { method: 'POST', body: JSON.stringify({ megnevezes: megnevezesValue }) });
+      }
+    } catch (photoErr) {
+      msg.textContent = `✓ A cikk mentve, de a fotóval gond volt: ${photoErr.message}`; msg.className = 'stock-form-msg error';
+      resetMasterdataForm();
+      loadMasterdataView();
+      return;
+    }
+
     msg.textContent = '✓ Mentve — a következő androidos szinkronig "függőben" marad.'; msg.className = 'stock-form-msg ok';
     resetMasterdataForm();
     loadMasterdataView();

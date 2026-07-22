@@ -35,6 +35,7 @@ async function startTestServer({ port } = {}) {
       PORT: String(actualPort),
       HOST: '127.0.0.1',
       LNYUGTA_DATA_DIR: dataDir,
+      LNYUGTA_BACKUP_DIR: path.join(tmpDir, 'backups'),
       SESSION_SECRET: TEST_SESSION_SECRET,
       SYNC_API_KEY: TEST_SYNC_API_KEY,
       ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
