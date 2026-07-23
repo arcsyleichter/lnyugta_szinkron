@@ -4456,15 +4456,16 @@ async function loadSzamlaimView() {
   const contentCard = document.getElementById('szamlaim-content-card');
   const monthlyCard = document.getElementById('szamlaim-monthly-card');
   const partnersCard = document.getElementById('szamlaim-partners-card');
+  const linesCard = document.getElementById('szamlaim-lines-card');
   try {
     const creds = await api('/api/profile/nav-credentials');
     if (!creds.configured) {
       notConfiguredCard.hidden = false;
-      contentCard.hidden = true; monthlyCard.hidden = true; partnersCard.hidden = true;
+      contentCard.hidden = true; monthlyCard.hidden = true; partnersCard.hidden = true; linesCard.hidden = true;
       return;
     }
     notConfiguredCard.hidden = true;
-    contentCard.hidden = false; monthlyCard.hidden = false; partnersCard.hidden = false;
+    contentCard.hidden = false; monthlyCard.hidden = false; partnersCard.hidden = false; linesCard.hidden = false;
     await refreshSzamlaim();
   } catch (e) {
     notConfiguredCard.hidden = false;
@@ -4515,6 +4516,8 @@ async function refreshSzamlaim() {
     partnersBody.innerHTML = data.topPartnerek.length
       ? data.topPartnerek.map((p) => `<tr><td>${escapeHtml(p.nev)}</td><td class="td-right">${p.darab}</td><td class="td-right">${fmtHuf(p.osszeg)}</td></tr>`).join('')
       : '<tr><td colspan="3" class="empty-state">Nincs adat.</td></tr>';
+
+    await loadSzamlaimLineAnalytics();
   } catch (e) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nem sikerült betölteni.</td></tr>';
     msg.textContent = e.message;
@@ -4525,6 +4528,51 @@ listen('szamlaim-refresh-btn', 'click', refreshSzamlaim);
 listen('szamlaim-direction', 'change', refreshSzamlaim);
 listen('szamlaim-date-from', 'change', refreshSzamlaim);
 listen('szamlaim-date-to', 'change', refreshSzamlaim);
+
+async function loadSzamlaimLineAnalytics() {
+  const direction = document.getElementById('szamlaim-direction').value;
+  const dateFrom = document.getElementById('szamlaim-date-from').value;
+  const dateTo = document.getElementById('szamlaim-date-to').value;
+  document.getElementById('szamlaim-lines-title').textContent = direction === 'OUTBOUND' ? 'Top eladott termékek / szolgáltatások' : 'Top beszerzett termékek / szolgáltatások';
+  const tbody = document.querySelector('#szamlaim-lines-table tbody');
+  const msg = document.getElementById('szamlaim-lines-msg');
+  try {
+    const params = new URLSearchParams({ direction, dateFrom, dateTo });
+    const data = await api(`/api/profile/nav-line-analytics?${params}`);
+    tbody.innerHTML = data.topTermekek.length
+      ? data.topTermekek.map((t) => `<tr><td>${escapeHtml(t.nev)}</td><td class="td-right">${t.darabszam}</td><td class="td-right">${t.mennyiseg.toLocaleString('hu-HU')}</td><td class="td-right">${fmtHuf(t.netto)}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty-state">Még nincs szinkronizált tételes adat ehhez az időszakhoz — nyomd meg a "Szinkronizálás" gombot.</td></tr>';
+    msg.textContent = `${data.szinkronizaltSzamlakSzama} számla tételei szinkronizálva eddig (ebben az irányban, összesen).`;
+    msg.style.color = '';
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.style.color = 'var(--brick)';
+  }
+}
+listen('szamlaim-sync-btn', 'click', async (e) => {
+  const btn = e.target;
+  const msg = document.getElementById('szamlaim-lines-msg');
+  const direction = document.getElementById('szamlaim-direction').value;
+  const dateFrom = document.getElementById('szamlaim-date-from').value;
+  const dateTo = document.getElementById('szamlaim-date-to').value;
+  btn.disabled = true; btn.textContent = 'Szinkronizálás…';
+  try {
+    const result = await api('/api/profile/nav-sync-lines', { method: 'POST', body: JSON.stringify({ direction, dateFrom, dateTo }) });
+    await loadSzamlaimLineAnalytics();
+    if (result.remaining > 0) {
+      msg.textContent += ` (${result.synced} számla most feldolgozva, még ${result.remaining} van hátra — nyomd meg újra a folytatáshoz.)`;
+    } else if (result.synced > 0) {
+      msg.textContent += ` (${result.synced} új számla feldolgozva — kész.)`;
+    } else {
+      msg.textContent += ' (nincs új, feldolgozandó számla ebben az időszakban.)';
+    }
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.style.color = 'var(--brick)';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Szinkronizálás';
+  }
+});
 
 async function loadSyncView() {
   const box = document.getElementById('sync-status-box');

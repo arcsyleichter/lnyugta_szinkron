@@ -21,6 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { DatabaseSync } = require('node:sqlite');
 
 // ---------------------------------------------------------------------------
@@ -688,6 +689,40 @@ licenseDb.exec(`
     nav_exchange_key_enc TEXT NOT NULL,
     nav_sandbox INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL
+  );
+
+  -- A tételes (termék/szolgáltatás-szintű) elemzéshez a TELJES számla-
+  -- tartalmat le kell kérni (ez számlánként külön NAV-hívás), ezért a
+  -- kinyert tételsorokat helyben, gyorsítótárazva tároljuk — egy adott
+  -- számlát (cégenként, irányonként) csak EGYSZER kell ténylegesen
+  -- lekérdezni a NAV-tól.
+  CREATE TABLE IF NOT EXISTS company_nav_invoice_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ceg_kulcs TEXT NOT NULL,
+    invoice_direction TEXT NOT NULL,
+    invoice_number TEXT NOT NULL,
+    invoice_issue_date TEXT,
+    partner_name TEXT,
+    line_description TEXT NOT NULL,
+    quantity REAL NOT NULL DEFAULT 1,
+    unit_of_measure TEXT,
+    net_amount REAL NOT NULL DEFAULT 0,
+    vat_amount REAL NOT NULL DEFAULT 0,
+    gross_amount REAL NOT NULL DEFAULT 0,
+    synced_at TEXT NOT NULL,
+    UNIQUE(ceg_kulcs, invoice_direction, invoice_number, line_description, quantity, net_amount)
+  );
+  CREATE INDEX IF NOT EXISTS idx_nav_lines_ceg ON company_nav_invoice_lines(ceg_kulcs, invoice_direction);
+
+  -- Melyik számlákat dolgoztuk már fel (akkor is, ha nulla tételsort
+  -- találtunk bennük) — enélkül egy "üres" számlát újra és újra
+  -- megpróbálnánk lekérdezni minden szinkronizáláskor.
+  CREATE TABLE IF NOT EXISTS company_nav_synced_invoices (
+    ceg_kulcs TEXT NOT NULL,
+    invoice_direction TEXT NOT NULL,
+    invoice_number TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    PRIMARY KEY (ceg_kulcs, invoice_direction, invoice_number)
   );
 
   -- CSOMAGOK — egyes funkciók egy néven, egy áron, egyszerre adhatók ki
@@ -2609,6 +2644,96 @@ route('GET', '/api/profile/nav-invoices', async (req, res, query) => {
   } catch (e) {
     sendJson(res, 500, { error: e.message });
   }
+});
+
+// A KIVONAT-ban szereplő számlák TELJES tartalmának lekérdezése és a
+// tételsorok helyi eltárolása — ez teszi lehetővé a tételes (termék/
+// szolgáltatás-szintű) elemzést. Mivel ez számlánként külön NAV-hívást
+// jelent, EGYSZERRE csak korlátozott számút (NAV_LINE_SYNC_BATCH_SIZE)
+// dolgozunk fel — a felhasználó igény szerint többször is elindíthatja,
+// amíg minden számla feldolgozásra nem kerül (a már feldolgozottakat nem
+// kérdezzük le újra).
+const NAV_LINE_SYNC_BATCH_SIZE = 15;
+route('POST', '/api/profile/nav-sync-lines', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const creds = getCompanyNavCreds(session.cegKulcs);
+  if (!navCredsComplete(creds)) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva.' });
+  const body = await readJsonBody(req);
+  const direction = body.direction === 'INBOUND' ? 'INBOUND' : 'OUTBOUND';
+  const dateTo = body.dateTo || todayIsoServer();
+  const dateFrom = body.dateFrom || addDaysISO(dateTo, -30);
+  const napokSzama = Math.round((new Date(dateTo) - new Date(dateFrom)) / (24 * 60 * 60 * 1000));
+  if (napokSzama > 35 || napokSzama < 0) {
+    return sendJson(res, 400, { error: 'A lekérdezési időszak legfeljebb 35 nap lehet (ezt a NAV korlátozza).' });
+  }
+
+  try {
+    const digest = await navQueryInvoiceDigest({ direction, dateFrom, dateTo, page: 1, creds });
+    const alreadySynced = new Set(
+      licenseDb.prepare(`SELECT invoice_number FROM company_nav_synced_invoices WHERE ceg_kulcs = ? AND invoice_direction = ?`)
+        .all(session.cegKulcs, direction).map((r) => r.invoice_number)
+    );
+    const toSync = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).slice(0, NAV_LINE_SYNC_BATCH_SIZE);
+
+    let syncedCount = 0;
+    for (const inv of toSync) {
+      try {
+        const invoiceXml = await navQueryInvoiceData({ invoiceNumber: inv.invoiceNumber, direction, taxNumber: creds.taxNumber, creds });
+        const lines = extractInvoiceLines(invoiceXml);
+        const partnerNev = direction === 'OUTBOUND' ? inv.customerName : inv.supplierName;
+        const now = new Date().toISOString();
+        for (const line of lines) {
+          try {
+            licenseDb.prepare(`
+              INSERT INTO company_nav_invoice_lines (ceg_kulcs, invoice_direction, invoice_number, invoice_issue_date, partner_name, line_description, quantity, unit_of_measure, net_amount, vat_amount, gross_amount, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT DO NOTHING
+            `).run(session.cegKulcs, direction, inv.invoiceNumber, inv.invoiceIssueDate || null, partnerNev || null, line.description, line.quantity, line.unitOfMeasure, line.netAmount, line.vatAmount, line.grossAmount, now);
+          } catch (_) {}
+        }
+        licenseDb.prepare(`INSERT INTO company_nav_synced_invoices (ceg_kulcs, invoice_direction, invoice_number, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+          .run(session.cegKulcs, direction, inv.invoiceNumber, now);
+        syncedCount += 1;
+      } catch (e) {
+        console.error(`[NAV] Számla-tartalom szinkronizálási hiba (${inv.invoiceNumber}): ${e.message}`);
+      }
+    }
+
+    const remaining = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).length - toSync.length;
+    sendJson(res, 200, { ok: true, synced: syncedCount, remaining: Math.max(0, remaining) });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
+});
+
+// A helyben eltárolt, tételes (termék/szolgáltatás-szintű) adatok
+// elemzése — ez a MÉLYEBB elemzés, ami már a szinkronizált (nem csak a
+// kivonat-szintű) adatokból dolgozik.
+route('GET', '/api/profile/nav-line-analytics', async (req, res, query) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const direction = query.direction === 'INBOUND' ? 'INBOUND' : 'OUTBOUND';
+  const dateTo = query.dateTo || todayIsoServer();
+  const dateFrom = query.dateFrom || addDaysISO(dateTo, -30);
+
+  const rows = licenseDb.prepare(`
+    SELECT * FROM company_nav_invoice_lines
+    WHERE ceg_kulcs = ? AND invoice_direction = ? AND invoice_issue_date BETWEEN ? AND ?
+  `).all(session.cegKulcs, direction, dateFrom, dateTo);
+
+  const termekek = new Map();
+  for (const r of rows) {
+    if (!termekek.has(r.line_description)) termekek.set(r.line_description, { nev: r.line_description, darabszam: 0, mennyiseg: 0, netto: 0 });
+    const t = termekek.get(r.line_description);
+    t.darabszam += 1; t.mennyiseg += r.quantity; t.netto += r.net_amount;
+  }
+  const syncedCount = licenseDb.prepare(`SELECT COUNT(*) AS c FROM company_nav_synced_invoices WHERE ceg_kulcs = ? AND invoice_direction = ?`).get(session.cegKulcs, direction).c;
+
+  sendJson(res, 200, {
+    direction, dateFrom, dateTo, szinkronizaltSzamlakSzama: syncedCount,
+    topTermekek: [...termekek.values()].sort((a, b) => b.netto - a.netto).slice(0, 15),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -6535,6 +6660,59 @@ ${navSoftwareXml()}
     completenessIndicator: navXmlField(b, 'completenessIndicator'),
   }));
   return { invoices, availablePage: availablePage ? parseInt(availablePage, 10) : 1, invoiceCountAll: invoiceCountAll ? parseInt(invoiceCountAll, 10) : invoices.length };
+}
+
+// Egy KONKRÉT számla TELJES tartalmának lekérdezése (nem csak a kivonat) —
+// ez teszi lehetővé a tételes (termék/szolgáltatás-szintű) elemzést. A NAV
+// egy valódi, hivatalos hibajegyben megjelent kérés-példája alapján
+// (nav-gov-hu/Online-Invoice issue #1005), a hivatalos XSD-vel
+// megerősítve: a lekérdező mező neve "taxNumber", NEM "supplierTaxNumber"
+// (ez utóbbi egy elavult, hibás elnevezés volt egy másik forrásban).
+async function navQueryInvoiceData({ invoiceNumber, direction, taxNumber, creds }) {
+  const requestId = navRequestId();
+  const now = new Date();
+  const timestampMasked = navTimestampMasked(now);
+  const timestampIso = navTimestampIso(now);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
+
+  const bodyXml = `<QueryInvoiceDataRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+${navHeaderXml(requestId, timestampIso)}
+${navUserXml(requestSignature, creds)}
+${navSoftwareXml()}
+<invoiceNumberQuery>
+  <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
+  <invoiceDirection>${direction}</invoiceDirection>
+  <taxNumber>${escapeXml(taxNumber)}</taxNumber>
+</invoiceNumberQuery>
+</QueryInvoiceDataRequest>`;
+
+  const { status, text } = await navApiCall('queryInvoiceData', bodyXml, navBaseUrlFor(creds.sandbox));
+  if (status !== 200) {
+    const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
+    throw new Error(`NAV queryInvoiceData hiba: ${errorMsg}`);
+  }
+  const base64Content = navXmlField(text, 'invoiceData');
+  if (!base64Content) throw new Error(`A NAV válaszában nem található számla-tartalom. Nyers válasz: ${text.slice(0, 500)}`);
+  const compressed = navXmlField(text, 'compressedContentIndicator') === 'true';
+  let xmlBuffer = Buffer.from(base64Content, 'base64');
+  if (compressed) xmlBuffer = zlib.gunzipSync(xmlBuffer);
+  return xmlBuffer.toString('utf8');
+}
+
+// A teljes számla-XML-ből a tételsorok (termékek/szolgáltatások)
+// kinyerése — ugyanazt a struktúrát követve, amit a saját
+// buildNavInvoiceDataXml()-ünk is generál (lineDescription, quantity,
+// unitPrice, lineNetAmount, stb.), mivel ez a NAV hivatalos sémája.
+function extractInvoiceLines(invoiceXml) {
+  const lineBlocks = navXmlBlocks(invoiceXml, 'line');
+  return lineBlocks.map((b) => ({
+    description: navXmlField(b, 'lineDescription') || '(nincs megnevezés)',
+    quantity: parseFloat(navXmlField(b, 'quantity') || '1') || 1,
+    unitOfMeasure: navXmlField(b, 'unitOfMeasure') || '',
+    netAmount: parseFloat(navXmlField(b, 'lineNetAmountHUF') || navXmlField(b, 'lineNetAmount') || '0') || 0,
+    vatAmount: parseFloat(navXmlField(b, 'lineVatAmountHUF') || navXmlField(b, 'lineVatAmount') || '0') || 0,
+    grossAmount: parseFloat(navXmlField(b, 'lineGrossAmountNormalHUF') || navXmlField(b, 'lineGrossAmountNormal') || '0') || 0,
+  })).filter((l) => l.description !== '(nincs megnevezés)' || l.netAmount > 0);
 }
 
 // Egyetlen számla-XML beküldése a NAV-nak (manageInvoice, CREATE operáció).

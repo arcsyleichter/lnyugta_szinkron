@@ -1176,6 +1176,23 @@
           </table>
         </div>
       </div>
+
+      <div class="card" id="szamlaim-lines-card" hidden>
+        <div class="card-title-row">
+          <div>
+            <div class="card-title" id="szamlaim-lines-title">Top termékek / szolgáltatások</div>
+            <div class="card-subtitle" id="szamlaim-lines-desc">Ehhez a számlák TELJES tartalmát kell lekérni a NAV-tól — ez számlánként külön lekérdezés, ezért adagokban (egyszerre legfeljebb 15 számla) történik.</div>
+          </div>
+          <button class="btn-secondary" id="szamlaim-sync-btn">Szinkronizálás</button>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="szamlaim-lines-table">
+            <thead><tr><th>Megnevezés</th><th class="td-right">Előfordulás</th><th class="td-right">Mennyiség</th><th class="td-right">Nettó összeg</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="field-hint" id="szamlaim-lines-msg" style="margin-top:8px;"></p>
+      </div>
     </section>
 
     <section class="view" data-view="profil" hidden>

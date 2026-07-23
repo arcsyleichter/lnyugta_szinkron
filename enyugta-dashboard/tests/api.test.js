@@ -559,6 +559,24 @@ test('Ügyfél-oldali NAV Online Számla kapcsolat — hitelesítő adatok és l
     const res = await fetch(`${server.baseUrl}/api/profile/nav-invoices?direction=OUTBOUND&dateFrom=2026-01-01&dateTo=2026-03-01`, { headers: { Cookie: cookie } });
     assert.equal(res.status, 400);
   });
+
+  await t.test('a tételes szinkronizálás lefut (hálózat nélkül hibával a kivonat-lekérdezésnél, de nem összeomlással)', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/nav-sync-lines`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ direction: 'OUTBOUND', dateFrom: '2026-06-24', dateTo: '2026-07-23' }),
+    });
+    assert.equal(res.status, 500, 'a sandbox-kornyezetben nincs halozat, a kivonat-lekerdezes hibazik');
+  });
+
+  await t.test('a tételes elemzés végpont üres, de hibamentes választ ad, ha még nincs szinkronizált adat', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/nav-line-analytics?direction=OUTBOUND`, { headers: { Cookie: cookie } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.topTermekek, []);
+    assert.equal(body.szinkronizaltSzamlakSzama, 0);
+  });
 });
 
 test('Telephelyenkénti önkiszolgáló funkció-választás', async (t) => {
