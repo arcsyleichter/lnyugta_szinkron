@@ -5877,6 +5877,7 @@ function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, bu
         <lineDescription>${escapeXml(t.nev)}</lineDescription>
         <quantity>1.00</quantity>
         <unitOfMeasure>OWN</unitOfMeasure>
+        <unitOfMeasureOwn>hónap</unitOfMeasureOwn>
         <unitPrice>${t.netto}</unitPrice>
         <unitPriceHUF>${t.netto}</unitPriceHUF>
         <lineAmountsNormal>
@@ -6052,7 +6053,7 @@ ${navSoftwareXml()}
   const { status, text } = await navApiCall('manageInvoice', bodyXml);
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
-    throw new Error(`NAV manageInvoice hiba: ${errorMsg}`);
+    throw new Error(`NAV manageInvoice hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1500)}`);
   }
   const transactionId = navXmlField(text, 'transactionId');
   if (!transactionId) throw new Error(`A NAV válaszában nem található tranzakció-azonosító. Nyers válasz: ${text.slice(0, 500)}`);
@@ -6082,7 +6083,7 @@ ${navSoftwareXml()}
   const { status, text } = await navApiCall('queryTransactionStatus', bodyXml);
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
-    throw new Error(`NAV queryTransactionStatus hiba: ${errorMsg}`);
+    throw new Error(`NAV queryTransactionStatus hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1500)}`);
   }
   return {
     processingResult: navXmlField(text, 'invoiceStatus'),
