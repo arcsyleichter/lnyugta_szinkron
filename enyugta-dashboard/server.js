@@ -6103,18 +6103,21 @@ ${navSoftwareXml()}
 // beküldött számlákat, ezért a tranzakció-azonosítóval később kell
 // rákérdezni az eredményre (elfogadva / figyelmeztetéssel / elutasítva).
 async function navQueryTransactionStatus(transactionId) {
-  const { token } = await navTokenExchange();
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
   const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
 
+  // FONTOS: a QueryTransactionStatusRequestType XSD-je szerint (NAV saját
+  // sémavalidátorának hibaüzenetével is megerősítve) ennek a kérésnek NINCS
+  // exchangeToken mezője — csak transactionId és returnOriginalRequest —,
+  // ezért itt (a manageInvoice-tól eltérően) nincs is szükség előzetes
+  // tokenExchange hívásra.
   const bodyXml = `<QueryTransactionStatusRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
 ${navUserXml(requestSignature)}
 ${navSoftwareXml()}
-<exchangeToken>${escapeXml(token)}</exchangeToken>
 <transactionId>${escapeXml(transactionId)}</transactionId>
 <returnOriginalRequest>false</returnOriginalRequest>
 </QueryTransactionStatusRequest>`;
