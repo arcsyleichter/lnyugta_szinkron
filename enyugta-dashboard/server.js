@@ -1619,8 +1619,8 @@ function applySecurityHeaders(res) {
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; " +
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+    "img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; " +
     "base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://mypos.com"
   );
   if (COOKIE_SECURE) res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
@@ -6038,13 +6038,13 @@ async function navSubmitInvoice(invoiceDataXml) {
 ${navHeaderXml(requestId, timestampIso)}
 ${navUserXml(requestSignature)}
 ${navSoftwareXml()}
-<exchangeToken>${token}</exchangeToken>
+<exchangeToken>${escapeXml(token)}</exchangeToken>
 <invoiceOperations>
   <compressedContent>false</compressedContent>
   <invoiceOperation>
     <index>1</index>
     <operation>CREATE</operation>
-    <invoiceData>${base64Content}</invoiceData>
+    <invoice>${base64Content}</invoice>
   </invoiceOperation>
 </invoiceOperations>
 </ManageInvoiceRequest>`;
@@ -6074,7 +6074,7 @@ async function navQueryTransactionStatus(transactionId) {
 ${navHeaderXml(requestId, timestampIso)}
 ${navUserXml(requestSignature)}
 ${navSoftwareXml()}
-<exchangeToken>${token}</exchangeToken>
+<exchangeToken>${escapeXml(token)}</exchangeToken>
 <transactionId>${escapeXml(transactionId)}</transactionId>
 <returnOriginalRequest>false</returnOriginalRequest>
 </QueryTransactionStatusRequest>`;
