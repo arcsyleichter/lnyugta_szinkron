@@ -5771,8 +5771,12 @@ function navRequestSignatureSimple(requestId, timestampMasked, signingKey) {
 // 3) a végső requestSignature = nagybetűs SHA3-512(a nyers parciális string + az összes index hash, sorrendben összefűzve) — VAGYIS csak EGYSZER hash-elünk, a végén.
 function navRequestSignatureManageInvoice(requestId, timestampMasked, signingKey, items) {
   const partialAuthRaw = `${requestId}${timestampMasked}${signingKey}`;
+  // FONTOS: az index hash-ek ÖNMAGUKBAN kisbetűs hex stringet adnak
+  // (.digest('hex') alapértelmezése), DE a hivatalos NAV-példa szerint a
+  // VÉGSŐ konkatenációba NAGYBETŰSEN kerülnek be — ezt egy valódi,
+  // végigszámolt NAV-dokumentációs példával közvetlenül megerősítettük.
   const indexHashes = items.map(({ operation, base64Content }) =>
-    crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex')
+    crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex').toUpperCase()
   );
   const finalInput = partialAuthRaw + indexHashes.join('');
   const signature = crypto.createHash('sha3-512').update(finalInput, 'utf8').digest('hex').toUpperCase();
