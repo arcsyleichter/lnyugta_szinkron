@@ -1498,6 +1498,29 @@
         <p class="field-hint" id="nav-test-result" style="margin-top:8px;"></p>
       </div>
 
+      <div class="card" id="nav-invoices-card" hidden>
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">NAV számlák</div>
+            <div class="card-subtitle">Közvetlenül a NAV Online Számla nyilvántartásából lekérdezve — a hitelesített adószámhoz tartozó bejövő és kimenő számlák (utolsó 90 nap).</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <select id="nav-invoices-direction">
+              <option value="OUTBOUND">Kimenő (mi állítottuk ki)</option>
+              <option value="INBOUND">Bejövő (mást állított ki)</option>
+            </select>
+            <button class="btn-secondary" id="nav-invoices-refresh-btn">Frissítés</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="nav-invoices-table">
+            <thead><tr><th>Számlaszám</th><th>Dátum</th><th>Kiállító</th><th>Vevő</th><th class="td-right">Nettó</th><th class="td-right">ÁFA</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="field-hint" id="nav-invoices-msg" style="margin-top:8px;"></p>
+      </div>
+
       <div class="finance-summary-row">
         <div class="card finance-summary-card">
           <div class="card-subtitle">Ebben a hónapban</div>

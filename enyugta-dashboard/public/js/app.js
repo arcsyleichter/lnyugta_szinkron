@@ -307,14 +307,47 @@ listen('nav-test-connection-btn', 'click', async (e) => {
   }
 });
 
+async function loadNavInvoices() {
+  const tbody = document.querySelector('#nav-invoices-table tbody');
+  const msg = document.getElementById('nav-invoices-msg');
+  const direction = document.getElementById('nav-invoices-direction').value;
+  msg.textContent = ''; msg.style.color = '';
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Betöltés…</td></tr>';
+  try {
+    const data = await api(`/api/admin/nav/invoices?direction=${direction}`);
+    tbody.innerHTML = data.invoices.length
+      ? data.invoices.map((inv) => `
+        <tr>
+          <td class="ntak-uuid">${escapeHtml(inv.invoiceNumber || '—')}</td>
+          <td>${escapeHtml(inv.invoiceIssueDate || '—')}</td>
+          <td>${escapeHtml(inv.supplierName || '—')}</td>
+          <td>${escapeHtml(inv.customerName || '—')}</td>
+          <td class="td-right">${inv.invoiceNetAmountHUF ? fmtHuf(Number(inv.invoiceNetAmountHUF)) : '—'}</td>
+          <td class="td-right">${inv.invoiceVatAmountHUF ? fmtHuf(Number(inv.invoiceVatAmountHUF)) : '—'}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6" class="empty-state">Nincs számla ebben az irányban, az utolsó 90 napban.</td></tr>';
+    msg.textContent = `${data.invoiceCountAll || data.invoices.length} számla (${data.dateFrom} – ${data.dateTo}).`;
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nem sikerült betölteni.</td></tr>';
+    msg.textContent = e.message;
+    msg.style.color = 'var(--brick)';
+  }
+}
+listen('nav-invoices-refresh-btn', 'click', loadNavInvoices);
+listen('nav-invoices-direction', 'change', loadNavInvoices);
+
 async function loadFinanceView() {
   try {
     const navStatus = await api('/api/admin/nav/status');
     const navDesc = document.getElementById('nav-status-desc');
+    const invoicesCard = document.getElementById('nav-invoices-card');
     if (!navStatus.configured) {
       navDesc.innerHTML = '<span class="muted">Nincs beállítva (hiányzó környezeti változók: NAV_TAXNUMBER, NAV_TECH_USER, NAV_TECH_PASSWORD, NAV_SIGNING_KEY, NAV_EXCHANGE_KEY).</span>';
+      invoicesCard.hidden = true;
     } else {
       navDesc.innerHTML = `<b>${navStatus.sandbox ? 'Teszt' : 'Éles'} környezet</b> — technikai felhasználó: ${escapeHtml(navStatus.techUser)}, adószám: ${escapeHtml(navStatus.taxNumber)}`;
+      invoicesCard.hidden = false;
+      loadNavInvoices();
     }
   } catch (e) { /* nem kritikus, ha ez nem töltődik be */ }
 
