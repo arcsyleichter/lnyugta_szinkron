@@ -5763,17 +5763,18 @@ function navRequestSignatureSimple(requestId, timestampMasked, signingKey) {
   const concatenated = `${requestId}${timestampMasked}${signingKey}`;
   return crypto.createHash('sha3-512').update(concatenated, 'utf8').digest('hex').toUpperCase();
 }
-// requestSignature a manageInvoice operációhoz — a specifikáció szerint:
-// 1) "parciális hitelesítés" = nagybetűs SHA3-512(requestId + timestamp + aláírókulcs)
-// 2) minden egyes tételhez (1-100 index) egy "index hash" = nagybetűs
-//    SHA3-512(operation + base64(számla-XML))
-// 3) a végső requestSignature = nagybetűs SHA3-512(parciális hitelesítés + az összes index hash, sorrendben összefűzve)
+// requestSignature a manageInvoice operációhoz — EGY VALÓDI, VÉGIGSZÁMOLT
+// NAV-példával megerősítve (nem találgatás):
+// 1) "parciális hitelesítés" = a NYERS (MÉG NEM hash-elt!) requestId + timestamp + aláírókulcs string
+// 2) minden egyes tételhez (1-100 index) egy "index hash" = kisbetűs
+//    hex SHA3-512(operation + base64(számla-XML))
+// 3) a végső requestSignature = nagybetűs SHA3-512(a nyers parciális string + az összes index hash, sorrendben összefűzve) — VAGYIS csak EGYSZER hash-elünk, a végén.
 function navRequestSignatureManageInvoice(requestId, timestampMasked, signingKey, items) {
-  const partialAuth = navRequestSignatureSimple(requestId, timestampMasked, signingKey);
+  const partialAuthRaw = `${requestId}${timestampMasked}${signingKey}`;
   const indexHashes = items.map(({ operation, base64Content }) =>
-    crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex').toUpperCase()
+    crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex')
   );
-  return crypto.createHash('sha3-512').update(partialAuth + indexHashes.join(''), 'utf8').digest('hex').toUpperCase();
+  return crypto.createHash('sha3-512').update(partialAuthRaw + indexHashes.join(''), 'utf8').digest('hex').toUpperCase();
 }
 // A /tokenExchange válaszban kapott token AES-128 ECB titkosítással van
 // kódolva (a cserekulccsal, mint 16 bájtos kulccsal) — ezt kell nekünk,
@@ -6042,7 +6043,7 @@ ${navSoftwareXml()}
   <compressedContent>false</compressedContent>
   <invoiceOperation>
     <index>1</index>
-    <invoiceOperation>CREATE</invoiceOperation>
+    <operation>CREATE</operation>
     <invoiceData>${base64Content}</invoiceData>
   </invoiceOperation>
 </invoiceOperations>
