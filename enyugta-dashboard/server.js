@@ -1289,6 +1289,11 @@ async function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, is
   // számla PDF-jének elkészültét/eltárolását, ezért teljesen külön,
   // hibatűrő lépésként fut, csak akkor, ha a NAV-kapcsolat be van állítva.
   if (navConfigured() && adoszam) {
+    if (!navAddressComplete(cimReszletek)) {
+      licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIÁNYZÓ_CÍM', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
+        .run('A cég számlázási címe hiányos (irányítószám/település/közterület neve/házszám) — a NAV garantáltan elutasítaná, ezért a beküldés meg sem történt. Töltsd ki a cég Profil oldalán a "Számlázási cím" mezőket.', orderId, `${orderId}-%`);
+      logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV-beküldés kihagyva (${szamlaSorszam}): hiányos számlázási cím` });
+    } else {
     try {
       const { transactionId } = await navSubmitDemoInvoice({ szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem });
       licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE' WHERE order_id = ? OR order_id LIKE ?`)
@@ -1298,6 +1303,7 @@ async function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, is
       licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
         .run(e.message, orderId, `${orderId}-%`);
       logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV beküldési hiba (${szamlaSorszam}): ${e.message}` });
+    }
     }
   }
 
@@ -3197,6 +3203,19 @@ route('POST', '/api/payment/demo-pay', async (req, res) => {
     tetelek.push({ key, nev: f.nev, osszeg: f.alap_ar });
   }
 
+  // Számla csak akkor állítható ki, ha a cég számlázási címe hiánytalanul,
+  // NAV-formátumban ki van töltve — enélkül a számla-adatszolgáltatás
+  // garantáltan elutasításra kerülne, ezért a fizetést magát sem engedjük
+  // elindítani.
+  const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(session.cegKulcs);
+  const cimReszletekEllenorzeshez = billingRow ? {
+    iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
+    kozteruletNev: billingRow.szamlazasi_kozterulet_nev, hazszam: billingRow.szamlazasi_hazszam,
+  } : {};
+  if (!navAddressComplete(cimReszletekEllenorzeshez)) {
+    return sendJson(res, 400, { error: 'MISSING_BILLING_ADDRESS', message: 'A fizetéshez előbb ki kell töltened a cég számlázási címét a Profil oldalon (irányítószám, település, közterület neve, házszám).' });
+  }
+
   const orderId = `LNYDEMO${Date.now()}${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
   const lejarat = addDaysISO(todayIsoServer(), 30);
@@ -3630,6 +3649,9 @@ route('POST', '/api/admin/finance/resend-nav', async (req, res) => {
     kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
     hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
   } : {};
+  if (!navAddressComplete(cimReszletek)) {
+    return sendJson(res, 400, { error: 'A cég számlázási címe hiányos (irányítószám/település/közterület neve/házszám) — előbb töltsd ki a cég Profil oldalán a "Számlázási cím" mezőket.' });
+  }
   const featureNevByKey = new Map(licenseDb.prepare(`SELECT key, nev FROM license_features`).all().map((f) => [f.key, f.nev]));
   const tetelek = rows.map((p) => ({ nev: featureNevByKey.get(p.feature_key) || p.feature_key || p.cel, osszeg: p.osszeg }));
 
@@ -5871,6 +5893,13 @@ function escapeXml(s) {
 
 // Magyar adószám ("12345678-1-42" formátum) szétbontása a NAV XML-hez
 // szükséges 3 részre: törzsszám (8 jegy), ÁFA-kód (1 jegy), megyekód (2 jegy).
+// A NAV séma (base:detailedAddress) kötelezővé teszi az irányítószámot,
+// települést, közterület nevét és a házszámot — ha bármelyik hiányzik, a
+// beküldés garantáltan elutasításra kerülne (ABORTED), ezért ezt előre
+// leellenőrizzük, és inkább egyáltalán nem küldünk be hiányos adatot.
+function navAddressComplete(cim) {
+  return !!(cim && cim.iranyitoszam && cim.telepules && cim.kozteruletNev && cim.hazszam);
+}
 function parseHunTaxNumber(adoszam) {
   const digits = String(adoszam || '').replace(/[^0-9]/g, '');
   return { taxpayerId: digits.slice(0, 8), vatCode: digits.slice(8, 9) || '2', countyCode: digits.slice(9, 11) || '42' };

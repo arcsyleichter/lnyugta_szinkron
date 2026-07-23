@@ -4506,6 +4506,11 @@ function updateProfilFeaturesCartBar() {
 }
 
 function openDemoPaymentModal() {
+  if (!profilBillingAddressComplete) {
+    alert('A fizetéshez előbb ki kell töltened a cég számlázási címét (irányítószám, település, közterület neve, házszám) — ezt fentebb, a "Számlázási cím" kártyában teheted meg.');
+    document.getElementById('profil-billing-address-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
   const data = profilFeaturesDataCache;
   const items = [...profilFeaturesCart].map((key) => data.features.find((f) => f.key === key)).filter(Boolean);
   if (!items.length) return;
@@ -4792,12 +4797,14 @@ listen('profil-email-form', 'submit', async (e) => {
 
 let navKozteruletJellegekCache = [];
 
+let profilBillingAddressComplete = false;
 async function loadProfilBillingAddress(isManager) {
   const fieldsBox = document.getElementById('profil-billing-address-fields');
   const saveBtn = document.getElementById('profil-billing-address-save-btn');
   try {
     const data = await api('/api/profile/billing-address');
     navKozteruletJellegekCache = data.kozteruletJellegek || [];
+    profilBillingAddressComplete = !!(data.iranyitoszam && data.telepules && data.kozteruletNev && data.hazszam);
     fieldsBox.innerHTML = navAddressFieldsHtml('profil-billing', data, navKozteruletJellegekCache);
     wireNavAddressJellegCustom('profil-billing', navKozteruletJellegekCache);
     saveBtn.hidden = isManager;

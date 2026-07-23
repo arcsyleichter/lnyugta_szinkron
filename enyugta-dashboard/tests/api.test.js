@@ -632,7 +632,14 @@ test('Admin — Pénzügyek: bevétel-áttekintés és számla-PDF letöltés', 
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ companyKey: '18774455:01' }),
     });
-    return extractCookie(impersonateRes);
+    const cookie = extractCookie(impersonateRes);
+    // A fizetés mostantól megköveteli a kitöltött, NAV-formátumú
+    // számlázási címet — minden teszt-cégnél ezt itt, egy helyen állítjuk be.
+    await fetch(`${server.baseUrl}/api/profile/billing-address`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ iranyitoszam: '1053', telepules: 'Budapest', kozteruletNev: 'Kossuth Lajos', kozteruletJelleg: 'utca', hazszam: '12' }),
+    });
+    return cookie;
   }
 
   await t.test('sikeres fizetés után a bevétel megjelenik a cégenkénti/funkciónkénti/havi bontásban, és a PDF ténylegesen letölthető', async () => {
@@ -714,7 +721,12 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
       body: JSON.stringify({ companyKey: '18774455:01' }),
     });
-    return extractCookie(impersonateRes);
+    const cookie = extractCookie(impersonateRes);
+    await fetch(`${server.baseUrl}/api/profile/billing-address`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ iranyitoszam: '1053', telepules: 'Budapest', kozteruletNev: 'Kossuth Lajos', kozteruletJelleg: 'utca', hazszam: '12' }),
+    });
+    return cookie;
   }
   async function getAdminCookie() {
     const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
@@ -723,6 +735,36 @@ test('Egyszerű demo-fizetés (myPOS nélkül)', async (t) => {
     });
     return extractCookie(loginRes);
   }
+
+  await t.test('fizetés nem indítható, ha a cég számlázási címe nincs kitöltve', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'CIMTESZT', nev: 'Cím teszt funkció', alapAr: 900 }),
+    });
+    // Ez a cookie SZÁNDÉKOSAN nyers (nincs számlázási cím beállítva rajta,
+    // ellentétben a getCompanySession() segédfüggvénnyel).
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: extractCookie(loginRes) },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    const cookieCimNelkul = extractCookie(impersonateRes);
+    const res = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookieCimNelkul },
+      body: JSON.stringify({ featureKeys: ['CIMTESZT'] }),
+    });
+    assert.equal(res.status, 400, 'a fizetésnek el kell utasításra kerülnie hiányos számlázási cím esetén');
+    const body = await res.json();
+    assert.equal(body.error, 'MISSING_BILLING_ADDRESS');
+
+    const profileRes = await fetch(`${server.baseUrl}/api/profile/features`, { headers: { Cookie: cookieCimNelkul } });
+    const profileBody = await profileRes.json();
+    assert.equal(profileBody.features.find((f) => f.key === 'CIMTESZT').kivalasztva, false, 'a funkció NEM aktiválódhatott');
+  });
 
   await t.test('a demo-fizetés azonnal aktiválja a funkciót, valódi fizetési átjáró nélkül', async () => {
     const adminCookie = await getAdminCookie();
