@@ -5774,7 +5774,9 @@ function navRequestSignatureManageInvoice(requestId, timestampMasked, signingKey
   const indexHashes = items.map(({ operation, base64Content }) =>
     crypto.createHash('sha3-512').update(`${operation}${base64Content}`, 'utf8').digest('hex')
   );
-  return crypto.createHash('sha3-512').update(partialAuthRaw + indexHashes.join(''), 'utf8').digest('hex').toUpperCase();
+  const finalInput = partialAuthRaw + indexHashes.join('');
+  const signature = crypto.createHash('sha3-512').update(finalInput, 'utf8').digest('hex').toUpperCase();
+  return { signature, debug: { partialAuthRaw, indexHashes, finalInputLength: finalInput.length } };
 }
 // A /tokenExchange válaszban kapott token AES-128 ECB titkosítással van
 // kódolva (a cserekulccsal, mint 16 bájtos kulccsal) — ezt kell nekünk,
@@ -6038,7 +6040,7 @@ async function navSubmitInvoice(invoiceDataXml) {
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
   const base64Content = Buffer.from(invoiceDataXml, 'utf8').toString('base64');
-  const requestSignature = navRequestSignatureManageInvoice(requestId, timestampMasked, process.env.NAV_SIGNING_KEY, [
+  const { signature: requestSignature, debug: sigDebug } = navRequestSignatureManageInvoice(requestId, timestampMasked, process.env.NAV_SIGNING_KEY, [
     { operation: 'CREATE', base64Content },
   ]);
 
@@ -6060,7 +6062,7 @@ ${navSoftwareXml()}
   const { status, text } = await navApiCall('manageInvoice', bodyXml);
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
-    throw new Error(`NAV manageInvoice hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1500)}`);
+    throw new Error(`NAV manageInvoice hiba: ${errorMsg} | requestId: ${requestId} | timestampMasked: ${timestampMasked} | partialAuthRaw: ${sigDebug.partialAuthRaw} | indexHash: ${sigDebug.indexHashes[0]} | requestSignature: ${requestSignature} | Nyers válasz: ${text.slice(0, 1200)}`);
   }
   const transactionId = navXmlField(text, 'transactionId');
   if (!transactionId) throw new Error(`A NAV válaszában nem található tranzakció-azonosító. Nyers válasz: ${text.slice(0, 500)}`);
