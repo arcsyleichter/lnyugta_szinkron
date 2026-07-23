@@ -545,6 +545,9 @@ licenseDb.exec(`
     ismetlodo INTEGER NOT NULL DEFAULT 0,
     szamla_sorszam TEXT,
     szamla_pdf_fajlnev TEXT,
+    nav_transaction_id TEXT,
+    nav_allapot TEXT,
+    nav_uzenet TEXT,
     letrehozva TEXT NOT NULL,
     lezarva TEXT
   );
@@ -708,7 +711,7 @@ licenseDb.exec(`
 // hiányozhatnak).
 {
   const cols = licenseDb.prepare(`PRAGMA table_info(license_payments)`).all();
-  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT'], ['szamla_pdf_fajlnev', 'TEXT']]) {
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT'], ['szamla_pdf_fajlnev', 'TEXT'], ['nav_transaction_id', 'TEXT'], ['nav_allapot', 'TEXT'], ['nav_uzenet', 'TEXT']]) {
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
     }
@@ -1260,17 +1263,18 @@ if (!fs.existsSync(INVOICES_DIR)) fs.mkdirSync(INVOICES_DIR, { recursive: true }
 // kell), nem szabad, hogy egy hiányzó email-cím miatt egyáltalán ne
 // készüljön el a számla. Az emailben történő KIKÜLDÉS ettől független,
 // külön, hibatűrő lépés (lásd sendDemoInvoiceEmail lejjebb).
-function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
+async function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
   const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === cegKulcs);
   const cegNev = anySite?.nev || cegKulcs;
   const adoszam = anySite?.adoszam || '';
   const datum = todayIsoServer();
   const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(cegKulcs);
-  const cimSzoveg = billingRow ? formatNavAddress({
+  const cimReszletek = billingRow ? {
     iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
     kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
     hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
-  }) : '';
+  } : {};
+  const cimSzoveg = billingRow ? formatNavAddress(cimReszletek) : '';
   const szamlaSorszam = nextInvoiceNumber();
   const pdf = buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, datum, orderId, szamlaSorszam, ismetlodo });
   const fajlnev = `${szamlaSorszam.replace('/', '-')}.pdf`;
@@ -1280,11 +1284,28 @@ function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlod
       .run(szamlaSorszam, fajlnev, orderId, `${orderId}-%`);
   } catch (_) {}
   logActivity({ type: 'invoice_created', ok: true, companyKey: cegKulcs, nev: null, detail: `Számla előállítva: ${szamlaSorszam} (${orderId})` });
+
+  // A NAV Online Számla adatszolgáltatás — SOHA nem akaszthatja meg a
+  // számla PDF-jének elkészültét/eltárolását, ezért teljesen külön,
+  // hibatűrő lépésként fut, csak akkor, ha a NAV-kapcsolat be van állítva.
+  if (navConfigured() && adoszam) {
+    try {
+      const { transactionId } = await navSubmitDemoInvoice({ szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem });
+      licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE' WHERE order_id = ? OR order_id LIKE ?`)
+        .run(transactionId, orderId, `${orderId}-%`);
+      logActivity({ type: 'nav_invoice_submit', ok: true, companyKey: cegKulcs, nev: null, detail: `NAV-nak beküldve: ${szamlaSorszam} (tranzakció: ${transactionId})` });
+    } catch (e) {
+      licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
+        .run(e.message, orderId, `${orderId}-%`);
+      logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV beküldési hiba (${szamlaSorszam}): ${e.message}` });
+    }
+  }
+
   return { szamlaSorszam, fajlnev, pdf, cegNev, adoszam };
 }
 
 async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
-  const { szamlaSorszam, pdf, cegNev } = generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo });
+  const { szamlaSorszam, pdf, cegNev } = await generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, ismetlodo });
 
   const codes = readAccessCodes();
   let email = codes[cegKulcs]?.email || '';
@@ -3560,6 +3581,7 @@ route('GET', '/api/admin/finance/invoices', async (req, res, query) => {
         szamlaSorszam: p.szamla_sorszam, cegKulcs: p.ceg_kulcs, cegNev: cegNevByKulcs.get(p.ceg_kulcs) || p.ceg_kulcs,
         letrehozva: p.letrehozva, allapot: p.allapot, penznem: p.penznem, osszeg: 0, tetelek: [],
         pdfElerheto: !!p.szamla_pdf_fajlnev, pdfFajlnev: p.szamla_pdf_fajlnev,
+        navAllapot: p.nav_allapot, navTranzakcioId: p.nav_transaction_id, navUzenet: p.nav_uzenet, orderId: p.order_id,
       });
     }
     const inv = bySzamla.get(p.szamla_sorszam);
@@ -3582,6 +3604,47 @@ route('GET', '/api/admin/finance/invoice-pdf', async (req, res, query) => {
   if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A számla PDF-fájlja nem található a szerveren.' });
   res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${fajlnev}"`, 'Cache-Control': 'private, max-age=3600' });
   res.end(fs.readFileSync(filePath));
+});
+
+// Egy már eltárolt számla ÚJRAKÜLDÉSE a NAV-nak (pl. korábbi hálózati vagy
+// XML-hiba után). A meglévő számla-adatokból rekonstruálja az XML-t, majd
+// újra beküldi — FONTOS: ezzel egy ÚJ NAV-tranzakció jön létre, a korábbi
+// (sikertelen) próbálkozás nem törlődik, csak a mezők frissülnek.
+route('POST', '/api/admin/finance/resend-nav', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (!navConfigured()) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva.' });
+  const { szamlaSorszam } = await readJsonBody(req);
+  if (!szamlaSorszam) return sendJson(res, 400, { error: 'Hiányzó számlasorszám.' });
+
+  const rows = licenseDb.prepare(`SELECT * FROM license_payments WHERE szamla_sorszam = ?`).all(szamlaSorszam);
+  if (!rows.length) return sendJson(res, 404, { error: 'Nincs ilyen számla.' });
+  const first = rows[0];
+  const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === first.ceg_kulcs);
+  const cegNev = anySite?.nev || first.ceg_kulcs;
+  const adoszam = anySite?.adoszam || '';
+  if (!adoszam) return sendJson(res, 400, { error: 'A cégnek nincs ismert adószáma — NAV-beküldés nem lehetséges.' });
+  const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(first.ceg_kulcs);
+  const cimReszletek = billingRow ? {
+    iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
+    kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
+    hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
+  } : {};
+  const featureNevByKey = new Map(licenseDb.prepare(`SELECT key, nev FROM license_features`).all().map((f) => [f.key, f.nev]));
+  const tetelek = rows.map((p) => ({ nev: featureNevByKey.get(p.feature_key) || p.feature_key || p.cel, osszeg: p.osszeg }));
+
+  try {
+    const { transactionId } = await navSubmitDemoInvoice({
+      szamlaSorszam, datum: first.letrehozva.slice(0, 10), cegNev, adoszam, cimReszletek, tetelek, penznem: first.penznem,
+    });
+    licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE', nav_uzenet = NULL WHERE szamla_sorszam = ?`).run(transactionId, szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: true, companyKey: first.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV-nak újraküldve: ${szamlaSorszam} (tranzakció: ${transactionId})` });
+    sendJson(res, 200, { ok: true, transactionId });
+  } catch (e) {
+    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ? WHERE szamla_sorszam = ?`).run(e.message, szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: first.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV újraküldési hiba (${szamlaSorszam}): ${e.message}` });
+    sendJson(res, 500, { error: e.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -5773,6 +5836,148 @@ function escapeXml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Magyar adószám ("12345678-1-42" formátum) szétbontása a NAV XML-hez
+// szükséges 3 részre: törzsszám (8 jegy), ÁFA-kód (1 jegy), megyekód (2 jegy).
+function parseHunTaxNumber(adoszam) {
+  const digits = String(adoszam || '').replace(/[^0-9]/g, '');
+  return { taxpayerId: digits.slice(0, 8), vatCode: digits.slice(8, 9) || '2', countyCode: digits.slice(9, 11) || '42' };
+}
+function navAddressXml(tagName, addr) {
+  return `<${tagName}>
+      <base:detailedAddress>
+        <base:countryCode>HU</base:countryCode>
+        <base:postalCode>${escapeXml(addr.iranyitoszam)}</base:postalCode>
+        <base:city>${escapeXml(addr.telepules)}</base:city>
+        <base:streetName>${escapeXml(addr.kozteruletNev)}</base:streetName>
+        <base:publicPlaceCategory>${escapeXml(addr.kozteruletJelleg || 'egyéb')}</base:publicPlaceCategory>
+        <base:number>${escapeXml(addr.hazszam)}</base:number>
+      </base:detailedAddress>
+    </${tagName}>`;
+}
+
+// A tényleges számla-XML felépítése — a NAV hivatalos, publikus mintaXML-je
+// (nav-gov-hu/Online-Invoice GitHub-tárhely) alapján, telephely-előfizetési
+// szolgáltatás-számlázásra igazítva (SERVICE jellegű tételek, nem termék).
+// Az itt kapott árakat BRUTTÓnak tekintjük (lásd splitBruttoToNettoAfa).
+function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, buyerTaxNumber, buyerAddress, tetelek, penznem }) {
+  const eladoCim = { iranyitoszam: '2200', telepules: 'Monor', kozteruletNev: 'Virág', kozteruletJelleg: 'utca', hazszam: '39' };
+  const eladoTax = parseHunTaxNumber(ELADO_ADOSZAM);
+  const vevoTax = parseHunTaxNumber(buyerTaxNumber);
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
+  const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
+  const vatPercentageDecimal = (ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS).toFixed(2); // pl. 0.27
+
+  const linesXml = tetelekBontva.map((t, i) => `<line>
+        <lineNumber>${i + 1}</lineNumber>
+        <lineExpressionIndicator>true</lineExpressionIndicator>
+        <lineNatureIndicator>SERVICE</lineNatureIndicator>
+        <lineDescription>${escapeXml(t.nev)}</lineDescription>
+        <quantity>1.00</quantity>
+        <unitOfMeasure>OWN</unitOfMeasure>
+        <unitPrice>${t.netto}</unitPrice>
+        <unitPriceHUF>${t.netto}</unitPriceHUF>
+        <lineAmountsNormal>
+          <lineNetAmountData>
+            <lineNetAmount>${t.netto}</lineNetAmount>
+            <lineNetAmountHUF>${t.netto}</lineNetAmountHUF>
+          </lineNetAmountData>
+          <lineVatRate>
+            <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+          </lineVatRate>
+          <lineVatData>
+            <lineVatAmount>${t.afa}</lineVatAmount>
+            <lineVatAmountHUF>${t.afa}</lineVatAmountHUF>
+          </lineVatData>
+          <lineGrossAmountData>
+            <lineGrossAmountNormal>${t.brutto}</lineGrossAmountNormal>
+            <lineGrossAmountNormalHUF>${t.brutto}</lineGrossAmountNormalHUF>
+          </lineGrossAmountData>
+        </lineAmountsNormal>
+      </line>`).join('\n      ');
+
+  return `<InvoiceData xmlns="http://schemas.nav.gov.hu/OSA/3.0/data" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.nav.gov.hu/OSA/3.0/data invoiceData.xsd" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
+  <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
+  <invoiceIssueDate>${invoiceIssueDate}</invoiceIssueDate>
+  <completenessIndicator>false</completenessIndicator>
+  <invoiceMain>
+    <invoice>
+      <invoiceHead>
+        <supplierInfo>
+          <supplierTaxNumber>
+            <base:taxpayerId>${eladoTax.taxpayerId}</base:taxpayerId>
+            <base:vatCode>${eladoTax.vatCode}</base:vatCode>
+            <base:countyCode>${eladoTax.countyCode}</base:countyCode>
+          </supplierTaxNumber>
+          <supplierName>${escapeXml(ELADO_NEV)}</supplierName>
+          <supplierAddress>
+            <base:detailedAddress>
+              <base:countryCode>HU</base:countryCode>
+              <base:postalCode>${eladoCim.iranyitoszam}</base:postalCode>
+              <base:city>${eladoCim.telepules}</base:city>
+              <base:streetName>${eladoCim.kozteruletNev}</base:streetName>
+              <base:publicPlaceCategory>${eladoCim.kozteruletJelleg}</base:publicPlaceCategory>
+              <base:number>${eladoCim.hazszam}</base:number>
+            </base:detailedAddress>
+          </supplierAddress>
+        </supplierInfo>
+        <customerInfo>
+          <customerVatStatus>DOMESTIC</customerVatStatus>
+          <customerVatData>
+            <customerTaxNumber>
+              <base:taxpayerId>${vevoTax.taxpayerId}</base:taxpayerId>
+              <base:vatCode>${vevoTax.vatCode}</base:vatCode>
+              <base:countyCode>${vevoTax.countyCode}</base:countyCode>
+            </customerTaxNumber>
+          </customerVatData>
+          <customerName>${escapeXml(buyerName)}</customerName>
+          ${navAddressXml('customerAddress', buyerAddress || {})}
+        </customerInfo>
+        <invoiceDetail>
+          <invoiceCategory>NORMAL</invoiceCategory>
+          <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
+          <currencyCode>${penznem}</currencyCode>
+          <exchangeRate>1</exchangeRate>
+          <paymentMethod>CARD</paymentMethod>
+          <paymentDate>${invoiceIssueDate}</paymentDate>
+          <invoiceAppearance>ELECTRONIC</invoiceAppearance>
+        </invoiceDetail>
+      </invoiceHead>
+      <invoiceLines>
+        <mergedItemIndicator>false</mergedItemIndicator>
+        ${linesXml}
+      </invoiceLines>
+      <invoiceSummary>
+        <summaryNormal>
+          <summaryByVatRate>
+            <vatRate>
+              <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+            </vatRate>
+            <vatRateNetData>
+              <vatRateNetAmount>${nettoOsszesen}</vatRateNetAmount>
+              <vatRateNetAmountHUF>${nettoOsszesen}</vatRateNetAmountHUF>
+            </vatRateNetData>
+            <vatRateVatData>
+              <vatRateVatAmount>${afaOsszesen}</vatRateVatAmount>
+              <vatRateVatAmountHUF>${afaOsszesen}</vatRateVatAmountHUF>
+            </vatRateVatData>
+          </summaryByVatRate>
+          <invoiceNetAmount>${nettoOsszesen}</invoiceNetAmount>
+          <invoiceNetAmountHUF>${nettoOsszesen}</invoiceNetAmountHUF>
+          <invoiceVatAmount>${afaOsszesen}</invoiceVatAmount>
+          <invoiceVatAmountHUF>${afaOsszesen}</invoiceVatAmountHUF>
+        </summaryNormal>
+        <summaryGrossData>
+          <invoiceGrossAmount>${bruttoOsszesen}</invoiceGrossAmount>
+          <invoiceGrossAmountHUF>${bruttoOsszesen}</invoiceGrossAmountHUF>
+        </summaryGrossData>
+      </invoiceSummary>
+    </invoice>
+  </invoiceMain>
+</InvoiceData>`;
+}
+
 async function navApiCall(operation, bodyXml) {
   const resp = await fetch(`${NAV_BASE_URL}/${operation}`, {
     method: 'POST',
@@ -5812,6 +6017,94 @@ ${navSoftwareXml()}
   if (!encodedToken) throw new Error(`A NAV válaszában nem található token. Nyers válasz: ${text.slice(0, 500)}`);
   const decodedToken = navDecryptExchangeToken(encodedToken, process.env.NAV_EXCHANGE_KEY);
   return { token: decodedToken, validFrom: navXmlField(text, 'tokenValidityFrom'), validTo: navXmlField(text, 'tokenValidityTo') };
+}
+
+// Egyetlen számla-XML beküldése a NAV-nak (manageInvoice, CREATE operáció).
+// Visszaadja a NAV tranzakció-azonosítóját, amivel a feldolgozás állapota
+// később lekérdezhető (a NAV 2-30 másodperc alatt dolgozza fel).
+async function navSubmitInvoice(invoiceDataXml) {
+  const { token } = await navTokenExchange();
+  const requestId = navRequestId();
+  const now = new Date();
+  const timestampMasked = navTimestampMasked(now);
+  const timestampIso = navTimestampIso(now);
+  const base64Content = Buffer.from(invoiceDataXml, 'utf8').toString('base64');
+  const requestSignature = navRequestSignatureManageInvoice(requestId, timestampMasked, process.env.NAV_SIGNING_KEY, [
+    { operation: 'CREATE', base64Content },
+  ]);
+
+  const bodyXml = `<ManageInvoiceRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+${navHeaderXml(requestId, timestampIso)}
+${navUserXml(requestSignature)}
+${navSoftwareXml()}
+<exchangeToken>${token}</exchangeToken>
+<invoiceOperations>
+  <compressedContent>false</compressedContent>
+  <invoiceOperation>
+    <index>1</index>
+    <invoiceOperation>CREATE</invoiceOperation>
+    <invoiceData>${base64Content}</invoiceData>
+  </invoiceOperation>
+</invoiceOperations>
+</ManageInvoiceRequest>`;
+
+  const { status, text } = await navApiCall('manageInvoice', bodyXml);
+  if (status !== 200) {
+    const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
+    throw new Error(`NAV manageInvoice hiba: ${errorMsg}`);
+  }
+  const transactionId = navXmlField(text, 'transactionId');
+  if (!transactionId) throw new Error(`A NAV válaszában nem található tranzakció-azonosító. Nyers válasz: ${text.slice(0, 500)}`);
+  return { transactionId };
+}
+
+// A feldolgozás állapotának lekérdezése — a NAV aszinkron dolgozza fel a
+// beküldött számlákat, ezért a tranzakció-azonosítóval később kell
+// rákérdezni az eredményre (elfogadva / figyelmeztetéssel / elutasítva).
+async function navQueryTransactionStatus(transactionId) {
+  const { token } = await navTokenExchange();
+  const requestId = navRequestId();
+  const now = new Date();
+  const timestampMasked = navTimestampMasked(now);
+  const timestampIso = navTimestampIso(now);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+
+  const bodyXml = `<QueryTransactionStatusRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+${navHeaderXml(requestId, timestampIso)}
+${navUserXml(requestSignature)}
+${navSoftwareXml()}
+<exchangeToken>${token}</exchangeToken>
+<transactionId>${escapeXml(transactionId)}</transactionId>
+<returnOriginalRequest>false</returnOriginalRequest>
+</QueryTransactionStatusRequest>`;
+
+  const { status, text } = await navApiCall('queryTransactionStatus', bodyXml);
+  if (status !== 200) {
+    const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
+    throw new Error(`NAV queryTransactionStatus hiba: ${errorMsg}`);
+  }
+  return {
+    processingResult: navXmlField(text, 'invoiceStatus'),
+    businessValidationMessages: navXmlFieldAll(text, 'message'),
+    raw: text,
+  };
+}
+
+// Egy meglévő, eltárolt demo-számla NAV felé történő beküldése — a teljes
+// L-NYUGTA-oldali adatból felépíti a NAV-kompatibilis XML-t, beküldi, és
+// visszaadja a tranzakció-azonosítót (ezt hívjuk a fizetés jóváírásakor,
+// ha a NAV-kapcsolat be van állítva).
+async function navSubmitDemoInvoice({ szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem }) {
+  const invoiceDataXml = buildNavInvoiceDataXml({
+    invoiceNumber: szamlaSorszam,
+    invoiceIssueDate: datum,
+    buyerName: cegNev,
+    buyerTaxNumber: adoszam,
+    buyerAddress: cimReszletek || {},
+    tetelek,
+    penznem,
+  });
+  return navSubmitInvoice(invoiceDataXml);
 }
 
 // A myPOS aláírás-algoritmusa (a hivatalos dokumentáció szerint):

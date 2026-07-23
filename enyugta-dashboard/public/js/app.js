@@ -347,6 +347,11 @@ async function loadFinanceView() {
       : '<tr><td colspan="3" class="empty-state">Még nincs egyetlen sikeres fizetés sem.</td></tr>';
 
     const invoicesBody = document.querySelector('#finance-invoices-table tbody');
+    const navBadge = (inv) => {
+      if (inv.navAllapot === 'BEKULDVE') return `<span class="licenc-badge licenc-badge--ok" style="font-size:10px;" title="Tranzakció: ${escapeHtml(inv.navTranzakcioId || '')}">✓ beküldve</span>`;
+      if (inv.navAllapot === 'HIBA') return `<span class="licenc-badge" style="font-size:10px;background:#FBE4E1;color:var(--brick);" title="${escapeHtml(inv.navUzenet || '')}">✗ hiba</span>`;
+      return '<span class="muted" style="font-size:11px;">—</span>';
+    };
     invoicesBody.innerHTML = invoicesData.invoices.length
       ? invoicesData.invoices.map((inv) => `
         <tr>
@@ -355,9 +360,22 @@ async function loadFinanceView() {
           <td>${fmtDateTime(inv.letrehozva)}</td>
           <td>${inv.tetelek.map((t) => escapeHtml(t.nev)).join(', ')}</td>
           <td class="td-right">${fmtHuf(inv.osszeg)}</td>
+          <td>${navBadge(inv)}${inv.navAllapot !== 'BEKULDVE' ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
           <td>${inv.pdfElerheto ? `<a class="btn-tiny" href="/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(inv.pdfFajlnev)}" target="_blank">⬇ PDF</a>` : '<span class="muted">nincs fájl</span>'}</td>
         </tr>`).join('')
-      : '<tr><td colspan="6" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
+      : '<tr><td colspan="7" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
+    invoicesBody.querySelectorAll('.finance-nav-resend-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          await api('/api/admin/finance/resend-nav', { method: 'POST', body: JSON.stringify({ szamlaSorszam: btn.dataset.szamla }) });
+          loadFinanceView();
+        } catch (e) {
+          alert('Nem sikerült újraküldeni: ' + e.message);
+          btn.disabled = false; btn.textContent = 'Újraküldés';
+        }
+      });
+    });
   } catch (e) {
     alert('Nem sikerült betölteni a pénzügyi adatokat: ' + e.message);
   }
