@@ -311,10 +311,21 @@ async function loadNavInvoices() {
   const tbody = document.querySelector('#nav-invoices-table tbody');
   const msg = document.getElementById('nav-invoices-msg');
   const direction = document.getElementById('nav-invoices-direction').value;
+  const dateFromInput = document.getElementById('nav-invoices-date-from');
+  const dateToInput = document.getElementById('nav-invoices-date-to');
+  // Első betöltéskor töltsük fel az utolsó 30 napra az űrlapot (a NAV
+  // legfeljebb 35 napos intervallumot enged egyszerre lekérdezni).
+  if (!dateToInput.value) {
+    const today = new Date();
+    const from = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+    dateToInput.value = today.toISOString().slice(0, 10);
+    dateFromInput.value = from.toISOString().slice(0, 10);
+  }
   msg.textContent = ''; msg.style.color = '';
   tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Betöltés…</td></tr>';
   try {
-    const data = await api(`/api/admin/nav/invoices?direction=${direction}`);
+    const params = new URLSearchParams({ direction, dateFrom: dateFromInput.value, dateTo: dateToInput.value });
+    const data = await api(`/api/admin/nav/invoices?${params}`);
     tbody.innerHTML = data.invoices.length
       ? data.invoices.map((inv) => `
         <tr>
@@ -325,7 +336,7 @@ async function loadNavInvoices() {
           <td class="td-right">${inv.invoiceNetAmountHUF ? fmtHuf(Number(inv.invoiceNetAmountHUF)) : '—'}</td>
           <td class="td-right">${inv.invoiceVatAmountHUF ? fmtHuf(Number(inv.invoiceVatAmountHUF)) : '—'}</td>
         </tr>`).join('')
-      : '<tr><td colspan="6" class="empty-state">Nincs számla ebben az irányban, az utolsó 90 napban.</td></tr>';
+      : '<tr><td colspan="6" class="empty-state">Nincs számla ebben az irányban, a megadott időszakban.</td></tr>';
     msg.textContent = `${data.invoiceCountAll || data.invoices.length} számla (${data.dateFrom} – ${data.dateTo}).`;
   } catch (e) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nem sikerült betölteni.</td></tr>';
@@ -334,6 +345,8 @@ async function loadNavInvoices() {
   }
 }
 listen('nav-invoices-refresh-btn', 'click', loadNavInvoices);
+listen('nav-invoices-date-from', 'change', loadNavInvoices);
+listen('nav-invoices-date-to', 'change', loadNavInvoices);
 listen('nav-invoices-direction', 'change', loadNavInvoices);
 
 async function loadFinanceView() {

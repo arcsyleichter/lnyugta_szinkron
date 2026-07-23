@@ -3561,7 +3561,14 @@ route('GET', '/api/admin/nav/invoices', async (req, res, query) => {
   const direction = query.direction === 'INBOUND' ? 'INBOUND' : 'OUTBOUND';
   const page = Math.max(parseInt(query.page || '1', 10) || 1, 1);
   const dateTo = query.dateTo || todayIsoServer();
-  const dateFrom = query.dateFrom || addDaysISO(dateTo, -90);
+  const dateFrom = query.dateFrom || addDaysISO(dateTo, -30);
+  // A NAV a lekérdezési intervallum hosszát legfeljebb 35 napban maximálja
+  // — ezt itt, a hívás előtt ellenőrizzük, hogy ne kelljen felesleges
+  // hálózati kört tenni egy garantáltan elutasított kéréshez.
+  const napokSzama = Math.round((new Date(dateTo) - new Date(dateFrom)) / (24 * 60 * 60 * 1000));
+  if (napokSzama > 35 || napokSzama < 0) {
+    return sendJson(res, 400, { error: 'A lekérdezési időszak legfeljebb 35 nap lehet (ezt a NAV korlátozza).' });
+  }
   try {
     const result = await navQueryInvoiceDigest({ direction, dateFrom, dateTo, page });
     sendJson(res, 200, { ...result, direction, dateFrom, dateTo });

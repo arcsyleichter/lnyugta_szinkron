@@ -1502,9 +1502,12 @@
         <div class="card-title-row">
           <div>
             <div class="card-title">NAV számlák</div>
-            <div class="card-subtitle">Közvetlenül a NAV Online Számla nyilvántartásából lekérdezve — a hitelesített adószámhoz tartozó bejövő és kimenő számlák (utolsó 90 nap).</div>
+            <div class="card-subtitle">Közvetlenül a NAV Online Számla nyilvántartásából lekérdezve — a hitelesített adószámhoz tartozó bejövő és kimenő számlák. Egyszerre legfeljebb 35 napos időszak kérdezhető le (ezt a NAV korlátozza).</div>
           </div>
-          <div style="display:flex;gap:8px;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input type="date" id="nav-invoices-date-from" style="padding:7px 8px;">
+            <span class="muted">–</span>
+            <input type="date" id="nav-invoices-date-to" style="padding:7px 8px;">
             <select id="nav-invoices-direction">
               <option value="OUTBOUND">Kimenő (mi állítottuk ki)</option>
               <option value="INBOUND">Bejövő (mást állított ki)</option>
