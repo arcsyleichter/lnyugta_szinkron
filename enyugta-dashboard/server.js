@@ -6759,6 +6759,11 @@ async function navQueryInvoiceData({ invoiceNumber, direction, taxNumber, creds 
   const timestampIso = navTimestampIso(now);
   const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
 
+  // FONTOS: a "taxNumber" mező OPCIONÁLIS a hivatalos XSD szerint
+  // (minOccurs="0") — élesben "Helytelen kérés!" (séma-hiba) jelentkezett
+  // vele, ezért itt SZÁNDÉKOSAN kihagyjuk. A technikai felhasználó saját
+  // adószáma (a hitelesítésből) önmagában is elég a NAV-nak ahhoz, hogy
+  // beazonosítsa, kinek a számláit keressük.
   const bodyXml = `<QueryInvoiceDataRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
 ${navUserXml(requestSignature, creds)}
@@ -6766,14 +6771,13 @@ ${navSoftwareXml()}
 <invoiceNumberQuery>
   <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
   <invoiceDirection>${direction}</invoiceDirection>
-  <taxNumber>${escapeXml(taxNumber)}</taxNumber>
 </invoiceNumberQuery>
 </QueryInvoiceDataRequest>`;
 
   const { status, text } = await navApiCall('queryInvoiceData', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
-    throw new Error(`NAV queryInvoiceData hiba: ${errorMsg}`);
+    throw new Error(`NAV queryInvoiceData hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1000)}`);
   }
   const base64Content = navXmlField(text, 'invoiceData');
   if (!base64Content) throw new Error(`A NAV válaszában nem található számla-tartalom. Nyers válasz: ${text.slice(0, 500)}`);
