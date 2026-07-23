@@ -5923,7 +5923,19 @@ function navAddressXml(tagName, addr) {
 // Az itt kapott árakat BRUTTÓnak tekintjük (lásd splitBruttoToNettoAfa).
 function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, buyerTaxNumber, buyerAddress, tetelek, penznem }) {
   const eladoCim = { iranyitoszam: '2200', telepules: 'Monor', kozteruletNev: 'Virág', kozteruletJelleg: 'utca', hazszam: '39' };
-  const eladoTax = parseHunTaxNumber(ELADO_ADOSZAM);
+  // FONTOS: az eladó adószámának a számla-XML-ben PONTOSAN egyeznie kell a
+  // NAV technikai felhasználó hitelesítéséhez tartozó adószámmal
+  // (NAV_TAXNUMBER) — ez NEM feltétlenül ugyanaz, mint a cég "hivatalos",
+  // máshol megjelenített adószáma (ELADO_ADOSZAM), pl. teszt-környezetben
+  // egy erre a célra regisztrált teszt-adószám tartozhat a technikai
+  // felhasználóhoz. A NAV_TAXNUMBER_VATCODE / NAV_TAXNUMBER_COUNTY env
+  // változókkal a törzsszám melletti két számjegy is felülírható, ha nem a
+  // leggyakoribb "2" (belföldi, normál adóalany) és "42" (Budapest) illik.
+  const eladoTax = {
+    taxpayerId: (process.env.NAV_TAXNUMBER || '').padStart(8, '0'),
+    vatCode: process.env.NAV_TAXNUMBER_VATCODE || '2',
+    countyCode: process.env.NAV_TAXNUMBER_COUNTY || '42',
+  };
   const vevoTax = parseHunTaxNumber(buyerTaxNumber);
   const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
   const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);

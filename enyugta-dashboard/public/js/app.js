@@ -361,7 +361,7 @@ async function loadFinanceView() {
           <td>${fmtDateTime(inv.letrehozva)}</td>
           <td>${inv.tetelek.map((t) => escapeHtml(t.nev)).join(', ')}</td>
           <td class="td-right">${fmtHuf(inv.osszeg)}</td>
-          <td>${navBadge(inv)}${inv.navAllapot === 'BEKULDVE' ? `<button class="btn-tiny finance-nav-check-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Állapot lekérdezése</button>` : ''}${inv.navAllapot !== 'BEKULDVE' && inv.navTranzakcioId === null ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
+          <td>${navBadge(inv)}${inv.navAllapot === 'BEKULDVE' ? `<button class="btn-tiny finance-nav-check-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Állapot lekérdezése</button>` : ''}${inv.navAllapot !== 'BEKULDVE' ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
           <td>${inv.pdfElerheto ? `<a class="btn-tiny" href="/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(inv.pdfFajlnev)}" target="_blank">⬇ PDF</a>` : '<span class="muted">nincs fájl</span>'}</td>
         </tr>`).join('')
       : '<tr><td colspan="7" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
