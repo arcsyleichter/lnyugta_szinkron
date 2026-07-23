@@ -722,6 +722,8 @@ licenseDb.exec(`
     invoice_direction TEXT NOT NULL,
     invoice_number TEXT NOT NULL,
     synced_at TEXT NOT NULL,
+    raw_response_fajlnev TEXT,
+    lines_found INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ceg_kulcs, invoice_direction, invoice_number)
   );
 
@@ -794,6 +796,15 @@ licenseDb.exec(`
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
     }
+  }
+}
+// Migráció — a NAV számla-tartalom szinkronizálás diagnosztikai mezői
+// (korábbi telepítéseknél hiányozhatnak, ha a tábla már létezett).
+{
+  const cols = licenseDb.prepare(`PRAGMA table_info(company_nav_synced_invoices)`).all();
+  if (cols.length) {
+    if (!cols.some((c) => c.name === 'raw_response_fajlnev')) licenseDb.exec(`ALTER TABLE company_nav_synced_invoices ADD COLUMN raw_response_fajlnev TEXT`);
+    if (!cols.some((c) => c.name === 'lines_found')) licenseDb.exec(`ALTER TABLE company_nav_synced_invoices ADD COLUMN lines_found INTEGER NOT NULL DEFAULT 0`);
   }
 }
 // Migráció — a NAV-formátumú, strukturált számlázási cím mezői a
@@ -2667,10 +2678,18 @@ async function syncCompanyNavLines(cegKulcs, direction, dateFrom, dateTo, creds)
   const toSync = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).slice(0, NAV_LINE_SYNC_BATCH_SIZE);
 
   let syncedCount = 0;
+  let totalLinesFound = 0;
+  const errors = [];
   for (const inv of toSync) {
     try {
       const invoiceXml = await navQueryInvoiceData({ invoiceNumber: inv.invoiceNumber, direction, taxNumber: creds.taxNumber, creds });
+      // Átláthatóság/hibaelhárítás céljából a NYERS számla-XML-t is
+      // eltároljuk — ha egy számlánál 0 tételt találunk, ebből
+      // közvetlenül látszik, hogy a NAV válasza valóban nem tartalmazott
+      // tételsorokat, vagy a kinyerő logikánk hibás.
+      const rawFajlnev = saveNavRawResponse(`${cegKulcs}-${inv.invoiceNumber}`, `invoicedata-${direction}`, invoiceXml);
       const lines = extractInvoiceLines(invoiceXml);
+      totalLinesFound += lines.length;
       const partnerNev = direction === 'OUTBOUND' ? inv.customerName : inv.supplierName;
       const now = new Date().toISOString();
       for (const line of lines) {
@@ -2682,15 +2701,16 @@ async function syncCompanyNavLines(cegKulcs, direction, dateFrom, dateTo, creds)
           `).run(cegKulcs, direction, inv.invoiceNumber, inv.invoiceIssueDate || null, partnerNev || null, line.description, line.quantity, line.unitOfMeasure, line.netAmount, line.vatAmount, line.grossAmount, now);
         } catch (_) {}
       }
-      licenseDb.prepare(`INSERT INTO company_nav_synced_invoices (ceg_kulcs, invoice_direction, invoice_number, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-        .run(cegKulcs, direction, inv.invoiceNumber, now);
+      licenseDb.prepare(`INSERT INTO company_nav_synced_invoices (ceg_kulcs, invoice_direction, invoice_number, synced_at, raw_response_fajlnev, lines_found) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+        .run(cegKulcs, direction, inv.invoiceNumber, now, rawFajlnev, lines.length);
       syncedCount += 1;
     } catch (e) {
       console.error(`[NAV] Számla-tartalom szinkronizálási hiba (${inv.invoiceNumber}): ${e.message}`);
+      errors.push({ invoiceNumber: inv.invoiceNumber, message: e.message });
     }
   }
   const remaining = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).length - toSync.length;
-  return { synced: syncedCount, remaining: Math.max(0, remaining) };
+  return { synced: syncedCount, remaining: Math.max(0, remaining), linesFound: totalLinesFound, errors };
 }
 
 // Bejelentkezéskor induló, HÁTTÉRBEN futó automatikus szinkronizálás — ez
@@ -2733,7 +2753,7 @@ route('POST', '/api/profile/nav-sync-lines', async (req, res) => {
 
   try {
     const result = await syncCompanyNavLines(session.cegKulcs, direction, dateFrom, dateTo, creds);
-    sendJson(res, 200, { ok: true, synced: result.synced, remaining: result.remaining });
+    sendJson(res, 200, { ok: true, synced: result.synced, remaining: result.remaining, linesFound: result.linesFound, errors: result.errors });
   } catch (e) {
     sendJson(res, 500, { error: e.message });
   }
@@ -2766,6 +2786,38 @@ route('GET', '/api/profile/nav-line-analytics', async (req, res, query) => {
     direction, dateFrom, dateTo, szinkronizaltSzamlakSzama: syncedCount,
     topTermekek: [...termekek.values()].sort((a, b) => b.netto - a.netto).slice(0, 15),
   });
+});
+
+// A már szinkronizált számlák listája, tételszámmal és a nyers válasz
+// linkjével — átláthatóság/hibaelhárítás céljából (pl. ha egy számlánál
+// 0 tételt talált a rendszer, ebből közvetlenül látszik, miért).
+route('GET', '/api/profile/nav-synced-invoices', async (req, res, query) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const direction = query.direction === 'INBOUND' ? 'INBOUND' : 'OUTBOUND';
+  const rows = licenseDb.prepare(`
+    SELECT invoice_number, synced_at, raw_response_fajlnev, lines_found FROM company_nav_synced_invoices
+    WHERE ceg_kulcs = ? AND invoice_direction = ? ORDER BY synced_at DESC LIMIT 50
+  `).all(session.cegKulcs, direction);
+  sendJson(res, 200, {
+    invoices: rows.map((r) => ({ invoiceNumber: r.invoice_number, syncedAt: r.synced_at, linesFound: r.lines_found, rawResponseFajlnev: r.raw_response_fajlnev })),
+  });
+});
+
+route('GET', '/api/profile/nav-raw-response', async (req, res, query) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const fajlnev = String(query.fajlnev || '').replace(/[^a-zA-Z0-9._\-]/g, '');
+  if (!fajlnev) return sendJson(res, 400, { error: 'Hiányzó fájlnév.' });
+  // Csak a SAJÁT cégéhez tartozó fájlt nézheti meg — ezt a fájlnév elején
+  // szereplő cégkulccsal ellenőrizzük (lásd saveNavRawResponse hívása).
+  if (!fajlnev.startsWith(`${session.cegKulcs}-`)) return sendJson(res, 403, { error: 'Ehhez a fájlhoz nincs jogosultságod.' });
+  const exists = licenseDb.prepare(`SELECT 1 FROM company_nav_synced_invoices WHERE ceg_kulcs = ? AND raw_response_fajlnev = ?`).get(session.cegKulcs, fajlnev);
+  if (!exists) return sendJson(res, 404, { error: 'Nincs ilyen eltárolt válasz.' });
+  const filePath = path.join(NAV_RESPONSES_DIR, fajlnev);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található a szerveren.' });
+  res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Content-Disposition': `inline; filename="${fajlnev}"`, 'Cache-Control': 'private, max-age=3600' });
+  res.end(fs.readFileSync(filePath));
 });
 
 // ---------------------------------------------------------------------------

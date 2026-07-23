@@ -4544,6 +4544,7 @@ async function loadSzamlaimLineAnalytics() {
       : '<tr><td colspan="4" class="empty-state">Még nincs szinkronizált tételes adat ehhez az időszakhoz — nyomd meg a "Szinkronizálás" gombot.</td></tr>';
     msg.textContent = `${data.szinkronizaltSzamlakSzama} számla tételei szinkronizálva eddig (ebben az irányban, összesen).`;
     msg.style.color = '';
+    await loadSzamlaimSyncedList(direction);
   } catch (e) {
     msg.textContent = e.message;
     msg.style.color = 'var(--brick)';
@@ -4559,13 +4560,18 @@ listen('szamlaim-sync-btn', 'click', async (e) => {
   try {
     const result = await api('/api/profile/nav-sync-lines', { method: 'POST', body: JSON.stringify({ direction, dateFrom, dateTo }) });
     await loadSzamlaimLineAnalytics();
+    await loadSzamlaimSyncedList(direction);
+    let extra = '';
     if (result.remaining > 0) {
-      msg.textContent += ` (${result.synced} számla most feldolgozva, még ${result.remaining} van hátra — nyomd meg újra a folytatáshoz.)`;
+      extra = ` ${result.synced} számla most feldolgozva (összesen ${result.linesFound} tétellel), még ${result.remaining} van hátra — nyomd meg újra a folytatáshoz.`;
     } else if (result.synced > 0) {
-      msg.textContent += ` (${result.synced} új számla feldolgozva — kész.)`;
+      extra = ` ${result.synced} új számla feldolgozva, összesen ${result.linesFound} tétellel — kész.`;
+      if (result.linesFound === 0) extra += ' FIGYELEM: egyetlen tételt sem talált a rendszer ezekben a számlákban — nézd meg a lenti listában a "Nyers XML" linkeket, hogy lásd, mit küldött vissza a NAV.';
     } else {
-      msg.textContent += ' (nincs új, feldolgozandó számla ebben az időszakban.)';
+      extra = ' Nincs új, feldolgozandó számla ebben az időszakban.';
     }
+    if (result.errors?.length) extra += ` (${result.errors.length} számlánál hiba történt: ${result.errors[0].message})`;
+    msg.textContent += extra;
   } catch (err) {
     msg.textContent = err.message;
     msg.style.color = 'var(--brick)';
@@ -4573,6 +4579,25 @@ listen('szamlaim-sync-btn', 'click', async (e) => {
     btn.disabled = false; btn.textContent = 'Szinkronizálás';
   }
 });
+
+async function loadSzamlaimSyncedList(direction) {
+  const container = document.getElementById('szamlaim-synced-list');
+  if (!container) return;
+  try {
+    const data = await api(`/api/profile/nav-synced-invoices?direction=${direction}`);
+    container.innerHTML = data.invoices.length
+      ? `<table class="data-table"><thead><tr><th>Számlaszám</th><th>Szinkronizálva</th><th class="td-right">Talált tételek</th><th></th></tr></thead><tbody>${
+          data.invoices.map((inv) => `
+            <tr>
+              <td class="ntak-uuid">${escapeHtml(inv.invoiceNumber)}</td>
+              <td>${fmtDateTime(inv.syncedAt)}</td>
+              <td class="td-right">${inv.linesFound}</td>
+              <td>${inv.rawResponseFajlnev ? `<a class="btn-tiny" href="/api/profile/nav-raw-response?fajlnev=${encodeURIComponent(inv.rawResponseFajlnev)}" target="_blank">Nyers XML</a>` : ''}</td>
+            </tr>`).join('')
+        }</tbody></table>`
+      : '<p class="muted" style="font-size:12.5px;">Még nincs szinkronizált számla ebben az irányban.</p>';
+  } catch (_) { /* nem kritikus */ }
+}
 
 async function loadSyncView() {
   const box = document.getElementById('sync-status-box');
