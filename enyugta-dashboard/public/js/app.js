@@ -4932,9 +4932,7 @@ async function loadProfilBillingAddress(isManager) {
     fieldsBox.innerHTML = navAddressFieldsHtml('profil-billing', data, navKozteruletJellegekCache);
     wireNavAddressJellegCustom('profil-billing', navKozteruletJellegekCache);
     saveBtn.hidden = isManager;
-    if (isManager) {
-      fieldsBox.querySelectorAll('input, select').forEach((el) => { el.disabled = true; });
-    }
+    fieldsBox.querySelectorAll('input, select').forEach((el) => { el.disabled = isManager; });
   } catch (e) {
     fieldsBox.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
   }
@@ -4970,8 +4968,8 @@ async function loadProfilNavCredentials(isManager) {
     document.getElementById('profil-nav-techuser').value = data.techUser || '';
     document.getElementById('profil-nav-sandbox').value = data.sandbox === false ? '0' : '1';
     saveBtn.hidden = isManager;
+    form.querySelectorAll('input, select').forEach((el) => { el.disabled = isManager; });
     if (isManager) {
-      form.querySelectorAll('input, select').forEach((el) => { el.disabled = true; });
       testBtn.hidden = true;
     }
   } catch (e) {
