@@ -2245,6 +2245,7 @@ route('POST', '/api/auth/user-login', async (req, res) => {
     return sendJson(res, 401, { error: 'Hibás email cím vagy jelszó.' });
   }
   recordLoginAttempt(ip, clean, true);
+  triggerBackgroundNavSync(u.ceg_kulcs);
 
   if (u.role === 'manager') {
     // Üzletvezető — mindig egy KONKRÉT, rögzített telephelyre szól a hozzáférése.
@@ -2654,6 +2655,68 @@ route('GET', '/api/profile/nav-invoices', async (req, res, query) => {
 // amíg minden számla feldolgozásra nem kerül (a már feldolgozottakat nem
 // kérdezzük le újra).
 const NAV_LINE_SYNC_BATCH_SIZE = 15;
+// A TELJES tartalom (tételsorok) szinkronizálásának közös, újrahasznosítható
+// magja — ugyanezt hívja a kézi "Szinkronizálás" gomb ÉS a bejelentkezéskor
+// induló, háttérben futó automatikus szinkronizálás is.
+async function syncCompanyNavLines(cegKulcs, direction, dateFrom, dateTo, creds) {
+  const digest = await navQueryInvoiceDigest({ direction, dateFrom, dateTo, page: 1, creds });
+  const alreadySynced = new Set(
+    licenseDb.prepare(`SELECT invoice_number FROM company_nav_synced_invoices WHERE ceg_kulcs = ? AND invoice_direction = ?`)
+      .all(cegKulcs, direction).map((r) => r.invoice_number)
+  );
+  const toSync = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).slice(0, NAV_LINE_SYNC_BATCH_SIZE);
+
+  let syncedCount = 0;
+  for (const inv of toSync) {
+    try {
+      const invoiceXml = await navQueryInvoiceData({ invoiceNumber: inv.invoiceNumber, direction, taxNumber: creds.taxNumber, creds });
+      const lines = extractInvoiceLines(invoiceXml);
+      const partnerNev = direction === 'OUTBOUND' ? inv.customerName : inv.supplierName;
+      const now = new Date().toISOString();
+      for (const line of lines) {
+        try {
+          licenseDb.prepare(`
+            INSERT INTO company_nav_invoice_lines (ceg_kulcs, invoice_direction, invoice_number, invoice_issue_date, partner_name, line_description, quantity, unit_of_measure, net_amount, vat_amount, gross_amount, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+          `).run(cegKulcs, direction, inv.invoiceNumber, inv.invoiceIssueDate || null, partnerNev || null, line.description, line.quantity, line.unitOfMeasure, line.netAmount, line.vatAmount, line.grossAmount, now);
+        } catch (_) {}
+      }
+      licenseDb.prepare(`INSERT INTO company_nav_synced_invoices (ceg_kulcs, invoice_direction, invoice_number, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+        .run(cegKulcs, direction, inv.invoiceNumber, now);
+      syncedCount += 1;
+    } catch (e) {
+      console.error(`[NAV] Számla-tartalom szinkronizálási hiba (${inv.invoiceNumber}): ${e.message}`);
+    }
+  }
+  const remaining = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).length - toSync.length;
+  return { synced: syncedCount, remaining: Math.max(0, remaining) };
+}
+
+// Bejelentkezéskor induló, HÁTTÉRBEN futó automatikus szinkronizálás — ez
+// SOHA nem blokkolhatja/lassíthatja a bejelentkezést magát, ezért
+// SZÁNDÉKOSAN nincs "await"-elve a hívási helyén (fire-and-forget). Csak
+// akkor csinál bármit, ha a cégnek ténylegesen be van állítva a saját
+// NAV-kapcsolata.
+function triggerBackgroundNavSync(cegKulcs) {
+  const creds = getCompanyNavCreds(cegKulcs);
+  if (!navCredsComplete(creds)) return;
+  const dateTo = todayIsoServer();
+  const dateFrom = addDaysISO(dateTo, -30);
+  (async () => {
+    for (const direction of ['OUTBOUND', 'INBOUND']) {
+      try {
+        const result = await syncCompanyNavLines(cegKulcs, direction, dateFrom, dateTo, creds);
+        if (result.synced > 0) {
+          logActivity({ type: 'nav_line_sync', ok: true, companyKey: cegKulcs, nev: null, detail: `Bejelentkezéskori automatikus szinkronizálás (${direction}): ${result.synced} számla` });
+        }
+      } catch (e) {
+        console.error(`[NAV] Bejelentkezéskori automatikus szinkronizálási hiba (${cegKulcs}, ${direction}): ${e.message}`);
+      }
+    }
+  })();
+}
+
 route('POST', '/api/profile/nav-sync-lines', async (req, res) => {
   const session = requireCegAuth(req);
   if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
@@ -2669,39 +2732,8 @@ route('POST', '/api/profile/nav-sync-lines', async (req, res) => {
   }
 
   try {
-    const digest = await navQueryInvoiceDigest({ direction, dateFrom, dateTo, page: 1, creds });
-    const alreadySynced = new Set(
-      licenseDb.prepare(`SELECT invoice_number FROM company_nav_synced_invoices WHERE ceg_kulcs = ? AND invoice_direction = ?`)
-        .all(session.cegKulcs, direction).map((r) => r.invoice_number)
-    );
-    const toSync = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).slice(0, NAV_LINE_SYNC_BATCH_SIZE);
-
-    let syncedCount = 0;
-    for (const inv of toSync) {
-      try {
-        const invoiceXml = await navQueryInvoiceData({ invoiceNumber: inv.invoiceNumber, direction, taxNumber: creds.taxNumber, creds });
-        const lines = extractInvoiceLines(invoiceXml);
-        const partnerNev = direction === 'OUTBOUND' ? inv.customerName : inv.supplierName;
-        const now = new Date().toISOString();
-        for (const line of lines) {
-          try {
-            licenseDb.prepare(`
-              INSERT INTO company_nav_invoice_lines (ceg_kulcs, invoice_direction, invoice_number, invoice_issue_date, partner_name, line_description, quantity, unit_of_measure, net_amount, vat_amount, gross_amount, synced_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT DO NOTHING
-            `).run(session.cegKulcs, direction, inv.invoiceNumber, inv.invoiceIssueDate || null, partnerNev || null, line.description, line.quantity, line.unitOfMeasure, line.netAmount, line.vatAmount, line.grossAmount, now);
-          } catch (_) {}
-        }
-        licenseDb.prepare(`INSERT INTO company_nav_synced_invoices (ceg_kulcs, invoice_direction, invoice_number, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-          .run(session.cegKulcs, direction, inv.invoiceNumber, now);
-        syncedCount += 1;
-      } catch (e) {
-        console.error(`[NAV] Számla-tartalom szinkronizálási hiba (${inv.invoiceNumber}): ${e.message}`);
-      }
-    }
-
-    const remaining = digest.invoices.filter((inv) => inv.invoiceNumber && !alreadySynced.has(inv.invoiceNumber)).length - toSync.length;
-    sendJson(res, 200, { ok: true, synced: syncedCount, remaining: Math.max(0, remaining) });
+    const result = await syncCompanyNavLines(session.cegKulcs, direction, dateFrom, dateTo, creds);
+    sendJson(res, 200, { ok: true, synced: result.synced, remaining: result.remaining });
   } catch (e) {
     sendJson(res, 500, { error: e.message });
   }

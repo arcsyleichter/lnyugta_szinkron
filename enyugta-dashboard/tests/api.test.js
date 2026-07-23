@@ -218,6 +218,26 @@ test('Meghívás folyamata', async (t) => {
     });
     assert.equal(finalLoginRes.status, 200);
   });
+
+  await t.test('valódi bejelentkezés (nem impersonate) NAV-kapcsolattal beállított cégnél is azonnal, hiba nélkül válaszol — a bejelentkezéskori háttér-szinkronizálás nem blokkolhatja a választ', async () => {
+    const cookie = extractCookie(await fetch(`${server.baseUrl}/api/auth/user-login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'teszt.uj@example.com', password: 'UjJelszo2026' }),
+    }));
+    await fetch(`${server.baseUrl}/api/profile/nav-credentials`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ taxNumber: '90143287', techUser: 'teszt-fh', techPassword: 'jelszo123', signingKey: 'kulcs123', exchangeKey: 'csere123', sandbox: true }),
+    });
+
+    const start = Date.now();
+    const loginRes = await fetch(`${server.baseUrl}/api/auth/user-login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'teszt.uj@example.com', password: 'UjJelszo2026' }),
+    });
+    const elapsedMs = Date.now() - start;
+    assert.equal(loginRes.status, 200);
+    assert.ok(elapsedMs < 3000, `a bejelentkezésnek gyorsnak kell maradnia (mért idő: ${elapsedMs}ms) — a NAV-szinkronizálás nem futhat a válasz előtt`);
+  });
 });
 
 test('Alapvető adat-végpontok', async (t) => {
