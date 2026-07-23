@@ -6024,6 +6024,13 @@ ${navSoftwareXml()}
 // Egyetlen számla-XML beküldése a NAV-nak (manageInvoice, CREATE operáció).
 // Visszaadja a NAV tranzakció-azonosítóját, amivel a feldolgozás állapota
 // később lekérdezhető (a NAV 2-30 másodperc alatt dolgozza fel).
+// Egyetlen számla-XML beküldése a NAV-nak (manageInvoice, CREATE operáció).
+// FONTOS: a belső <invoiceOperation>CREATE</invoiceOperation> mezőnév a
+// NAV saját sémavalidátorának hibaüzenetével közvetlenül megerősítve —
+// igen, ez ugyanaz a név, mint a körülötte lévő szülő elemé, ami
+// szokatlan, de a v3.0 séma pontosan ezt várja (a korábbi v2.0
+// dokumentáció "operation"/"invoice" neveket használt, de ezek a v3.0-ban
+// már NEM érvényesek).
 async function navSubmitInvoice(invoiceDataXml) {
   const { token } = await navTokenExchange();
   const requestId = navRequestId();
@@ -6044,8 +6051,8 @@ ${navSoftwareXml()}
   <compressedContent>false</compressedContent>
   <invoiceOperation>
     <index>1</index>
-    <operation>CREATE</operation>
-    <invoice>${base64Content}</invoice>
+    <invoiceOperation>CREATE</invoiceOperation>
+    <invoiceData>${base64Content}</invoiceData>
   </invoiceOperation>
 </invoiceOperations>
 </ManageInvoiceRequest>`;
