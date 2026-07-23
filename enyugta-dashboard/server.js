@@ -3647,6 +3647,32 @@ route('POST', '/api/admin/finance/resend-nav', async (req, res) => {
   }
 });
 
+// A NAV aszinkron dolgozza fel a beküldött számlákat — ez a végpont a
+// tranzakció-azonosítóval lekérdezi a TÉNYLEGES feldolgozási eredményt
+// (elfogadva / figyelmeztetéssel / elutasítva), és frissíti a tárolt
+// állapotot ez alapján.
+route('POST', '/api/admin/finance/check-nav-status', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (!navConfigured()) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva.' });
+  const { szamlaSorszam } = await readJsonBody(req);
+  if (!szamlaSorszam) return sendJson(res, 400, { error: 'Hiányzó számlasorszám.' });
+
+  const row = licenseDb.prepare(`SELECT nav_transaction_id, ceg_kulcs FROM license_payments WHERE szamla_sorszam = ? AND nav_transaction_id IS NOT NULL LIMIT 1`).get(szamlaSorszam);
+  if (!row?.nav_transaction_id) return sendJson(res, 404, { error: 'Ehhez a számlához nincs eltárolt NAV tranzakció-azonosító.' });
+
+  try {
+    const result = await navQueryTransactionStatus(row.nav_transaction_id);
+    const ujAllapot = result.processingResult || 'FELDOLGOZÁS ALATT';
+    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = ?, nav_uzenet = ? WHERE szamla_sorszam = ?`)
+      .run(ujAllapot, result.businessValidationMessages.join(' | ') || null, szamlaSorszam);
+    logActivity({ type: 'nav_status_check', ok: true, companyKey: row.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV állapot lekérdezve: ${szamlaSorszam} → ${ujAllapot}` });
+    sendJson(res, 200, { ok: true, allapot: ujAllapot, uzenetek: result.businessValidationMessages, raw: result.raw.slice(0, 1500) });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // REGISZTRÁCIÓK — Cég → Telephely(ek) → Eszköz(ök) hierarchia, a régi
 // LSZAMLA rendszerből importált adatokból, a saját L-NYUGTA cég-

@@ -350,6 +350,7 @@ async function loadFinanceView() {
     const navBadge = (inv) => {
       if (inv.navAllapot === 'BEKULDVE') return `<span class="licenc-badge licenc-badge--ok" style="font-size:10px;" title="Tranzakció: ${escapeHtml(inv.navTranzakcioId || '')}">✓ beküldve</span>`;
       if (inv.navAllapot === 'HIBA') return `<span class="licenc-badge" style="font-size:10px;background:#FBE4E1;color:var(--brick);" title="${escapeHtml(inv.navUzenet || '')}">✗ hiba</span>`;
+      if (inv.navAllapot) return `<span class="licenc-badge" style="font-size:10px;background:#EFEFEF;" title="${escapeHtml(inv.navUzenet || '')}">${escapeHtml(inv.navAllapot)}</span>`;
       return '<span class="muted" style="font-size:11px;">—</span>';
     };
     invoicesBody.innerHTML = invoicesData.invoices.length
@@ -360,10 +361,23 @@ async function loadFinanceView() {
           <td>${fmtDateTime(inv.letrehozva)}</td>
           <td>${inv.tetelek.map((t) => escapeHtml(t.nev)).join(', ')}</td>
           <td class="td-right">${fmtHuf(inv.osszeg)}</td>
-          <td>${navBadge(inv)}${inv.navAllapot !== 'BEKULDVE' ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
+          <td>${navBadge(inv)}${inv.navAllapot === 'BEKULDVE' ? `<button class="btn-tiny finance-nav-check-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Állapot lekérdezése</button>` : ''}${inv.navAllapot !== 'BEKULDVE' && inv.navTranzakcioId === null ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
           <td>${inv.pdfElerheto ? `<a class="btn-tiny" href="/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(inv.pdfFajlnev)}" target="_blank">⬇ PDF</a>` : '<span class="muted">nincs fájl</span>'}</td>
         </tr>`).join('')
       : '<tr><td colspan="7" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
+    invoicesBody.querySelectorAll('.finance-nav-check-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          const result = await api('/api/admin/finance/check-nav-status', { method: 'POST', body: JSON.stringify({ szamlaSorszam: btn.dataset.szamla }) });
+          alert(`NAV állapot: ${result.allapot}${result.uzenetek?.length ? '\n\n' + result.uzenetek.join('\n') : ''}`);
+          loadFinanceView();
+        } catch (e) {
+          alert('Nem sikerült lekérdezni: ' + e.message);
+          btn.disabled = false; btn.textContent = 'Állapot lekérdezése';
+        }
+      });
+    });
     invoicesBody.querySelectorAll('.finance-nav-resend-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
         btn.disabled = true; btn.textContent = '…';
