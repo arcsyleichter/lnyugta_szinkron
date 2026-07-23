@@ -70,6 +70,12 @@ async function startTestServer({ port } = {}) {
       MYPOS_PRIVATE_KEY_PATH: privateKeyPath,
       MYPOS_PUBLIC_CERT_PATH: publicCertPath,
       MYPOS_SANDBOX: '1',
+      NAV_SANDBOX: '1',
+      NAV_TAXNUMBER: '90143287',
+      NAV_TECH_USER: 'teszt-technikai-felhasznalo',
+      NAV_TECH_PASSWORD: 'TesztJelszo2026',
+      NAV_SIGNING_KEY: 'teszt-alairokulcs-0123456789ABCDEF',
+      NAV_EXCHANGE_KEY: 'tesztcserekulcs16',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

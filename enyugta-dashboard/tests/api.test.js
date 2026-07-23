@@ -487,6 +487,80 @@ test('NAV-formátumú cím — számlázási cím és telephely-cím', async (t)
   });
 });
 
+test('Ügyfél-oldali NAV Online Számla kapcsolat — hitelesítő adatok és lekérdezés', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.stop());
+
+  async function getCompanySession() {
+    const loginRes = await fetch(`${server.baseUrl}/api/admin/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: server.adminPassword }),
+    });
+    const adminCookie = extractCookie(loginRes);
+    const impersonateRes = await fetch(`${server.baseUrl}/api/admin/impersonate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ companyKey: '18774455:01' }),
+    });
+    return extractCookie(impersonateRes);
+  }
+
+  await t.test('kezdetben nincs beállítva NAV-kapcsolat', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/nav-credentials`, { headers: { Cookie: cookie } });
+    const body = await res.json();
+    assert.equal(body.configured, false);
+  });
+
+  await t.test('a hitelesítő adatok elmenthetők, és az érzékeny mezők SOSEM jönnek vissza nyílt szövegben', async () => {
+    const cookie = await getCompanySession();
+    const saveRes = await fetch(`${server.baseUrl}/api/profile/nav-credentials`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({
+        taxNumber: '18774455', techUser: 'sajat-technikai-felhasznalo', techPassword: 'TitkosJelszo123!',
+        signingKey: 'sajat-alairokulcs-ABCDEF', exchangeKey: 'sajatcserekulcs16', sandbox: true,
+      }),
+    });
+    assert.equal(saveRes.status, 200);
+
+    const getRes = await fetch(`${server.baseUrl}/api/profile/nav-credentials`, { headers: { Cookie: cookie } });
+    const getBody = await getRes.json();
+    assert.equal(getBody.configured, true);
+    assert.equal(getBody.taxNumber, '18774455');
+    assert.equal(getBody.techUser, 'sajat-technikai-felhasznalo');
+    // Az érzékeny mezők (jelszó, kulcsok) NEM szerepelhetnek a válaszban.
+    const responseText = JSON.stringify(getBody);
+    assert.ok(!responseText.includes('TitkosJelszo123'), 'a jelszó soha nem kerülhet vissza a böngészőnek');
+    assert.ok(!responseText.includes('sajat-alairokulcs'), 'az aláírókulcs soha nem kerülhet vissza a böngészőnek');
+  });
+
+  await t.test('az adatbázisban a jelszó ténylegesen titkosítva van tárolva, nem nyílt szövegként', async () => {
+    // Közvetlenül ellenőrizzük az adatbázis tartalmát (nem az API-n
+    // keresztül) — a nyers, tárolt mezőnek NEM szabad tartalmaznia a
+    // jelszót olvasható formában.
+    const DatabaseSync = require('node:sqlite').DatabaseSync;
+    const db = new DatabaseSync(require('node:path').join(server.dataDir, 'license.db'), { readOnly: true });
+    const row = db.prepare(`SELECT nav_tech_password_enc FROM company_nav_credentials WHERE ceg_kulcs = ?`).get('18774455');
+    db.close();
+    assert.ok(row, 'a sornak léteznie kell');
+    assert.ok(!row.nav_tech_password_enc.includes('TitkosJelszo123'), 'a jelszó nem tárolható nyílt szövegként');
+  });
+
+  await t.test('a kapcsolat tesztelése és a számla-lekérdezés lefut (hálózat nélkül hibával, de nem összeomlással)', async () => {
+    const cookie = await getCompanySession();
+    const testRes = await fetch(`${server.baseUrl}/api/profile/nav-test-connection`, { method: 'POST', headers: { Cookie: cookie } });
+    assert.equal(testRes.status, 500, 'a sandbox-kornyezetben nincs halozat, a hivasnak hibaznia kell, de a szervernek valaszolnia kell');
+
+    const invRes = await fetch(`${server.baseUrl}/api/profile/nav-invoices?direction=OUTBOUND`, { headers: { Cookie: cookie } });
+    assert.equal(invRes.status, 500);
+  });
+
+  await t.test('35 napnál hosszabb időszak lekérdezése elutasításra kerül', async () => {
+    const cookie = await getCompanySession();
+    const res = await fetch(`${server.baseUrl}/api/profile/nav-invoices?direction=OUTBOUND&dateFrom=2026-01-01&dateTo=2026-03-01`, { headers: { Cookie: cookie } });
+    assert.equal(res.status, 400);
+  });
+});
+
 test('Telephelyenkénti önkiszolgáló funkció-választás', async (t) => {
   const server = await startTestServer();
   t.after(() => server.stop());
@@ -704,6 +778,64 @@ test('Admin — Pénzügyek: bevétel-áttekintés és számla-PDF letöltés', 
     const invoice = invoicesBody.invoices.find((i) => i.tetelek.some((t) => t.nev === 'Vonalkód generálás'));
     assert.ok(invoice, 'a számlának EL KELL KÉSZÜLNIE akkor is, ha az email küldése nem sikerült');
     assert.equal(invoice.pdfElerheto, true);
+  });
+  await t.test('az automatikus NAV háttér-ciklus újrapróbálja a korábban sikertelen beküldést, és növeli a próbálkozás-számlálót', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'AUTOCIKLUS', nev: 'Auto-ciklus teszt', alapAr: 500 }),
+    });
+    const cookie = await getCompanySession();
+    const payRes = await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['AUTOCIKLUS'] }),
+    });
+    assert.equal(payRes.status, 200);
+
+    // A sandbox-környezetben nincs valódi hálózat, így a NAV-beküldés
+    // garantáltan hibázik — ez pontosan a "sikertelen beküldés" ágat
+    // gyakorolja be, amit az automatikus ciklusnak újra kell próbálnia.
+    const invoicesRes1 = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody1 = await invoicesRes1.json();
+    const invoice1 = invoicesBody1.invoices.find((i) => i.tetelek.some((t) => t.nev === 'Auto-ciklus teszt'));
+    assert.equal(invoice1.navAllapot, 'HIBA');
+    assert.equal(invoice1.navRetryCount, 0);
+    assert.ok(invoice1.navRawResponseFajlnev === null || invoice1.navRawResponseFajlnev === undefined, 'tiszta halozati hibanal nincs nyers NAV-valasz (a hivas meg sem jutott el a NAV-ig)');
+
+    const cycleRes = await fetch(`${server.baseUrl}/api/admin/nav/run-auto-cycle`, { method: 'POST', headers: { Cookie: adminCookie } });
+    assert.equal(cycleRes.status, 200);
+
+    const invoicesRes2 = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody2 = await invoicesRes2.json();
+    const invoice2 = invoicesBody2.invoices.find((i) => i.tetelek.some((t) => t.nev === 'Auto-ciklus teszt'));
+    assert.equal(invoice2.navRetryCount, 1, 'az automatikus ciklusnak növelnie kell a próbálkozás-számlálót');
+  });
+
+  await t.test('a sikertelen NAV-beküldés hibaüzenete letölthető formában, XML-ként eltárolásra kerül', async () => {
+    const adminCookie = await getAdminCookie();
+    await fetch(`${server.baseUrl}/api/admin/license/features/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ key: 'XMLTESZT', nev: 'XML teszt funkció', alapAr: 300 }),
+    });
+    const cookie = await getCompanySession();
+    await fetch(`${server.baseUrl}/api/payment/demo-pay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ featureKeys: ['XMLTESZT'] }),
+    });
+    // Manuális "Most" gomb (Újraküldés) — ez SEM ér hálózatot, de a
+    // próbálkozás-számlálónak akkor is nőnie kell.
+    const invoicesRes = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody = await invoicesRes.json();
+    const invoice = invoicesBody.invoices.find((i) => i.tetelek.some((t) => t.nev === 'XML teszt funkció'));
+    const resendRes = await fetch(`${server.baseUrl}/api/admin/finance/resend-nav`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+      body: JSON.stringify({ szamlaSorszam: invoice.szamlaSorszam }),
+    });
+    assert.equal(resendRes.status, 400, 'halozat nelkul a manualis ujrakuldes is sikertelen kell legyen');
+    const invoicesRes2 = await fetch(`${server.baseUrl}/api/admin/finance/invoices`, { headers: { Cookie: adminCookie } });
+    const invoicesBody2 = await invoicesRes2.json();
+    const invoice2 = invoicesBody2.invoices.find((i) => i.tetelek.some((t) => t.nev === 'XML teszt funkció'));
+    assert.equal(invoice2.navRetryCount, 1, 'a manualis ujrakuldesnek is novelnie kell a probalkozas-szamlalot');
   });
 });
 

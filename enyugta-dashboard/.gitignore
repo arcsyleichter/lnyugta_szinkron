@@ -30,6 +30,7 @@ data/companies/*.db.uploading
 data/companies/
 data/uploads/
 data/invoices/
+data/nav-responses/
 data/users.db
 
 # OS / szerkesztő

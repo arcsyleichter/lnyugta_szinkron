@@ -394,9 +394,10 @@ async function loadFinanceView() {
 
     const invoicesBody = document.querySelector('#finance-invoices-table tbody');
     const navBadge = (inv) => {
+      const retrySuffix = inv.navRetryCount > 0 ? ` (${inv.navRetryCount}. próba)` : '';
       if (inv.navAllapot === 'BEKULDVE') return `<span class="licenc-badge licenc-badge--ok" style="font-size:10px;" title="Tranzakció: ${escapeHtml(inv.navTranzakcioId || '')}">✓ beküldve</span>`;
-      if (inv.navAllapot === 'HIBA') return `<span class="licenc-badge" style="font-size:10px;background:#FBE4E1;color:var(--brick);" title="${escapeHtml(inv.navUzenet || '')}">✗ hiba</span>`;
-      if (inv.navAllapot) return `<span class="licenc-badge" style="font-size:10px;background:#EFEFEF;" title="${escapeHtml(inv.navUzenet || '')}">${escapeHtml(inv.navAllapot)}</span>`;
+      if (inv.navAllapot === 'HIBA') return `<span class="licenc-badge" style="font-size:10px;background:#FBE4E1;color:var(--brick);" title="${escapeHtml(inv.navUzenet || '')}">✗ hiba${retrySuffix}</span>`;
+      if (inv.navAllapot) return `<span class="licenc-badge" style="font-size:10px;background:#EFEFEF;" title="${escapeHtml(inv.navUzenet || '')}">${escapeHtml(inv.navAllapot)}${retrySuffix}</span>`;
       return '<span class="muted" style="font-size:11px;">—</span>';
     };
     invoicesBody.innerHTML = invoicesData.invoices.length
@@ -407,7 +408,7 @@ async function loadFinanceView() {
           <td>${fmtDateTime(inv.letrehozva)}</td>
           <td>${inv.tetelek.map((t) => escapeHtml(t.nev)).join(', ')}</td>
           <td class="td-right">${fmtHuf(inv.osszeg)}</td>
-          <td>${navBadge(inv)}${inv.navAllapot === 'BEKULDVE' ? `<button class="btn-tiny finance-nav-check-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Állapot lekérdezése</button>` : ''}${inv.navAllapot !== 'BEKULDVE' ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;">Újraküldés</button>` : ''}</td>
+          <td>${navBadge(inv)}${inv.navAllapot === 'BEKULDVE' ? `<button class="btn-tiny finance-nav-check-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;" title="A rendszer amúgy is automatikusan lekérdezi 15 percenként">Most</button>` : ''}${inv.navAllapot !== 'BEKULDVE' ? `<button class="btn-tiny finance-nav-resend-btn" data-szamla="${escapeHtml(inv.szamlaSorszam)}" style="margin-left:6px;" title="A rendszer amúgy is automatikusan újrapróbálja 15 percenként">Most</button>` : ''}${inv.navRawResponseFajlnev ? `<a class="btn-tiny" href="/api/admin/finance/nav-response?fajlnev=${encodeURIComponent(inv.navRawResponseFajlnev)}" target="_blank" style="margin-left:6px;">XML</a>` : ''}</td>
           <td>${inv.pdfElerheto ? `<a class="btn-tiny" href="/api/admin/finance/invoice-pdf?fajlnev=${encodeURIComponent(inv.pdfFajlnev)}" target="_blank">⬇ PDF</a>` : '<span class="muted">nincs fájl</span>'}</td>
         </tr>`).join('')
       : '<tr><td colspan="7" class="empty-state">Még nem készült egyetlen számla sem.</td></tr>';
@@ -420,7 +421,7 @@ async function loadFinanceView() {
           loadFinanceView();
         } catch (e) {
           alert('Nem sikerült lekérdezni: ' + e.message);
-          btn.disabled = false; btn.textContent = 'Állapot lekérdezése';
+          btn.disabled = false; btn.textContent = 'Most';
         }
       });
     });
@@ -432,7 +433,7 @@ async function loadFinanceView() {
           loadFinanceView();
         } catch (e) {
           alert('Nem sikerült újraküldeni: ' + e.message);
-          btn.disabled = false; btn.textContent = 'Újraküldés';
+          btn.disabled = false; btn.textContent = 'Most';
         }
       });
     });
@@ -2293,6 +2294,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
     if (view === 'stock') loadStockView();
     if (view === 'stock-receipt') { loadStockProductList(); loadStockReceiptLog(); }
     if (view === 'sync') loadSyncView();
+    if (view === 'nav-szamlaim') loadSzamlaimView();
     if (view === 'profil') loadProfilView();
     closeMobileSidebar(); // mobilon navigáció után zárja a kihúzható menüt
     document.querySelectorAll('.mobile-tab-btn').forEach((b) => {
@@ -4449,6 +4451,81 @@ listen('md-import-file', 'change', async (e) => {
 /* ============================================================
    Szinkronizáció nézet
    ============================================================ */
+async function loadSzamlaimView() {
+  const notConfiguredCard = document.getElementById('szamlaim-not-configured-card');
+  const contentCard = document.getElementById('szamlaim-content-card');
+  const monthlyCard = document.getElementById('szamlaim-monthly-card');
+  const partnersCard = document.getElementById('szamlaim-partners-card');
+  try {
+    const creds = await api('/api/profile/nav-credentials');
+    if (!creds.configured) {
+      notConfiguredCard.hidden = false;
+      contentCard.hidden = true; monthlyCard.hidden = true; partnersCard.hidden = true;
+      return;
+    }
+    notConfiguredCard.hidden = true;
+    contentCard.hidden = false; monthlyCard.hidden = false; partnersCard.hidden = false;
+    await refreshSzamlaim();
+  } catch (e) {
+    notConfiguredCard.hidden = false;
+    notConfiguredCard.querySelector('.card-subtitle').textContent = e.message;
+  }
+}
+async function refreshSzamlaim() {
+  const tbody = document.querySelector('#szamlaim-table tbody');
+  const msg = document.getElementById('szamlaim-msg');
+  const direction = document.getElementById('szamlaim-direction').value;
+  const dateFromInput = document.getElementById('szamlaim-date-from');
+  const dateToInput = document.getElementById('szamlaim-date-to');
+  if (!dateToInput.value) {
+    const today = new Date();
+    const from = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+    dateToInput.value = today.toISOString().slice(0, 10);
+    dateFromInput.value = from.toISOString().slice(0, 10);
+  }
+  msg.textContent = ''; msg.style.color = '';
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Betöltés…</td></tr>';
+  try {
+    const params = new URLSearchParams({ direction, dateFrom: dateFromInput.value, dateTo: dateToInput.value });
+    const data = await api(`/api/profile/nav-invoices?${params}`);
+    tbody.innerHTML = data.invoices.length
+      ? data.invoices.map((inv) => `
+        <tr>
+          <td class="ntak-uuid">${escapeHtml(inv.invoiceNumber || '—')}</td>
+          <td>${escapeHtml(inv.invoiceIssueDate || '—')}</td>
+          <td>${escapeHtml(inv.supplierName || '—')}</td>
+          <td>${escapeHtml(inv.customerName || '—')}</td>
+          <td class="td-right">${inv.invoiceNetAmountHUF ? fmtHuf(Number(inv.invoiceNetAmountHUF)) : '—'}</td>
+          <td class="td-right">${inv.invoiceVatAmountHUF ? fmtHuf(Number(inv.invoiceVatAmountHUF)) : '—'}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6" class="empty-state">Nincs számla ebben az irányban, a megadott időszakban.</td></tr>';
+    msg.textContent = `${data.invoiceCountAll || data.invoices.length} számla (${data.dateFrom} – ${data.dateTo}).`;
+
+    const monthlyBody = document.querySelector('#szamlaim-monthly-table tbody');
+    const monthNames = ['január', 'február', 'március', 'április', 'május', 'június', 'július', 'augusztus', 'szeptember', 'október', 'november', 'december'];
+    monthlyBody.innerHTML = data.havonta.length
+      ? data.havonta.map((h) => {
+          const [ev, honap] = h.honap.split('-');
+          return `<tr><td>${monthNames[parseInt(honap, 10) - 1]} ${ev}</td><td class="td-right">${h.darab}</td><td class="td-right">${fmtHuf(h.osszeg)}</td></tr>`;
+        }).join('')
+      : '<tr><td colspan="3" class="empty-state">Nincs adat.</td></tr>';
+
+    document.getElementById('szamlaim-partners-title').textContent = direction === 'OUTBOUND' ? 'Top vevők' : 'Top beszállítók';
+    const partnersBody = document.querySelector('#szamlaim-partners-table tbody');
+    partnersBody.innerHTML = data.topPartnerek.length
+      ? data.topPartnerek.map((p) => `<tr><td>${escapeHtml(p.nev)}</td><td class="td-right">${p.darab}</td><td class="td-right">${fmtHuf(p.osszeg)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty-state">Nincs adat.</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nem sikerült betölteni.</td></tr>';
+    msg.textContent = e.message;
+    msg.style.color = 'var(--brick)';
+  }
+}
+listen('szamlaim-refresh-btn', 'click', refreshSzamlaim);
+listen('szamlaim-direction', 'change', refreshSzamlaim);
+listen('szamlaim-date-from', 'change', refreshSzamlaim);
+listen('szamlaim-date-to', 'change', refreshSzamlaim);
+
 async function loadSyncView() {
   const box = document.getElementById('sync-status-box');
   try {
@@ -4497,6 +4574,7 @@ async function loadProfilView() {
     loadProfilNtakSetting(isManager);
     loadProfilFeatures();
     await loadProfilBillingAddress(isManager);
+    await loadProfilNavCredentials(isManager);
     document.getElementById('profil-telephely-new-address').innerHTML = navAddressFieldsHtml('profil-telephely-new', {}, navKozteruletJellegekCache);
     wireNavAddressJellegCustom('profil-telephely-new', navKozteruletJellegekCache);
   } catch (e) {
@@ -4874,6 +4952,69 @@ listen('profil-billing-address-form', 'submit', async (e) => {
   }
 });
 
+async function loadProfilNavCredentials(isManager) {
+  const desc = document.getElementById('profil-nav-desc');
+  const testBtn = document.getElementById('profil-nav-test-btn');
+  const saveBtn = document.getElementById('profil-nav-save-btn');
+  const form = document.getElementById('profil-nav-form');
+  try {
+    const data = await api('/api/profile/nav-credentials');
+    if (data.configured) {
+      desc.innerHTML = `<b>Beállítva</b> — ${data.sandbox ? 'teszt' : 'éles'} környezet, technikai felhasználó: ${escapeHtml(data.techUser)}, adószám: ${escapeHtml(data.taxNumber)}`;
+      testBtn.hidden = false;
+    } else {
+      desc.innerHTML = '<span class="muted">Még nincs beállítva.</span>';
+      testBtn.hidden = true;
+    }
+    document.getElementById('profil-nav-taxnumber').value = data.taxNumber || '';
+    document.getElementById('profil-nav-techuser').value = data.techUser || '';
+    document.getElementById('profil-nav-sandbox').value = data.sandbox === false ? '0' : '1';
+    saveBtn.hidden = isManager;
+    if (isManager) {
+      form.querySelectorAll('input, select').forEach((el) => { el.disabled = true; });
+      testBtn.hidden = true;
+    }
+  } catch (e) {
+    desc.innerHTML = `<span class="muted">${escapeHtml(e.message)}</span>`;
+  }
+}
+listen('profil-nav-form', 'submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('profil-nav-msg');
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const body = {
+      taxNumber: document.getElementById('profil-nav-taxnumber').value.trim(),
+      techUser: document.getElementById('profil-nav-techuser').value.trim(),
+      techPassword: document.getElementById('profil-nav-techpassword').value,
+      signingKey: document.getElementById('profil-nav-signingkey').value.trim(),
+      exchangeKey: document.getElementById('profil-nav-exchangekey').value.trim(),
+      sandbox: document.getElementById('profil-nav-sandbox').value === '1',
+    };
+    await api('/api/profile/nav-credentials', { method: 'POST', body: JSON.stringify(body) });
+    msg.textContent = '✓ NAV-kapcsolat mentve.'; msg.className = 'profile-form-msg ok';
+    document.getElementById('profil-nav-techpassword').value = '';
+    document.getElementById('profil-nav-signingkey').value = '';
+    document.getElementById('profil-nav-exchangekey').value = '';
+    loadProfilNavCredentials(false);
+  } catch (e2) {
+    msg.textContent = e2.message; msg.className = 'profile-form-msg error';
+  }
+});
+listen('profil-nav-test-btn', 'click', async (e) => {
+  const btn = e.target;
+  const msg = document.getElementById('profil-nav-msg');
+  btn.disabled = true; btn.textContent = 'Tesztelés…';
+  msg.textContent = ''; msg.className = 'profile-form-msg';
+  try {
+    const data = await api('/api/profile/nav-test-connection', { method: 'POST' });
+    msg.textContent = `✓ Sikeres kapcsolat! A token ${data.tokenValidTo} időpontig érvényes.`; msg.className = 'profile-form-msg ok';
+  } catch (err) {
+    msg.textContent = '✗ ' + err.message; msg.className = 'profile-form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Kapcsolat tesztelése';
+  }
+});
 
 listen('profil-telephely-new-form', 'submit', async (e) => {
   e.preventDefault();

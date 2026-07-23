@@ -680,9 +680,12 @@ code{ font-family: var(--font-mono); background:var(--paper-dim); padding:1px 5p
 
 .stock-receipt-form{ display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
 .stock-field{ display:flex; flex-direction:column; gap:5px; min-width:130px; }
+.stock-field-row{ display:flex; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
+.stock-field-row .stock-field{ flex:1 1 200px; }
 .stock-field-wide{ flex:1 1 220px; }
 .stock-field label{ font-size:11.5px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.03em; }
 .stock-field input{ border:1px solid var(--line); border-radius:7px; padding:9px 10px; font-size:13px; }
+.stock-field select{ border:1px solid var(--line); border-radius:7px; padding:9px 10px; font-size:13px; background:#fff; }
 .stock-form-msg{ font-size:12.5px; margin-top:6px; width:100%; }
 .stock-form-msg.ok{ color:#2E7D5C; }
 .stock-form-msg.error{ color:var(--brick); }

@@ -75,6 +75,32 @@ function loadOrCreateSecrets() {
 }
 const SECRETS = loadOrCreateSecrets();
 
+// A cégenkénti NAV-hitelesítő adatok (jelszó, aláíró- és cserekulcs) NEM
+// tárolhatók nyílt szövegként az adatbázisban — ezeket a szerver saját,
+// automatikusan generált session-titkából származtatott kulccsal, AES-256-
+// GCM-mel titkosítva mentjük. (A session-titok maga is csak a szerveren
+// tárolt, .secrets.json fájlban van — ugyanaz a védelmi szint, mint amit
+// eddig is alkalmaztunk a munkamenet-tokenekre.)
+const NAV_CRED_ENC_KEY = crypto.createHash('sha256').update(`nav-cred-enc:${SECRETS.sessionSecret}`).digest();
+function encryptNavSecret(plaintext) {
+  if (!plaintext) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', NAV_CRED_ENC_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([iv, authTag, encrypted]).toString('base64');
+}
+function decryptNavSecret(stored) {
+  if (!stored) return null;
+  const buf = Buffer.from(stored, 'base64');
+  const iv = buf.subarray(0, 12);
+  const authTag = buf.subarray(12, 28);
+  const encrypted = buf.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', NAV_CRED_ENC_KEY, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
 if (!process.env.SYNC_API_KEY) {
   console.log('\n[info] Nincs SYNC_API_KEY env változó beállítva — generált kulcs a data/.secrets.json fájlban.');
   console.log(`[info] Az androidos szinkronhoz ezt a kulcsot kell majd megadni: ${SECRETS.syncApiKey}\n`);
@@ -548,6 +574,8 @@ licenseDb.exec(`
     nav_transaction_id TEXT,
     nav_allapot TEXT,
     nav_uzenet TEXT,
+    nav_retry_count INTEGER NOT NULL DEFAULT 0,
+    nav_raw_response_fajlnev TEXT,
     letrehozva TEXT NOT NULL,
     lezarva TEXT
   );
@@ -646,6 +674,22 @@ licenseDb.exec(`
     updated_at TEXT NOT NULL
   );
 
+  -- Az ÜGYFELEK saját NAV Online Számla technikai felhasználójának adatai —
+  -- ez teszi lehetővé, hogy a cég a SAJÁT (nem a mi) adószámához tartozó
+  -- bejövő/kimenő számláit lekérdezhesse. Az érzékeny mezők (jelszó,
+  -- aláíró- és cserekulcs) TITKOSÍTVA kerülnek tárolásra (lásd
+  -- encryptNavSecret/decryptNavSecret).
+  CREATE TABLE IF NOT EXISTS company_nav_credentials (
+    ceg_kulcs TEXT PRIMARY KEY,
+    nav_taxnumber TEXT NOT NULL,
+    nav_tech_user TEXT NOT NULL,
+    nav_tech_password_enc TEXT NOT NULL,
+    nav_signing_key_enc TEXT NOT NULL,
+    nav_exchange_key_enc TEXT NOT NULL,
+    nav_sandbox INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+  );
+
   -- CSOMAGOK — egyes funkciók egy néven, egy áron, egyszerre adhatók ki
   -- ("csomagba kerülnek"), míg mások önállóan, külön fizetősek maradnak.
   -- Egy csomag csak egy KÉNYELMI GYŰJTŐNÉV — a tényleges hozzáférés
@@ -711,7 +755,7 @@ licenseDb.exec(`
 // hiányozhatnak).
 {
   const cols = licenseDb.prepare(`PRAGMA table_info(license_payments)`).all();
-  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT'], ['szamla_pdf_fajlnev', 'TEXT'], ['nav_transaction_id', 'TEXT'], ['nav_allapot', 'TEXT'], ['nav_uzenet', 'TEXT']]) {
+  for (const [name, def] of [['telephely_kod', 'TEXT'], ['feature_key', 'TEXT'], ['kartya_token', 'TEXT'], ['ismetlodo', 'INTEGER NOT NULL DEFAULT 0'], ['szamla_sorszam', 'TEXT'], ['szamla_pdf_fajlnev', 'TEXT'], ['nav_transaction_id', 'TEXT'], ['nav_allapot', 'TEXT'], ['nav_uzenet', 'TEXT'], ['nav_retry_count', 'INTEGER NOT NULL DEFAULT 0'], ['nav_raw_response_fajlnev', 'TEXT']]) {
     if (!cols.some((c) => c.name === name)) {
       licenseDb.exec(`ALTER TABLE license_payments ADD COLUMN ${name} ${def}`);
     }
@@ -1256,6 +1300,19 @@ function buildDemoInvoicePdf({ cegNev, adoszam, cimSzoveg, tetelek, penznem, dat
 
 const INVOICES_DIR = path.join(DATA_DIR, 'invoices');
 if (!fs.existsSync(INVOICES_DIR)) fs.mkdirSync(INVOICES_DIR, { recursive: true });
+const NAV_RESPONSES_DIR = path.join(DATA_DIR, 'nav-responses');
+if (!fs.existsSync(NAV_RESPONSES_DIR)) fs.mkdirSync(NAV_RESPONSES_DIR, { recursive: true });
+
+// A NAV-tól kapott NYERS XML-válaszok lemezre mentése — átláthatóság és
+// hibaelhárítás céljából mindent megőrzünk, ami a NAV-tól visszajön
+// (sikeres és sikertelen próbálkozásoknál egyaránt), nem csak a rövid,
+// szűrt hibaüzenetet.
+function saveNavRawResponse(szamlaSorszamVagyId, muvelet, xmlText) {
+  const safeName = String(szamlaSorszamVagyId).replace(/[^a-zA-Z0-9.\-]/g, '_');
+  const fajlnev = `${safeName}_${muvelet}_${Date.now()}.xml`;
+  fs.writeFileSync(path.join(NAV_RESPONSES_DIR, fajlnev), xmlText, 'utf8');
+  return fajlnev;
+}
 
 // A számla ELŐÁLLÍTÁSA és LEMEZRE MENTÉSE mindig megtörténik, amint egy
 // fizetés sikeres — FÜGGETLENÜL attól, hogy van-e beállított email cím a
@@ -1289,43 +1346,60 @@ async function generateAndStoreInvoice({ cegKulcs, tetelek, penznem, orderId, is
   // számla PDF-jének elkészültét/eltárolását, ezért teljesen külön,
   // hibatűrő lépésként fut, csak akkor, ha a NAV-kapcsolat be van állítva.
   if (navConfigured() && adoszam) {
-    if (!navAddressComplete(cimReszletek)) {
-      licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIÁNYZÓ_CÍM', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
-        .run('A cég számlázási címe hiányos (irányítószám/település/közterület neve/házszám) — a NAV garantáltan elutasítaná, ezért a beküldés meg sem történt. Töltsd ki a cég Profil oldalán a "Számlázási cím" mezőket.', orderId, `${orderId}-%`);
-      logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV-beküldés kihagyva (${szamlaSorszam}): hiányos számlázási cím` });
-    } else {
-    // A vevő adószámának előzetes érvényesség-ellenőrzése (a NAV saját
-    // ajánlása, 23. pont) — ha egyértelműen érvénytelen, nem próbálkozunk
-    // garantáltan elutasított beküldéssel. Ha maga az ELLENŐRZÉS hibázik
-    // (pl. a NAV pillanatnyilag nem elérhető), ez NEM blokkolja a normál
-    // beküldési kísérletet — csak akkor térünk el, ha KIFEJEZETTEN
-    // "érvénytelen"-nek minősítette a NAV az adószámot.
-    let adoszamErvenytelen = false;
-    try {
-      const taxpayerCheck = await navQueryTaxpayer(adoszam);
-      if (!taxpayerCheck.valid) adoszamErvenytelen = true;
-    } catch (_) { /* a normál beküldési próbálkozásra esünk vissza */ }
-
-    if (adoszamErvenytelen) {
-      licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'ÉRVÉNYTELEN_VEVŐ_ADÓSZÁM', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
-        .run(`A vevő adószáma (${adoszam}) nem szerepel érvényesként a NAV nyilvántartásában — a beküldés meg sem történt.`, orderId, `${orderId}-%`);
-      logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV-beküldés kihagyva (${szamlaSorszam}): érvénytelen vevő adószám (${adoszam})` });
-    } else {
-    try {
-      const { transactionId } = await navSubmitDemoInvoice({ szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem });
-      licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE' WHERE order_id = ? OR order_id LIKE ?`)
-        .run(transactionId, orderId, `${orderId}-%`);
-      logActivity({ type: 'nav_invoice_submit', ok: true, companyKey: cegKulcs, nev: null, detail: `NAV-nak beküldve: ${szamlaSorszam} (tranzakció: ${transactionId})` });
-    } catch (e) {
-      licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ? WHERE order_id = ? OR order_id LIKE ?`)
-        .run(e.message, orderId, `${orderId}-%`);
-      logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV beküldési hiba (${szamlaSorszam}): ${e.message}` });
-    }
-    }
-    }
+    await attemptNavSubmission({ cegKulcs, szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem, incrementRetry: false });
   }
 
   return { szamlaSorszam, fajlnev, pdf, cegNev, adoszam };
+}
+
+// Egyetlen, közös, ÚJRAHASZNOSÍTHATÓ NAV-beküldési logika — ugyanezt hívja
+// a fizetés utáni automatikus beküldés, a manuális "Újraküldés" gomb ÉS
+// az automatikus háttér-újrapróbálkozási ciklus is. Minden esetben menti
+// a nyers NAV-választ (siker és hiba esetén egyaránt), hogy bármikor
+// visszanézhető legyen.
+async function attemptNavSubmission({ cegKulcs, szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem, incrementRetry }) {
+  const retrySql = incrementRetry ? 'nav_retry_count = nav_retry_count + 1,' : '';
+
+  if (!navAddressComplete(cimReszletek)) {
+    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIÁNYZÓ_CÍM', nav_uzenet = ?, ${retrySql} nav_transaction_id = nav_transaction_id WHERE szamla_sorszam = ?`)
+      .run('A cég számlázási címe hiányos (irányítószám/település/közterület neve/házszám) — a NAV garantáltan elutasítaná, ezért a beküldés meg sem történt. Töltsd ki a cég Profil oldalán a "Számlázási cím" mezőket.', szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV-beküldés kihagyva (${szamlaSorszam}): hiányos számlázási cím` });
+    return { ok: false };
+  }
+
+  // A vevő adószámának előzetes érvényesség-ellenőrzése (a NAV saját
+  // ajánlása, 23. pont) — ha egyértelműen érvénytelen, nem próbálkozunk
+  // garantáltan elutasított beküldéssel. Ha maga az ELLENŐRZÉS hibázik
+  // (pl. a NAV pillanatnyilag nem elérhető), ez NEM blokkolja a normál
+  // beküldési kísérletet — csak akkor térünk el, ha KIFEJEZETTEN
+  // "érvénytelen"-nek minősítette a NAV az adószámot.
+  let adoszamErvenytelen = false;
+  try {
+    const taxpayerCheck = await navQueryTaxpayer(adoszam);
+    if (!taxpayerCheck.valid) adoszamErvenytelen = true;
+  } catch (_) { /* a normál beküldési próbálkozásra esünk vissza */ }
+
+  if (adoszamErvenytelen) {
+    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'ÉRVÉNYTELEN_VEVŐ_ADÓSZÁM', nav_uzenet = ?, ${retrySql} nav_transaction_id = nav_transaction_id WHERE szamla_sorszam = ?`)
+      .run(`A vevő adószáma (${adoszam}) nem szerepel érvényesként a NAV nyilvántartásában — a beküldés meg sem történt.`, szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV-beküldés kihagyva (${szamlaSorszam}): érvénytelen vevő adószám (${adoszam})` });
+    return { ok: false };
+  }
+
+  try {
+    const { transactionId, raw } = await navSubmitDemoInvoice({ szamlaSorszam, datum, cegNev, adoszam, cimReszletek, tetelek, penznem });
+    const fajlnev = saveNavRawResponse(szamlaSorszam, 'submit', raw);
+    licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE', nav_raw_response_fajlnev = ?, ${retrySql} nav_uzenet = NULL WHERE szamla_sorszam = ?`)
+      .run(transactionId, fajlnev, szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: true, companyKey: cegKulcs, nev: null, detail: `NAV-nak beküldve: ${szamlaSorszam} (tranzakció: ${transactionId})` });
+    return { ok: true, transactionId };
+  } catch (e) {
+    const fajlnev = e.navRawResponse ? saveNavRawResponse(szamlaSorszam, 'submit-error', e.navRawResponse) : null;
+    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ?, nav_raw_response_fajlnev = COALESCE(?, nav_raw_response_fajlnev), ${retrySql} nav_transaction_id = nav_transaction_id WHERE szamla_sorszam = ?`)
+      .run(e.message, fajlnev, szamlaSorszam);
+    logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: cegKulcs, nev: null, detail: `NAV beküldési hiba (${szamlaSorszam}): ${e.message}` });
+    return { ok: false, error: e.message };
+  }
 }
 
 async function sendDemoInvoiceEmail({ cegKulcs, tetelek, penznem, orderId, ismetlodo }) {
@@ -2425,6 +2499,116 @@ route('POST', '/api/profile/billing-address', async (req, res) => {
   `).run(session.cegKulcs, iranyitoszam || null, telepules || null, kozteruletNev || null, kozteruletJelleg || null, hazszam || null, emelet || null, new Date().toISOString());
   logActivity({ type: 'billing_address_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Számlázási cím frissítve.' });
   sendJson(res, 200, { ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// ÜGYFÉL-OLDALI NAV ONLINE SZÁMLA KAPCSOLAT — minden cég a SAJÁT NAV
+// technikai felhasználójának adataival tudja lekérdezni a SAJÁT bejövő/
+// kimenő számláit (ez teljesen független az üzemeltető, Leichter
+// Irodatechnika saját NAV-kapcsolatától, amit az admin Pénzügyek nézete
+// használ). Az érzékeny mezőket SOHA nem küldjük vissza a böngészőnek.
+// ---------------------------------------------------------------------------
+route('GET', '/api/profile/nav-credentials', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const row = licenseDb.prepare(`SELECT ceg_kulcs, nav_taxnumber, nav_tech_user, nav_sandbox FROM company_nav_credentials WHERE ceg_kulcs = ?`).get(session.cegKulcs);
+  sendJson(res, 200, {
+    configured: !!row,
+    taxNumber: row?.nav_taxnumber || '',
+    techUser: row?.nav_tech_user || '',
+    sandbox: row ? !!row.nav_sandbox : true,
+  });
+});
+
+route('POST', '/api/profile/nav-credentials', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  if (session.role === 'manager') return sendJson(res, 403, { error: 'Csak a cégtulajdonos állíthatja be a NAV-kapcsolatot.' });
+  const body = await readJsonBody(req);
+  const taxNumber = clampStr(body.taxNumber, 20).replace(/[^0-9]/g, '');
+  const techUser = clampStr(body.techUser, 60);
+  const techPassword = clampStr(body.techPassword, 100);
+  const signingKey = clampStr(body.signingKey, 100);
+  const exchangeKey = clampStr(body.exchangeKey, 100);
+  const sandbox = body.sandbox !== false;
+  if (!taxNumber || taxNumber.length < 8) return sendJson(res, 400, { error: 'Érvénytelen adószám.' });
+  if (!techUser || !techPassword || !signingKey || !exchangeKey) {
+    return sendJson(res, 400, { error: 'Minden mező kitöltése kötelező (technikai felhasználó, jelszó, aláírókulcs, cserekulcs).' });
+  }
+  licenseDb.prepare(`
+    INSERT INTO company_nav_credentials (ceg_kulcs, nav_taxnumber, nav_tech_user, nav_tech_password_enc, nav_signing_key_enc, nav_exchange_key_enc, nav_sandbox, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs) DO UPDATE SET
+      nav_taxnumber = excluded.nav_taxnumber, nav_tech_user = excluded.nav_tech_user,
+      nav_tech_password_enc = excluded.nav_tech_password_enc, nav_signing_key_enc = excluded.nav_signing_key_enc,
+      nav_exchange_key_enc = excluded.nav_exchange_key_enc, nav_sandbox = excluded.nav_sandbox, updated_at = excluded.updated_at
+  `).run(session.cegKulcs, taxNumber, techUser, encryptNavSecret(techPassword), encryptNavSecret(signingKey), encryptNavSecret(exchangeKey), sandbox ? 1 : 0, new Date().toISOString());
+  logActivity({ type: 'nav_credentials_change', ok: true, companyKey: session.companyKey, nev: session.nev, detail: 'Saját NAV-kapcsolat beállítva/frissítve.' });
+  sendJson(res, 200, { ok: true });
+});
+
+route('POST', '/api/profile/nav-test-connection', async (req, res) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const creds = getCompanyNavCreds(session.cegKulcs);
+  if (!navCredsComplete(creds)) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva.' });
+  try {
+    const result = await navTokenExchange(creds);
+    logActivity({ type: 'nav_test_connection', ok: true, companyKey: session.companyKey, nev: session.nev, detail: `Sikeres NAV tokenExchange (${creds.sandbox ? 'teszt' : 'éles'} környezet)` });
+    sendJson(res, 200, { ok: true, tokenValidTo: result.validTo });
+  } catch (e) {
+    logActivity({ type: 'nav_test_connection', ok: false, companyKey: session.companyKey, nev: session.nev, detail: e.message });
+    sendJson(res, 500, { error: e.message });
+  }
+});
+
+// A cég SAJÁT bejövő/kimenő számláinak lekérdezése, ALAPVETŐ elemzésekkel
+// (havi összesítés, top partnerek) — a kivonat-adatokból számolva. Mélyebb,
+// tételes (termék/szolgáltatás-szintű) elemzés ehhez a teljes számla-
+// tartalom (queryInvoiceData) lekérdezését igényelné, ez egy KÖVETKEZŐ
+// fejlesztési kör lehetősége, mivel ez laponként/számlánként külön
+// hálózati hívást jelentene.
+route('GET', '/api/profile/nav-invoices', async (req, res, query) => {
+  const session = requireCegAuth(req);
+  if (!session) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const creds = getCompanyNavCreds(session.cegKulcs);
+  if (!navCredsComplete(creds)) return sendJson(res, 400, { error: 'A NAV-kapcsolat nincs beállítva.' });
+
+  const direction = query.direction === 'INBOUND' ? 'INBOUND' : 'OUTBOUND';
+  const dateTo = query.dateTo || todayIsoServer();
+  const dateFrom = query.dateFrom || addDaysISO(dateTo, -30);
+  const napokSzama = Math.round((new Date(dateTo) - new Date(dateFrom)) / (24 * 60 * 60 * 1000));
+  if (napokSzama > 35 || napokSzama < 0) {
+    return sendJson(res, 400, { error: 'A lekérdezési időszak legfeljebb 35 nap lehet (ezt a NAV korlátozza).' });
+  }
+  try {
+    const result = await navQueryInvoiceDigest({ direction, dateFrom, dateTo, page: 1, creds });
+
+    // Alap-elemzés a kivonat-adatokból: havi bontás, top partnerek.
+    const havonta = new Map();
+    const partnerek = new Map();
+    for (const inv of result.invoices) {
+      const honap = (inv.invoiceIssueDate || '').slice(0, 7);
+      const netto = Number(inv.invoiceNetAmountHUF) || 0;
+      if (honap) {
+        if (!havonta.has(honap)) havonta.set(honap, { honap, osszeg: 0, darab: 0 });
+        const h = havonta.get(honap); h.osszeg += netto; h.darab += 1;
+      }
+      const partnerNev = direction === 'OUTBOUND' ? inv.customerName : inv.supplierName;
+      if (partnerNev) {
+        if (!partnerek.has(partnerNev)) partnerek.set(partnerNev, { nev: partnerNev, osszeg: 0, darab: 0 });
+        const p = partnerek.get(partnerNev); p.osszeg += netto; p.darab += 1;
+      }
+    }
+
+    sendJson(res, 200, {
+      ...result, direction, dateFrom, dateTo,
+      havonta: [...havonta.values()].sort((a, b) => a.honap.localeCompare(b.honap)),
+      topPartnerek: [...partnerek.values()].sort((a, b) => b.osszeg - a.osszeg).slice(0, 10),
+    });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -3646,6 +3830,7 @@ route('GET', '/api/admin/finance/invoices', async (req, res, query) => {
         letrehozva: p.letrehozva, allapot: p.allapot, penznem: p.penznem, osszeg: 0, tetelek: [],
         pdfElerheto: !!p.szamla_pdf_fajlnev, pdfFajlnev: p.szamla_pdf_fajlnev,
         navAllapot: p.nav_allapot, navTranzakcioId: p.nav_transaction_id, navUzenet: p.nav_uzenet, orderId: p.order_id,
+        navRetryCount: p.nav_retry_count, navRawResponseFajlnev: p.nav_raw_response_fajlnev,
       });
     }
     const inv = bySzamla.get(p.szamla_sorszam);
@@ -3681,44 +3866,40 @@ route('POST', '/api/admin/finance/resend-nav', async (req, res) => {
   const { szamlaSorszam } = await readJsonBody(req);
   if (!szamlaSorszam) return sendJson(res, 400, { error: 'Hiányzó számlasorszám.' });
 
+  const ctx = gatherNavSubmissionContext(szamlaSorszam);
+  if (!ctx) return sendJson(res, 404, { error: 'Nincs ilyen számla.' });
+  if (!ctx.adoszam) return sendJson(res, 400, { error: 'A cégnek nincs ismert adószáma — NAV-beküldés nem lehetséges.' });
+
+  const result = await attemptNavSubmission({ ...ctx, incrementRetry: true });
+  logActivity({ type: 'nav_invoice_submit', ok: result.ok, companyKey: ctx.cegKulcs, nev: admin.nev || 'admin', detail: `Kézi újraküldés: ${szamlaSorszam}` });
+  if (result.ok) sendJson(res, 200, { ok: true, transactionId: result.transactionId });
+  else sendJson(res, 400, { error: result.error || 'A számlázási cím vagy a vevő adószáma miatt a beküldés nem történt meg — nézd meg az állapotot a listában.' });
+});
+
+// A NAV-beküldéshez szükséges összes adat összegyűjtése egy meglévő
+// számlasorszám alapján — ugyanezt használja a manuális "Újraküldés" és
+// az automatikus háttér-újrapróbálkozási ciklus is.
+function gatherNavSubmissionContext(szamlaSorszam) {
   const rows = licenseDb.prepare(`SELECT * FROM license_payments WHERE szamla_sorszam = ?`).all(szamlaSorszam);
-  if (!rows.length) return sendJson(res, 404, { error: 'Nincs ilyen számla.' });
+  if (!rows.length) return null;
   const first = rows[0];
   const anySite = [...companyIndex.values()].find((e) => e.cegKulcs === first.ceg_kulcs);
   const cegNev = anySite?.nev || first.ceg_kulcs;
   const adoszam = anySite?.adoszam || '';
-  if (!adoszam) return sendJson(res, 400, { error: 'A cégnek nincs ismert adószáma — NAV-beküldés nem lehetséges.' });
   const billingRow = licenseDb.prepare(`SELECT * FROM company_settings WHERE ceg_kulcs = ?`).get(first.ceg_kulcs);
   const cimReszletek = billingRow ? {
     iranyitoszam: billingRow.szamlazasi_iranyitoszam, telepules: billingRow.szamlazasi_telepules,
     kozteruletNev: billingRow.szamlazasi_kozterulet_nev, kozteruletJelleg: billingRow.szamlazasi_kozterulet_jelleg,
     hazszam: billingRow.szamlazasi_hazszam, emelet: billingRow.szamlazasi_emelet,
   } : {};
-  if (!navAddressComplete(cimReszletek)) {
-    return sendJson(res, 400, { error: 'A cég számlázási címe hiányos (irányítószám/település/közterület neve/házszám) — előbb töltsd ki a cég Profil oldalán a "Számlázási cím" mezőket.' });
-  }
-  try {
-    const taxpayerCheck = await navQueryTaxpayer(adoszam);
-    if (!taxpayerCheck.valid) {
-      return sendJson(res, 400, { error: `A vevő adószáma (${adoszam}) nem szerepel érvényesként a NAV nyilvántartásában — a beküldés emiatt garantáltan elutasításra kerülne.` });
-    }
-  } catch (_) { /* ha maga az ellenőrzés hibázik, a normál beküldési kísérletre esünk vissza */ }
   const featureNevByKey = new Map(licenseDb.prepare(`SELECT key, nev FROM license_features`).all().map((f) => [f.key, f.nev]));
   const tetelek = rows.map((p) => ({ nev: featureNevByKey.get(p.feature_key) || p.feature_key || p.cel, osszeg: p.osszeg }));
+  return {
+    cegKulcs: first.ceg_kulcs, szamlaSorszam, datum: first.letrehozva.slice(0, 10),
+    cegNev, adoszam, cimReszletek, tetelek, penznem: first.penznem,
+  };
+}
 
-  try {
-    const { transactionId } = await navSubmitDemoInvoice({
-      szamlaSorszam, datum: first.letrehozva.slice(0, 10), cegNev, adoszam, cimReszletek, tetelek, penznem: first.penznem,
-    });
-    licenseDb.prepare(`UPDATE license_payments SET nav_transaction_id = ?, nav_allapot = 'BEKULDVE', nav_uzenet = NULL WHERE szamla_sorszam = ?`).run(transactionId, szamlaSorszam);
-    logActivity({ type: 'nav_invoice_submit', ok: true, companyKey: first.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV-nak újraküldve: ${szamlaSorszam} (tranzakció: ${transactionId})` });
-    sendJson(res, 200, { ok: true, transactionId });
-  } catch (e) {
-    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = 'HIBA', nav_uzenet = ? WHERE szamla_sorszam = ?`).run(e.message, szamlaSorszam);
-    logActivity({ type: 'nav_invoice_submit', ok: false, companyKey: first.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV újraküldési hiba (${szamlaSorszam}): ${e.message}` });
-    sendJson(res, 500, { error: e.message });
-  }
-});
 
 // A NAV aszinkron dolgozza fel a beküldött számlákat — ez a végpont a
 // tranzakció-azonosítóval lekérdezi a TÉNYLEGES feldolgozási eredményt
@@ -3735,15 +3916,99 @@ route('POST', '/api/admin/finance/check-nav-status', async (req, res) => {
   if (!row?.nav_transaction_id) return sendJson(res, 404, { error: 'Ehhez a számlához nincs eltárolt NAV tranzakció-azonosító.' });
 
   try {
-    const result = await navQueryTransactionStatus(row.nav_transaction_id);
-    const ujAllapot = result.processingResult || 'FELDOLGOZÁS ALATT';
-    licenseDb.prepare(`UPDATE license_payments SET nav_allapot = ?, nav_uzenet = ? WHERE szamla_sorszam = ?`)
-      .run(ujAllapot, result.businessValidationMessages.join(' | ') || null, szamlaSorszam);
-    logActivity({ type: 'nav_status_check', ok: true, companyKey: row.ceg_kulcs, nev: admin.nev || 'admin', detail: `NAV állapot lekérdezve: ${szamlaSorszam} → ${ujAllapot}` });
-    sendJson(res, 200, { ok: true, allapot: ujAllapot, uzenetek: result.businessValidationMessages, raw: result.raw.slice(0, 1500) });
+    const { ujAllapot, uzenetek } = await checkAndUpdateNavStatus(szamlaSorszam, row.nav_transaction_id, row.ceg_kulcs, admin.nev || 'admin');
+    sendJson(res, 200, { ok: true, allapot: ujAllapot, uzenetek });
   } catch (e) {
     sendJson(res, 500, { error: e.message });
   }
+});
+
+// A NAV feldolgozási állapotának lekérdezése és a tárolt állapot
+// frissítése — a nyers választ is elmenti. Ugyanezt hívja a manuális
+// "Állapot lekérdezése" gomb ÉS az automatikus háttér-ciklus is.
+async function checkAndUpdateNavStatus(szamlaSorszam, transactionId, cegKulcs, actorName) {
+  const result = await navQueryTransactionStatus(transactionId);
+  const ujAllapot = result.processingResult || 'FELDOLGOZÁS ALATT';
+  const fajlnev = saveNavRawResponse(szamlaSorszam, 'status', result.raw);
+  licenseDb.prepare(`UPDATE license_payments SET nav_allapot = ?, nav_uzenet = ?, nav_raw_response_fajlnev = ? WHERE szamla_sorszam = ?`)
+    .run(ujAllapot, result.businessValidationMessages.join(' | ') || null, fajlnev, szamlaSorszam);
+  logActivity({ type: 'nav_status_check', ok: true, companyKey: cegKulcs, nev: actorName, detail: `NAV állapot lekérdezve: ${szamlaSorszam} → ${ujAllapot}` });
+  return { ujAllapot, uzenetek: result.businessValidationMessages };
+}
+
+// A hányszori automatikus újrapróbálkozás után adjuk fel egy tartósan
+// hibás számlánál (ezután már csak kézi "Újraküldés"-sel próbálkozhat
+// az admin, miután feltehetően javított valamin, pl. a számlázási címen).
+const NAV_MAX_AUTO_RETRY = 10;
+
+// AUTOMATIKUS háttér-folyamat — ETTŐL FOGVA NEM KELL KÉZZEL kattintgatni
+// az "Újraküldés" vagy "Állapot lekérdezése" gombokra: ez a ciklus
+// rendszeresen (naponta többször) magától:
+//   1) lekérdezi a még "BEKULDVE" (feldolgozás alatt) számlák végleges
+//      NAV-állapotát,
+//   2) újra megpróbálja beküldeni a korábban sikertelen (HIBA, hiányzó
+//      cím, érvénytelen vevő adószám, ABORTED) számlákat — de csak egy
+//      ésszerű próbálkozás-szám (NAV_MAX_AUTO_RETRY) eléréséig, hogy egy
+//      tartósan hibás adat ne generáljon végtelen NAV-hívást.
+async function runNavAutoProcessCycle() {
+  if (!navConfigured()) return;
+
+  const bekuldve = licenseDb.prepare(`
+    SELECT DISTINCT szamla_sorszam, nav_transaction_id, ceg_kulcs FROM license_payments
+    WHERE nav_allapot = 'BEKULDVE' AND nav_transaction_id IS NOT NULL
+  `).all();
+  for (const row of bekuldve) {
+    try {
+      await checkAndUpdateNavStatus(row.szamla_sorszam, row.nav_transaction_id, row.ceg_kulcs, 'automatikus');
+    } catch (e) {
+      console.error(`[NAV] Automatikus állapot-lekérdezés hiba (${row.szamla_sorszam}): ${e.message}`);
+    }
+  }
+
+  const ujrapoblalando = licenseDb.prepare(`
+    SELECT DISTINCT szamla_sorszam FROM license_payments
+    WHERE nav_allapot IN ('HIBA', 'HIÁNYZÓ_CÍM', 'ÉRVÉNYTELEN_VEVŐ_ADÓSZÁM', 'ABORTED') AND nav_retry_count < ?
+  `).all(NAV_MAX_AUTO_RETRY);
+  for (const row of ujrapoblalando) {
+    const ctx = gatherNavSubmissionContext(row.szamla_sorszam);
+    if (!ctx || !ctx.adoszam) continue;
+    try {
+      await attemptNavSubmission({ ...ctx, incrementRetry: true });
+    } catch (e) {
+      console.error(`[NAV] Automatikus újraküldési hiba (${row.szamla_sorszam}): ${e.message}`);
+    }
+  }
+}
+// 15 percenként fut — elég gyakori ahhoz, hogy a legtöbb státusz-változás
+// hamar látszódjon, de nem terheli feleslegesen a NAV szerverét.
+setInterval(() => { runNavAutoProcessCycle().catch((e) => console.error('[NAV] Automatikus ciklus hiba:', e.message)); }, 15 * 60 * 1000).unref();
+
+// Az automatikus ciklus KÉZI, azonnali elindítása — hasznos teszteléshez,
+// nem kell megvárni a 15 perces automatikus futást.
+route('POST', '/api/admin/nav/run-auto-cycle', async (req, res) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  try {
+    await runNavAutoProcessCycle();
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message });
+  }
+});
+
+// Egy adott számlához tartozó, lemezen eltárolt NYERS NAV-XML-válasz
+// megtekintése/letöltése — átláthatóság és hibaelhárítás céljából.
+route('GET', '/api/admin/finance/nav-response', async (req, res, query) => {
+  const admin = requireAdmin(req);
+  if (!admin) return sendJson(res, 401, { error: 'NOT_AUTHENTICATED' });
+  const fajlnev = String(query.fajlnev || '').replace(/[^a-zA-Z0-9._\-]/g, '');
+  if (!fajlnev) return sendJson(res, 400, { error: 'Hiányzó fájlnév.' });
+  const exists = licenseDb.prepare(`SELECT 1 FROM license_payments WHERE nav_raw_response_fajlnev = ?`).get(fajlnev);
+  if (!exists) return sendJson(res, 404, { error: 'Nincs ilyen NAV-válasz.' });
+  const filePath = path.join(NAV_RESPONSES_DIR, fajlnev);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'A fájl nem található a szerveren.' });
+  res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Content-Disposition': `inline; filename="${fajlnev}"`, 'Cache-Control': 'private, max-age=3600' });
+  res.end(fs.readFileSync(filePath));
 });
 
 // ---------------------------------------------------------------------------
@@ -5828,6 +6093,42 @@ function navConfigured() {
   return !!(process.env.NAV_TAXNUMBER && process.env.NAV_TECH_USER && process.env.NAV_TECH_PASSWORD
     && process.env.NAV_SIGNING_KEY && process.env.NAV_EXCHANGE_KEY);
 }
+// Az üzemeltető (Leichter Irodatechnika) SAJÁT NAV-hitelesítő adatai,
+// környezeti változókból — ezt használja a saját előfizetési
+// számláinkhoz tartozó beküldés/lekérdezés (a mi, admin oldali NAV-
+// integrációnk). Az ÜGYFELEK saját, cégenkénti hitelesítő adatai ettől
+// FÜGGETLENEK, külön (titkosítva tárolt) adatbázis-táblából jönnek — lásd
+// getCompanyNavCreds().
+function navCredsFromEnv() {
+  return {
+    taxNumber: process.env.NAV_TAXNUMBER,
+    techUser: process.env.NAV_TECH_USER,
+    techPassword: process.env.NAV_TECH_PASSWORD,
+    signingKey: process.env.NAV_SIGNING_KEY,
+    exchangeKey: process.env.NAV_EXCHANGE_KEY,
+    sandbox: NAV_SANDBOX,
+  };
+}
+function navCredsComplete(creds) {
+  return !!(creds && creds.taxNumber && creds.techUser && creds.techPassword && creds.signingKey && creds.exchangeKey);
+}
+function navBaseUrlFor(sandbox) {
+  return sandbox ? 'https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3' : 'https://api.onlineszamla.nav.gov.hu/invoiceService/v3';
+}
+// Egy cég SAJÁT NAV-hitelesítő adatainak kiolvasása és visszafejtése — ha
+// a cég nem állított be sajátot, null-t ad vissza (nincs mit lekérdezni).
+function getCompanyNavCreds(cegKulcs) {
+  const row = licenseDb.prepare(`SELECT * FROM company_nav_credentials WHERE ceg_kulcs = ?`).get(cegKulcs);
+  if (!row) return null;
+  return {
+    taxNumber: row.nav_taxnumber,
+    techUser: row.nav_tech_user,
+    techPassword: decryptNavSecret(row.nav_tech_password_enc),
+    signingKey: decryptNavSecret(row.nav_signing_key_enc),
+    exchangeKey: decryptNavSecret(row.nav_exchange_key_enc),
+    sandbox: !!row.nav_sandbox,
+  };
+}
 // Best-effort 18 karakteres szoftver-azonosító: HU + a fejlesztő cég
 // (Leichter Irodatechnika Kft.) adószám-törzsszáma + egy rögzített utótag,
 // pontosan 18 karakterre kiegészítve. Ha a NAV másképp várná el, a
@@ -5918,11 +6219,11 @@ function navHeaderXml(requestId, timestampIso) {
     <common:headerVersion>1.0</common:headerVersion>
   </common:header>`;
 }
-function navUserXml(requestSignature) {
+function navUserXml(requestSignature, creds) {
   return `<common:user>
-    <common:login>${escapeXml(process.env.NAV_TECH_USER)}</common:login>
-    <common:passwordHash cryptoType="SHA-512">${navPasswordHash(process.env.NAV_TECH_PASSWORD)}</common:passwordHash>
-    <common:taxNumber>${escapeXml(process.env.NAV_TAXNUMBER)}</common:taxNumber>
+    <common:login>${escapeXml(creds.techUser)}</common:login>
+    <common:passwordHash cryptoType="SHA-512">${navPasswordHash(creds.techPassword)}</common:passwordHash>
+    <common:taxNumber>${escapeXml(creds.taxNumber)}</common:taxNumber>
     <common:requestSignature cryptoType="SHA3-512">${requestSignature}</common:requestSignature>
   </common:user>`;
 }
@@ -6104,8 +6405,8 @@ function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, bu
 </InvoiceData>`;
 }
 
-async function navApiCall(operation, bodyXml) {
-  const resp = await fetch(`${NAV_BASE_URL}/${operation}`, {
+async function navApiCall(operation, bodyXml, baseUrl) {
+  const resp = await fetch(`${baseUrl || NAV_BASE_URL}/${operation}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/xml; charset=UTF-8', 'Accept': 'application/xml' },
     body: `<?xml version="1.0" encoding="UTF-8"?>\n${bodyXml}`,
@@ -6120,28 +6421,28 @@ async function navApiCall(operation, bodyXml) {
 // szerint készült — a pontos XML-elemsorrendet/névteret valódi NAV
 // teszt-környezet elleni éles próbával kell megerősíteni (erre a
 // sandboxunkban nincs kimenő hálózati hozzáférés).
-async function navTokenExchange() {
-  if (!navConfigured()) throw new Error('A NAV-kapcsolat nincs beállítva (hiányzó környezeti változók).');
+async function navTokenExchange(creds = navCredsFromEnv()) {
+  if (!navCredsComplete(creds)) throw new Error('A NAV-kapcsolat nincs beállítva (hiányzó hitelesítő adatok).');
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
-  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
 
   const bodyXml = `<TokenExchangeRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
-${navUserXml(requestSignature)}
+${navUserXml(requestSignature, creds)}
 ${navSoftwareXml()}
 </TokenExchangeRequest>`;
 
-  const { status, text } = await navApiCall('tokenExchange', bodyXml);
+  const { status, text } = await navApiCall('tokenExchange', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
     throw new Error(`NAV tokenExchange hiba: ${errorMsg}`);
   }
   const encodedToken = navXmlField(text, 'encodedExchangeToken');
   if (!encodedToken) throw new Error(`A NAV válaszában nem található token. Nyers válasz: ${text.slice(0, 500)}`);
-  const decodedToken = navDecryptExchangeToken(encodedToken, process.env.NAV_EXCHANGE_KEY);
+  const decodedToken = navDecryptExchangeToken(encodedToken, creds.exchangeKey);
   return { token: decodedToken, validFrom: navXmlField(text, 'tokenValidityFrom'), validTo: navXmlField(text, 'tokenValidityTo') };
 }
 
@@ -6150,22 +6451,22 @@ ${navSoftwareXml()}
 // előtt elvégezni, hogy elkerüljük a garantáltan elutasított
 // (ABORTED) beküldéseket. Egy VALÓDI, hivatalos NAV mintapélda
 // (nav-gov-hu/Online-Invoice GitHub-tárhely) szerkezete alapján készült.
-async function navQueryTaxpayer(taxNumberFull) {
+async function navQueryTaxpayer(taxNumberFull, creds = navCredsFromEnv()) {
   const { taxpayerId } = parseHunTaxNumber(taxNumberFull);
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
-  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
 
   const bodyXml = `<QueryTaxpayerRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
-${navUserXml(requestSignature)}
+${navUserXml(requestSignature, creds)}
 ${navSoftwareXml()}
 <taxNumber>${escapeXml(taxpayerId)}</taxNumber>
 </QueryTaxpayerRequest>`;
 
-  const { status, text } = await navApiCall('queryTaxpayer', bodyXml);
+  const { status, text } = await navApiCall('queryTaxpayer', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
     throw new Error(`NAV queryTaxpayer hiba: ${errorMsg}`);
@@ -6192,16 +6493,16 @@ function navXmlBlocks(xml, tag) {
 // mintapéldája (nav-gov-hu/Online-Invoice GitHub-tárhely) alapján.
 // direction: 'OUTBOUND' (kimenő, mi állítottuk ki) vagy 'INBOUND' (bejövő,
 // mást állította ki, de a mi adószámunkra vonatkozik).
-async function navQueryInvoiceDigest({ direction, dateFrom, dateTo, page = 1 }) {
+async function navQueryInvoiceDigest({ direction, dateFrom, dateTo, page = 1, creds = navCredsFromEnv() }) {
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
-  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
 
   const bodyXml = `<QueryInvoiceDigestRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
-${navUserXml(requestSignature)}
+${navUserXml(requestSignature, creds)}
 ${navSoftwareXml()}
 <page>${page}</page>
 <invoiceDirection>${direction}</invoiceDirection>
@@ -6215,7 +6516,7 @@ ${navSoftwareXml()}
 </invoiceQueryParams>
 </QueryInvoiceDigestRequest>`;
 
-  const { status, text } = await navApiCall('queryInvoiceDigest', bodyXml);
+  const { status, text } = await navApiCall('queryInvoiceDigest', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
     throw new Error(`NAV queryInvoiceDigest hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1200)}`);
@@ -6275,11 +6576,17 @@ ${navSoftwareXml()}
   const { status, text } = await navApiCall('manageInvoice', bodyXml);
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
-    throw new Error(`NAV manageInvoice hiba: ${errorMsg} | requestId: ${requestId} | timestampMasked: ${timestampMasked} | partialAuthRaw: ${sigDebug.partialAuthRaw} | indexHash: ${sigDebug.indexHashes[0]} | requestSignature: ${requestSignature} | Nyers válasz: ${text.slice(0, 1200)}`);
+    const err = new Error(`NAV manageInvoice hiba: ${errorMsg} | requestId: ${requestId} | timestampMasked: ${timestampMasked} | partialAuthRaw: ${sigDebug.partialAuthRaw} | indexHash: ${sigDebug.indexHashes[0]} | requestSignature: ${requestSignature} | Nyers válasz: ${text.slice(0, 1200)}`);
+    err.navRawResponse = text;
+    throw err;
   }
   const transactionId = navXmlField(text, 'transactionId');
-  if (!transactionId) throw new Error(`A NAV válaszában nem található tranzakció-azonosító. Nyers válasz: ${text.slice(0, 500)}`);
-  return { transactionId };
+  if (!transactionId) {
+    const err = new Error(`A NAV válaszában nem található tranzakció-azonosító. Nyers válasz: ${text.slice(0, 500)}`);
+    err.navRawResponse = text;
+    throw err;
+  }
+  return { transactionId, raw: text };
 }
 
 // A feldolgozás állapotának lekérdezése — a NAV aszinkron dolgozza fel a

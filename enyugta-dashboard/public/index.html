@@ -347,6 +347,7 @@
       <button class="nav-item" data-view="stock">Készlet</button>
       <button class="nav-item nav-subitem" data-view="stock-receipt">↳ Bevételezés</button>
       <button class="nav-item" data-view="sync">Szinkronizáció</button>
+      <button class="nav-item" data-view="nav-szamlaim">Számláim</button>
       <button class="nav-item" data-view="profil">Profil</button>
     </nav>
     <div class="sidebar-footer">
@@ -1124,6 +1125,59 @@
     </section>
 
     <!-- --- PROFIL --- -->
+    <section class="view" data-view="nav-szamlaim" hidden>
+      <div class="card" id="szamlaim-not-configured-card" hidden>
+        <div class="card-title">Számláim</div>
+        <p class="card-subtitle">A saját bejövő/kimenő számláid megtekintéséhez előbb be kell állítanod a NAV Online Számla technikai felhasználód adatait a <b>Profil</b> oldalon.</p>
+      </div>
+
+      <div class="card" id="szamlaim-content-card" hidden>
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">Számláim</div>
+            <div class="card-subtitle">Közvetlenül a NAV Online Számla nyilvántartásból lekérdezve. Egyszerre legfeljebb 35 napos időszak kérdezhető le (ezt a NAV korlátozza).</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input type="date" id="szamlaim-date-from" style="padding:7px 8px;">
+            <span class="muted">–</span>
+            <input type="date" id="szamlaim-date-to" style="padding:7px 8px;">
+            <select id="szamlaim-direction">
+              <option value="OUTBOUND">Kimenő (én állítottam ki)</option>
+              <option value="INBOUND">Bejövő (más állította ki)</option>
+            </select>
+            <button class="btn-secondary" id="szamlaim-refresh-btn">Frissítés</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="szamlaim-table">
+            <thead><tr><th>Számlaszám</th><th>Dátum</th><th>Kiállító</th><th>Vevő</th><th class="td-right">Nettó</th><th class="td-right">ÁFA</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="field-hint" id="szamlaim-msg" style="margin-top:8px;"></p>
+      </div>
+
+      <div class="card" id="szamlaim-monthly-card" hidden>
+        <div class="card-title">Havi bontás (nettó)</div>
+        <div class="table-scroll">
+          <table class="data-table" id="szamlaim-monthly-table">
+            <thead><tr><th>Hónap</th><th class="td-right">Számlák száma</th><th class="td-right">Nettó összeg</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" id="szamlaim-partners-card" hidden>
+        <div class="card-title" id="szamlaim-partners-title">Top partnerek</div>
+        <div class="table-scroll">
+          <table class="data-table" id="szamlaim-partners-table">
+            <thead><tr><th>Partner</th><th class="td-right">Számlák száma</th><th class="td-right">Nettó összeg</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="view" data-view="profil" hidden>
       <div class="card">
         <div class="card-title">Céges adatok</div>
@@ -1207,6 +1261,56 @@
           <button type="submit" class="btn-secondary" id="profil-billing-address-save-btn">Mentés</button>
         </form>
         <div class="profile-form-msg" id="profil-billing-address-msg"></div>
+      </div>
+
+      <div class="card" id="profil-nav-card">
+        <div class="card-title-row">
+          <div>
+            <div class="card-title">NAV Online Számla kapcsolat</div>
+            <div class="card-subtitle" id="profil-nav-desc" style="margin-bottom:10px;">Betöltés…</div>
+          </div>
+          <button class="btn-secondary" id="profil-nav-test-btn" hidden>Kapcsolat tesztelése</button>
+        </div>
+        <p class="card-subtitle" style="margin-bottom:14px;">
+          Ha megadod a SAJÁT NAV technikai felhasználód adatait (a NAV felületén, uam-test.nav.gov.hu-n hozhatod létre), a "Számláim" oldalon megnézheted a bejövő/kimenő számláidat, alap-elemzésekkel együtt. Csak a cégtulajdonos módosíthatja.
+        </p>
+        <form id="profil-nav-form">
+          <div class="stock-field-row">
+            <div class="stock-field">
+              <label for="profil-nav-taxnumber">Adószám (törzsszám, 8 jegy)</label>
+              <input id="profil-nav-taxnumber" maxlength="20" placeholder="pl. 12345678">
+            </div>
+            <div class="stock-field">
+              <label for="profil-nav-techuser">Technikai felhasználó neve</label>
+              <input id="profil-nav-techuser" maxlength="60">
+            </div>
+          </div>
+          <div class="stock-field-row">
+            <div class="stock-field">
+              <label for="profil-nav-techpassword">Technikai felhasználó jelszava</label>
+              <input id="profil-nav-techpassword" type="password" maxlength="100" placeholder="(nem jelenik meg mentés után)">
+            </div>
+            <div class="stock-field">
+              <label for="profil-nav-sandbox">Környezet</label>
+              <select id="profil-nav-sandbox">
+                <option value="1">Teszt (sandbox)</option>
+                <option value="0">Éles</option>
+              </select>
+            </div>
+          </div>
+          <div class="stock-field-row">
+            <div class="stock-field">
+              <label for="profil-nav-signingkey">XML aláírókulcs</label>
+              <input id="profil-nav-signingkey" maxlength="100" placeholder="(nem jelenik meg mentés után)">
+            </div>
+            <div class="stock-field">
+              <label for="profil-nav-exchangekey">XML cserekulcs</label>
+              <input id="profil-nav-exchangekey" maxlength="100" placeholder="(nem jelenik meg mentés után)">
+            </div>
+          </div>
+          <button type="submit" class="btn-secondary" id="profil-nav-save-btn">Mentés</button>
+        </form>
+        <div class="profile-form-msg" id="profil-nav-msg"></div>
       </div>
 
       <div class="card" id="profil-ntak-card">
@@ -1572,7 +1676,7 @@
 
       <div class="card">
         <div class="card-title">Kiállított számlák</div>
-        <p class="card-subtitle" style="margin-bottom:14px;">Minden ténylegesen kiállított és a szerveren eltárolt PDF-számla — letölthető formában.</p>
+        <p class="card-subtitle" style="margin-bottom:14px;">Minden ténylegesen kiállított és a szerveren eltárolt PDF-számla — letölthető formában. A NAV-beküldés állapotát és az esetleges újraküldést a rendszer 15 percenként AUTOMATIKUSAN ellenőrzi/próbálja — a "Most" gombokkal ezt azonnal ki is lehet kényszeríteni.</p>
         <div class="table-scroll">
           <table class="data-table" id="finance-invoices-table">
             <thead><tr><th>Sorszám</th><th>Cég</th><th>Dátum</th><th>Tételek</th><th class="td-right">Összeg</th><th>NAV</th><th></th></tr></thead>
