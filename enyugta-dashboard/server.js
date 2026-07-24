@@ -1216,6 +1216,7 @@ function splitBruttoToNettoAfa(brutto, afaKulcs = ELEKTRONIKUS_SZOLGALTATAS_AFA_
 function buildSimplePdf(elements) {
   // elements: kevert lista — { type:'text', text, size, y, x, bold, color:[r,g,b] }
   //                        vagy { type:'rect', x, y, w, h, fill:[r,g,b] }
+  //                        vagy { type:'roundrect', x, y, w, h, r, fill:[r,g,b] } — kerekített sarkú téglalap
   //                        vagy { type:'line', x1, y1, x2, y2, color:[r,g,b], width }
   // y mindenhol a lap TETEJÉTŐL lefelé mérve (természetesebb elrendezéshez),
   // a függvény belül számolja át PDF-koordinátára (lentről felfelé).
@@ -1226,6 +1227,24 @@ function buildSimplePdf(elements) {
     if (el.type === 'rect') {
       const [r, g, b] = el.fill || [0, 0, 0];
       parts.push(`${r} ${g} ${b} rg ${el.x} ${toPdfY(el.y + el.h)} ${el.w} ${el.h} re f`);
+    } else if (el.type === 'roundrect') {
+      // Kerekített sarkú téglalap — 4 Bézier-ív a sarkokban (k ≈ kör-közelítő konstans).
+      const [r, g, b] = el.fill || [0, 0, 0];
+      const k = 0.5523;
+      const rad = Math.min(el.r ?? 8, el.w / 2, el.h / 2);
+      const x0 = el.x, y0pdf = toPdfY(el.y), x1 = el.x + el.w, y1pdf = toPdfY(el.y + el.h);
+      // y0pdf a téglalap TETEJE (PDF-koordinátában nagyobb érték), y1pdf az ALJA
+      parts.push(`${r} ${g} ${b} rg`);
+      parts.push(`${x0 + rad} ${y0pdf} m`);
+      parts.push(`${x1 - rad} ${y0pdf} l`);
+      parts.push(`${x1 - rad + rad * k} ${y0pdf} ${x1} ${y0pdf - rad + rad * k} ${x1} ${y0pdf - rad} c`);
+      parts.push(`${x1} ${y1pdf + rad} l`);
+      parts.push(`${x1} ${y1pdf + rad - rad * k} ${x1 - rad + rad * k} ${y1pdf} ${x1 - rad} ${y1pdf} c`);
+      parts.push(`${x0 + rad} ${y1pdf} l`);
+      parts.push(`${x0 + rad - rad * k} ${y1pdf} ${x0} ${y1pdf + rad - rad * k} ${x0} ${y1pdf + rad} c`);
+      parts.push(`${x0} ${y0pdf - rad} l`);
+      parts.push(`${x0} ${y0pdf - rad + rad * k} ${x0 + rad - rad * k} ${y0pdf} ${x0 + rad} ${y0pdf} c`);
+      parts.push(`h f`);
     } else if (el.type === 'line') {
       const [r, g, b] = el.color || [0, 0, 0];
       parts.push(`${el.width || 1} w ${r} ${g} ${b} RG ${el.x1} ${toPdfY(el.y1)} m ${el.x2} ${toPdfY(el.y2)} l S`);
@@ -6687,7 +6706,7 @@ function nextNagykerInvoiceNumber(cegKulcs) {
 }
 
 function buildNagykerInvoiceDataXml({
-  invoiceNumber, invoiceIssueDate,
+  invoiceNumber, invoiceIssueDate, fizetesiHatarido,
   sellerName, sellerTaxNumber, sellerAddress,
   buyerName, buyerTaxNumber, buyerAddress,
   tetelek, penznem,
@@ -6695,6 +6714,9 @@ function buildNagykerInvoiceDataXml({
   const eladoTax = parseHunTaxNumber(sellerTaxNumber);
   const vevoTax = parseHunTaxNumber(buyerTaxNumber);
   const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
+  const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
   const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
 
   const linesXml = tetelekBontva.map((t, i) => `<line>
@@ -6746,9 +6768,9 @@ function buildNagykerInvoiceDataXml({
           <customerVatStatus>DOMESTIC</customerVatStatus>
           <customerVatData>
             <customerTaxNumber>
-              <taxpayerId>${vevoTax.taxpayerId}</taxpayerId>
-              <vatCode>${vevoTax.vatCode}</vatCode>
-              <countyCode>${vevoTax.countyCode}</countyCode>
+              <base:taxpayerId>${vevoTax.taxpayerId}</base:taxpayerId>
+              <base:vatCode>${vevoTax.vatCode}</base:vatCode>
+              <base:countyCode>${vevoTax.countyCode}</base:countyCode>
             </customerTaxNumber>
           </customerVatData>
           <customerName>${escapeXml(buyerName)}</customerName>
@@ -6757,15 +6779,42 @@ function buildNagykerInvoiceDataXml({
         <invoiceDetail>
           <invoiceCategory>NORMAL</invoiceCategory>
           <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
-          <invoiceAppearance>ELECTRONIC</invoiceAppearance>
           <currencyCode>${escapeXml(penznem || 'HUF')}</currencyCode>
           <exchangeRate>1.00</exchangeRate>
+          <paymentMethod>TRANSFER</paymentMethod>
+          <paymentDate>${fizetesiHatarido || invoiceIssueDate}</paymentDate>
+          <invoiceAppearance>ELECTRONIC</invoiceAppearance>
         </invoiceDetail>
       </invoiceHead>
       <invoiceLines>
         <mergedItemIndicator>false</mergedItemIndicator>
         ${linesXml}
       </invoiceLines>
+      <invoiceSummary>
+        <summaryNormal>
+          <summaryByVatRate>
+            <vatRate>
+              <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+            </vatRate>
+            <vatRateNetData>
+              <vatRateNetAmount>${nettoOsszesen}</vatRateNetAmount>
+              <vatRateNetAmountHUF>${nettoOsszesen}</vatRateNetAmountHUF>
+            </vatRateNetData>
+            <vatRateVatData>
+              <vatRateVatAmount>${afaOsszesen}</vatRateVatAmount>
+              <vatRateVatAmountHUF>${afaOsszesen}</vatRateVatAmountHUF>
+            </vatRateVatData>
+          </summaryByVatRate>
+          <invoiceNetAmount>${nettoOsszesen}</invoiceNetAmount>
+          <invoiceNetAmountHUF>${nettoOsszesen}</invoiceNetAmountHUF>
+          <invoiceVatAmount>${afaOsszesen}</invoiceVatAmount>
+          <invoiceVatAmountHUF>${afaOsszesen}</invoiceVatAmountHUF>
+        </summaryNormal>
+        <summaryGrossData>
+          <invoiceGrossAmount>${bruttoOsszesen}</invoiceGrossAmount>
+          <invoiceGrossAmountHUF>${bruttoOsszesen}</invoiceGrossAmountHUF>
+        </summaryGrossData>
+      </invoiceSummary>
     </invoice>
   </invoiceMain>
 </InvoiceData>`;
@@ -6777,74 +6826,130 @@ function buildNagykerInvoiceDataXml({
 // válaszát (navQueryTransactionStatus), mielőtt éles adószámmal élesítenéd.
 
 function buildNagykerInvoicePdf({
-  sellerName, sellerAddress, sellerTaxNumber,
+  sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
   buyerName, buyerAddress, buyerTaxNumber,
-  tetelek, penznem, datum, szamlaSorszam,
+  tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido, megjegyzes,
 }) {
   const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
-  const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
+  const bruttoOsszesenPontos = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
   const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
   const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
+  // Kerekítés a legközelebbi forintra (a magyar számlázási gyakorlat szerint).
+  const bruttoKerekitve = Math.round(bruttoOsszesenPontos);
+  const kerekites = bruttoKerekitve - bruttoOsszesenPontos;
 
-  const JADE = [0.35, 0.58, 0.79]; const INK = [0.16, 0.2, 0.28]; const DIM = [0.45, 0.48, 0.53];
+  // --- Zabrakadabra márkaszínek — az olíva kb. 1,5 árnyalattal világosítva,
+  // hogy játékosabb, kevésbé "hivatalos-komor" hatást keltsen.
+  const OLIVE = [0.549, 0.579, 0.462];       // világosított olíva (kb. #8C9476)
+  const OLIVE_DEEP = [0.306, 0.353, 0.173];  // az eredeti, mélyebb olíva — csak szövegekhez
+  const PINK = [0.839, 0.251, 0.494];        // #D6407E
+  const PINK_DEEP = [0.663, 0.157, 0.369];   // #A9285E
+  const PINK_SOFT = [0.965, 0.827, 0.886];   // halvány rózsaszín kártya-háttér
+  const CREAM = [0.980, 0.965, 0.925];       // #FAF6EC
+  const INK = [0.165, 0.165, 0.125];
+  const DIM = [0.42, 0.42, 0.36];
+
   const els = [];
-  els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 90, fill: JADE });
-  els.push({ type: 'text', x: 50, y: 40, text: sellerName, size: 18, bold: true, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 50, y: 62, text: 'Szamla', size: 11, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 380, y: 32, text: 'Szamla sorszama:', size: 9, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 380, y: 46, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 380, y: 62, text: `Kibocsatas kelte: ${datum}`, size: 9, color: [1, 1, 1] });
-  els.push({ type: 'text', x: 380, y: 76, text: `Teljesites kelte: ${datum}`, size: 9, color: [1, 1, 1] });
 
-  const infoTop = 130;
-  els.push({ type: 'text', x: 50, y: infoTop, text: 'ELADO', size: 9, bold: true, color: DIM });
-  els.push({ type: 'text', x: 50, y: infoTop + 16, text: sellerName, size: 11, bold: true, color: INK });
-  els.push({ type: 'text', x: 50, y: infoTop + 31, text: sellerAddress?.szoveg || '-', size: 9, color: DIM });
-  els.push({ type: 'text', x: 50, y: infoTop + 45, text: `Adoszam: ${sellerTaxNumber || '-'}`, size: 9, color: DIM });
+  // --- Fejléc: világos olíva sáv, kerekített alsó sarkokkal ---
+  els.push({ type: 'roundrect', x: 0, y: 0, w: 595, h: 100, r: 18, fill: OLIVE });
+  els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 82, fill: OLIVE }); // felül négyzetes marad (lapszélhez simul), csak alul kerekített
 
-  els.push({ type: 'text', x: 320, y: infoTop, text: 'VEVO', size: 9, bold: true, color: DIM });
-  els.push({ type: 'text', x: 320, y: infoTop + 16, text: buyerName, size: 11, bold: true, color: INK });
-  els.push({ type: 'text', x: 320, y: infoTop + 31, text: buyerAddress?.szoveg || '(nincs megadva szamlazasi cim)', size: 9, color: DIM });
-  els.push({ type: 'text', x: 320, y: infoTop + 45, text: `Adoszam: ${buyerTaxNumber || '-'}`, size: 9, color: DIM });
+  // --- Logó + cégnév: EGY blokk, egymáshoz képest függőlegesen középre igazítva ---
+  const logoX = 50, logoCenterY = 50, logoW = 30, logoH = 32;
+  // 3 egymásra rakott, lekerekített "torta-réteg" + egy kis "gyertya" pötty
+  els.push({ type: 'roundrect', x: logoX, y: logoCenterY + 6, w: logoW, h: 9, r: 4, fill: CREAM });
+  els.push({ type: 'roundrect', x: logoX + 3, y: logoCenterY - 4, w: logoW - 7, h: 10, r: 4, fill: PINK });
+  els.push({ type: 'roundrect', x: logoX + 7, y: logoCenterY - 13, w: logoW - 15, h: 9, r: 3.5, fill: CREAM });
+  els.push({ type: 'roundrect', x: logoX + logoW / 2 - 3, y: logoCenterY - 19, w: 6, h: 6, r: 3, fill: [0.94, 0.70, 0.30] });
+  // A cégnév a logó FÜGGŐLEGES KÖZEPÉHEZ igazítva (nem a doboz tetejéhez)
+  els.push({ type: 'text', x: logoX + logoW + 16, y: logoCenterY + 6, text: sellerName, size: 16.5, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: logoX + logoW + 16, y: logoCenterY + 22, text: 'Szamla', size: 10, color: CREAM });
 
-  els.push({ type: 'line', x1: 50, y1: infoTop + 76, x2: 545, y2: infoTop + 76, color: [0.85, 0.85, 0.85], width: 1 });
+  els.push({ type: 'text', x: 390, y: 22, text: 'Szamla sorszama', size: 8, color: CREAM });
+  els.push({ type: 'text', x: 390, y: 35, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 390, y: 52, text: `Kelt: ${datum}    Telj.: ${datum}`, size: 8.5, color: CREAM });
+  els.push({ type: 'text', x: 390, y: 64, text: `Fiz. hatarido: ${fizetesiHatarido || datum}`, size: 8.5, color: CREAM });
+  els.push({ type: 'text', x: 390, y: 76, text: 'Fizetesi mod: Utalas', size: 8.5, color: CREAM });
 
-  const tableTop = infoTop + 100;
-  els.push({ type: 'rect', x: 50, y: tableTop - 16, w: 495, h: 22, fill: [0.95, 0.96, 0.97] });
-  els.push({ type: 'text', x: 55, y: tableTop, text: 'Megnevezes', size: 8.5, bold: true, color: INK });
-  els.push({ type: 'text', x: 230, y: tableTop, text: 'Menny.', size: 8.5, bold: true, color: INK });
-  els.push({ type: 'text', x: 280, y: tableTop, text: 'Netto egys.ar', size: 8.5, bold: true, color: INK });
-  els.push({ type: 'text', x: 345, y: tableTop, text: 'AFA%', size: 8.5, bold: true, color: INK });
-  els.push({ type: 'text', x: 375, y: tableTop, text: 'AFA osszeg', size: 8.5, bold: true, color: INK });
-  els.push({ type: 'text', x: 450, y: tableTop, text: 'Brutto', size: 8.5, bold: true, color: INK });
-  let rowY = tableTop + 24;
-  for (const t of tetelekBontva) {
-    const nevRovidítve = t.nev.length > 28 ? `${t.nev.slice(0, 25)}...` : t.nev;
-    const egysegNetto = Math.round(t.netto / (t.mennyiseg || 1));
-    els.push({ type: 'text', x: 55, y: rowY, text: nevRovidítve, size: 8.5, color: INK });
-    els.push({ type: 'text', x: 230, y: rowY, text: `${t.mennyiseg || 1} ${t.mertekegyseg || 'db'}`, size: 8.5, color: INK });
-    els.push({ type: 'text', x: 280, y: rowY, text: `${egysegNetto.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
-    els.push({ type: 'text', x: 345, y: rowY, text: `${t.afaSzazalek}%`, size: 8.5, color: INK });
-    els.push({ type: 'text', x: 375, y: rowY, text: `${t.afa.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
-    els.push({ type: 'text', x: 450, y: rowY, text: `${t.brutto.toLocaleString('hu-HU')} ${penznem}`, size: 8.5, color: INK });
-    els.push({ type: 'line', x1: 50, y1: rowY + 9, x2: 545, y2: rowY + 9, color: [0.92, 0.92, 0.92], width: 0.5 });
-    rowY += 22;
+  // --- Eladó / Vevő — kerekített, halvány kártyák ---
+  const infoTop = 132;
+  const cardH = sellerBankAccount ? 78 : 65;
+  els.push({ type: 'roundrect', x: 44, y: infoTop - 12, w: 250, h: cardH, r: 10, fill: [0.99, 0.98, 0.95] });
+  els.push({ type: 'roundrect', x: 314, y: infoTop - 12, w: 237, h: cardH, r: 10, fill: [0.99, 0.98, 0.95] });
+
+  els.push({ type: 'text', x: 56, y: infoTop, text: 'ELADO', size: 8.5, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 56, y: infoTop + 15, text: sellerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 56, y: infoTop + 29, text: sellerAddress?.szoveg || '-', size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 56, y: infoTop + 42, text: `Adoszam: ${sellerTaxNumber || '-'}`, size: 8.5, color: DIM });
+  if (sellerBankAccount) {
+    els.push({ type: 'text', x: 56, y: infoTop + 55, text: `Bankszamla: ${sellerBankAccount}`, size: 8.5, color: DIM });
   }
-  rowY += 8;
-  els.push({ type: 'line', x1: 50, y1: rowY, x2: 545, y2: rowY, color: INK, width: 1.2 });
+
+  els.push({ type: 'text', x: 326, y: infoTop, text: 'VEVO', size: 8.5, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 326, y: infoTop + 15, text: buyerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 326, y: infoTop + 29, text: buyerAddress?.szoveg || '(nincs megadva szamlazasi cim)', size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 326, y: infoTop + 42, text: `Adoszam: ${buyerTaxNumber || '-'}`, size: 8.5, color: DIM });
+
+  // --- Tételes táblázat (Cikkszám oszloppal, kerekített fejléc-sávval) ---
+  const tableTop = infoTop + cardH + 26;
+  els.push({ type: 'roundrect', x: 44, y: tableTop - 16, w: 507, h: 22, r: 8, fill: PINK_SOFT });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Cikkszam', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 110, y: tableTop, text: 'Megnevezes', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 275, y: tableTop, text: 'Menny.', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 320, y: tableTop, text: 'Netto e.ar', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 378, y: tableTop, text: 'AFA%', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 408, y: tableTop, text: 'AFA', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 455, y: tableTop, text: 'Brutto', size: 8, bold: true, color: PINK_DEEP });
+
+  let rowY = tableTop + 24;
+  const sorMagassag = tetelekBontva.length > 20 ? 15 : 20; // sok tétel esetén tömörebb sorok
+  for (const t of tetelekBontva) {
+    const nevRovidítve = t.nev.length > 32 ? `${t.nev.slice(0, 29)}...` : t.nev;
+    const egysegNetto = Math.round(t.netto / (t.mennyiseg || 1));
+    els.push({ type: 'text', x: 55, y: rowY, text: t.cikkszam || '-', size: 8, color: DIM });
+    els.push({ type: 'text', x: 110, y: rowY, text: nevRovidítve, size: 8, color: INK });
+    els.push({ type: 'text', x: 275, y: rowY, text: `${t.mennyiseg || 1} ${t.mertekegyseg || 'db'}`, size: 8, color: INK });
+    els.push({ type: 'text', x: 320, y: rowY, text: `${egysegNetto.toLocaleString('hu-HU')}`, size: 8, color: INK });
+    els.push({ type: 'text', x: 378, y: rowY, text: `${t.afaSzazalek}%`, size: 8, color: INK });
+    els.push({ type: 'text', x: 408, y: rowY, text: `${Math.round(t.afa).toLocaleString('hu-HU')}`, size: 8, color: INK });
+    els.push({ type: 'text', x: 455, y: rowY, text: `${Math.round(t.brutto).toLocaleString('hu-HU')}`, size: 8, color: INK });
+    els.push({ type: 'line', x1: 50, y1: rowY + 7, x2: 545, y2: rowY + 7, color: [0.93, 0.88, 0.9], width: 0.5 });
+    rowY += sorMagassag;
+  }
+
+  rowY += 10;
+  els.push({ type: 'line', x1: 300, y1: rowY, x2: 545, y2: rowY, color: OLIVE_DEEP, width: 1.2 });
+  rowY += 16;
+  els.push({ type: 'text', x: 300, y: rowY, text: `Netto osszesen:`, size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 455, y: rowY, text: `${Math.round(nettoOsszesen).toLocaleString('hu-HU')} ${penznem}`, size: 8.5, color: INK });
+  rowY += 14;
+  els.push({ type: 'text', x: 300, y: rowY, text: `AFA osszesen:`, size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 455, y: rowY, text: `${Math.round(afaOsszesen).toLocaleString('hu-HU')} ${penznem}`, size: 8.5, color: INK });
+  if (Math.abs(kerekites) >= 1) {
+    rowY += 14;
+    els.push({ type: 'text', x: 300, y: rowY, text: `Kerekites:`, size: 8.5, color: DIM });
+    els.push({ type: 'text', x: 455, y: rowY, text: `${kerekites > 0 ? '+' : ''}${Math.round(kerekites)} ${penznem}`, size: 8.5, color: INK });
+  }
   rowY += 18;
-  els.push({ type: 'text', x: 280, y: rowY, text: `Netto osszesen: ${nettoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
-  rowY += 15;
-  els.push({ type: 'text', x: 280, y: rowY, text: `AFA osszesen: ${afaOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
-  rowY += 20;
-  els.push({ type: 'text', x: 280, y: rowY, text: 'Fizetendo (brutto)', size: 12, bold: true, color: INK });
-  els.push({ type: 'text', x: 450, y: rowY, text: `${bruttoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: JADE });
+  els.push({ type: 'roundrect', x: 296, y: rowY - 15, w: 255, h: 26, r: 9, fill: PINK_SOFT });
+  els.push({ type: 'text', x: 308, y: rowY, text: 'Fizetendo (brutto)', size: 12.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 455, y: rowY, text: `${bruttoKerekitve.toLocaleString('hu-HU')} ${penznem}`, size: 13.5, bold: true, color: PINK_DEEP });
+
+  if (megjegyzes) {
+    rowY += 34;
+    els.push({ type: 'line', x1: 50, y1: rowY - 12, x2: 545, y2: rowY - 12, color: [0.9, 0.9, 0.88], width: 0.5 });
+    els.push({ type: 'text', x: 50, y: rowY, text: 'MEGJEGYZES', size: 8, bold: true, color: OLIVE_DEEP });
+    els.push({ type: 'text', x: 50, y: rowY + 13, text: megjegyzes.length > 95 ? `${megjegyzes.slice(0, 92)}...` : megjegyzes, size: 8.5, color: DIM });
+  }
+
+  els.push({ type: 'text', x: 50, y: 800, text: 'Zabrakadabra Nagyker modul - lnyugta.hu/nagyker', size: 7, color: [0.7, 0.7, 0.65] });
 
   return buildSimplePdf(els);
 }
 
 // --- Orchestrátor: NAV-kapcsolat lekérdezése + XML + beküldés + PDF + email -
-async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF' }) {
+async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', fizetesiHatarido, megjegyzes }) {
   const creds = getCompanyNavCreds(cegKulcs);
   if (!creds || !navCredsComplete(creds)) {
     throw new Error(`A(z) "${cegKulcs}" cégnek nincs beállítva saját NAV-kapcsolata (Profil > NAV Online Számla).`);
@@ -6863,9 +6968,10 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxN
   const datum = todayIsoServer();
   const szamlaSorszam = nextNagykerInvoiceNumber(cegKulcs);
   const sellerTaxNumber = creds.taxNumber;
+  const hataridoVegleges = fizetesiHatarido || datum;
 
   const invoiceDataXml = buildNagykerInvoiceDataXml({
-    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum,
+    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum, fizetesiHatarido: hataridoVegleges,
     sellerName, sellerTaxNumber, sellerAddress,
     buyerName, buyerTaxNumber, buyerAddress,
     tetelek, penznem,
@@ -6874,9 +6980,9 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxN
   const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds);
 
   const pdf = buildNagykerInvoicePdf({
-    sellerName, sellerAddress, sellerTaxNumber,
+    sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
     buyerName, buyerAddress, buyerTaxNumber,
-    tetelek, penznem, datum, szamlaSorszam,
+    tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido: hataridoVegleges, megjegyzes,
   });
   const fajlnev = `${szamlaSorszam.replace(/\//g, '-')}.pdf`;
   fs.writeFileSync(path.join(INVOICES_DIR, fajlnev), pdf);
@@ -6886,20 +6992,20 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxN
       await sendBrevoEmail({
         toEmail: buyerEmail, toName: buyerName,
         subject: `Számla — ${szamlaSorszam}`,
-        html: `<p>Tisztelt ${escapeXml(buyerName)}!</p><p>Csatoltan küldjük a(z) <b>${escapeXml(szamlaSorszam)}</b> számú számlát.</p><p>Üdvözlettel,<br>${escapeXml(sellerName)}</p>`,
+        html: `<p>Tisztelt ${escapeXml(buyerName)}!</p><p>Csatoltan küldjük a(z) <b>${escapeXml(szamlaSorszam)}</b> számú számlát.</p><p>Fizetési határidő: ${hataridoVegleges}.</p><p>Üdvözlettel,<br>${escapeXml(sellerName)}</p>`,
         attachments: [{ name: `${fajlnev}`, content: pdf }],
       });
     } catch (emailErr) {
       // A számla EKKORRA már beküldésre került a NAV-nak — az email-küldés
       // hibája nem vonhatja vissza ezt. A hívó (Nagyker modul) felelőssége
       // eldönteni, mit tesz, ha emailHiba nem null (pl. figyelmezteti a nagykert).
-      return { szamlaSorszam, transactionId, fajlnev, emailHiba: emailErr.message };
+      return { szamlaSorszam, transactionId, fajlnev, pdfBase64: pdf.toString("base64"), emailHiba: emailErr.message };
     }
   }
 
   logActivity({ type: 'nagyker_invoice_created', ok: true, companyKey: cegKulcs, nev: null, detail: `Nagyker számla beküldve: ${szamlaSorszam} (NAV tranzakció: ${transactionId})` });
 
-  return { szamlaSorszam, transactionId, fajlnev, emailHiba: null };
+  return { szamlaSorszam, transactionId, fajlnev, pdfBase64: pdf.toString("base64"), emailHiba: null };
 }
 
 // POST /internal/nagyker/create-invoice — a Nagyker modul hívja meg,
@@ -6915,12 +7021,12 @@ route('POST', '/api/internal/nagyker/create-invoice', async (req, res) => {
   } catch {
     return sendJson(res, 400, { error: 'INVALID_JSON' });
   }
-  const { cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem } = body || {};
+  const { cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes } = body || {};
   if (!cegKulcs || !sellerName || !buyerName || !buyerTaxNumber || !Array.isArray(tetelek) || tetelek.length === 0) {
     return sendJson(res, 400, { error: 'MISSING_FIELDS' });
   }
   try {
-    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem });
+    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes });
     return sendJson(res, 200, eredmeny);
   } catch (err) {
     console.error('[nagyker-szamlazas] hiba:', err.message);
