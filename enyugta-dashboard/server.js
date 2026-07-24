@@ -7392,6 +7392,35 @@ route('POST', '/api/internal/nagyker/create-storno-invoice', async (req, res) =>
   }
 });
 
+// POST /api/internal/nagyker/send-email — ÁLTALÁNOS célú email-küldés
+// PDF-melléklettel, a már meglévő Brevo-kapcsolaton keresztül. Ez NEM
+// NAV-számlázás — bármilyen belső riporthoz (pl. a Nagyker modul napi
+// "Termelés" összesítőjéhez) újrafelhasználható, hogy ne kelljen a Nagyker
+// modulnak saját Brevo-hitelesítést beállítania.
+route('POST', '/api/internal/nagyker/send-email', async (req, res) => {
+  if (!NAGYKER_BRIDGE_SECRET || req.headers['x-internal-secret'] !== NAGYKER_BRIDGE_SECRET) {
+    return sendJson(res, 401, { error: 'UNAUTHORIZED' });
+  }
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    return sendJson(res, 400, { error: 'INVALID_JSON' });
+  }
+  const { toEmail, toName, subject, html, pdfBase64, filename } = body || {};
+  if (!toEmail || !subject || !html) {
+    return sendJson(res, 400, { error: 'MISSING_FIELDS' });
+  }
+  try {
+    const attachments = pdfBase64 ? [{ name: filename || 'melleklet.pdf', content: Buffer.from(pdfBase64, 'base64') }] : undefined;
+    await sendBrevoEmail({ toEmail, toName: toName || toEmail, subject, html, attachments });
+    return sendJson(res, 200, { ok: true });
+  } catch (err) {
+    console.error('[nagyker-email] hiba:', err.message);
+    return sendJson(res, 500, { error: err.message });
+  }
+});
+
 async function navApiCall(operation, bodyXml, baseUrl) {
   const resp = await fetch(`${baseUrl || NAV_BASE_URL}/${operation}`, {
     method: 'POST',
