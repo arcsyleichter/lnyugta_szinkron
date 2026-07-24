@@ -6686,26 +6686,53 @@ function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, bu
 // keresztül, rendelés-jóváhagyáskor.
 
 // --- Nagyker-számlák saját, cégenkénti sorszám-sorozata ---------------------
-function nextNagykerInvoiceNumber(cegKulcs) {
+// Közös, cégenkénti (és sorozatonkénti) számlaszám-generátor — bármely
+// modul használhatja a saját sorozat-előtagjával (pl. 'NK' a Nagyker
+// modulnak), a NAV megköveteli, hogy a sorszámozás egyértelmű és
+// folyamatos legyen sorozaton belül, évente újrainduló.
+function nextSharedInvoiceNumber(cegKulcs, sorozatElotag = 'NK') {
   licenseDb.exec(`
     CREATE TABLE IF NOT EXISTS nagyker_invoice_counter (
       ceg_kulcs TEXT NOT NULL,
       ev INTEGER NOT NULL,
+      sorozat TEXT NOT NULL DEFAULT 'NK',
       utolso_sorszam INTEGER NOT NULL,
-      PRIMARY KEY (ceg_kulcs, ev)
+      PRIMARY KEY (ceg_kulcs, ev, sorozat)
     );
   `);
+  // Biztonságos migráció: ha a tábla egy KORÁBBI, 2-oszlopos elsődleges
+  // kulccsal (ceg_kulcs, ev) már létezik éles adatokkal, az ALTER TABLE ADD
+  // COLUMN önmagában NEM bővítené a PRIMARY KEY-t (SQLite ezt nem támogatja
+  // közvetlenül), ezért a lenti ON CONFLICT célzás hibázna. Emiatt teljes
+  // tábla-átmásolással migrálunk, adatvesztés nélkül.
+  const oszlopok = licenseDb.prepare(`PRAGMA table_info(nagyker_invoice_counter)`).all().map(c => c.name);
+  if (!oszlopok.includes('sorozat')) {
+    licenseDb.exec(`
+      ALTER TABLE nagyker_invoice_counter RENAME TO nagyker_invoice_counter_regi;
+      CREATE TABLE nagyker_invoice_counter (
+        ceg_kulcs TEXT NOT NULL,
+        ev INTEGER NOT NULL,
+        sorozat TEXT NOT NULL DEFAULT 'NK',
+        utolso_sorszam INTEGER NOT NULL,
+        PRIMARY KEY (ceg_kulcs, ev, sorozat)
+      );
+      INSERT INTO nagyker_invoice_counter (ceg_kulcs, ev, sorozat, utolso_sorszam)
+        SELECT ceg_kulcs, ev, 'NK', utolso_sorszam FROM nagyker_invoice_counter_regi;
+      DROP TABLE nagyker_invoice_counter_regi;
+    `);
+    console.log('[szamlazo-motor] Migráció: nagyker_invoice_counter tábla áttéve a sorozat-alapú sémára.');
+  }
   const ev = new Date().getFullYear();
-  const row = licenseDb.prepare(`SELECT utolso_sorszam FROM nagyker_invoice_counter WHERE ceg_kulcs = ? AND ev = ?`).get(cegKulcs, ev);
+  const row = licenseDb.prepare(`SELECT utolso_sorszam FROM nagyker_invoice_counter WHERE ceg_kulcs = ? AND ev = ? AND sorozat = ?`).get(cegKulcs, ev, sorozatElotag);
   const sorszam = row ? row.utolso_sorszam + 1 : 1;
   licenseDb.prepare(`
-    INSERT INTO nagyker_invoice_counter (ceg_kulcs, ev, utolso_sorszam) VALUES (?, ?, ?)
-    ON CONFLICT(ceg_kulcs, ev) DO UPDATE SET utolso_sorszam = excluded.utolso_sorszam
-  `).run(cegKulcs, ev, sorszam);
-  return `NK-${cegKulcs}-${ev}/${String(sorszam).padStart(6, '0')}`;
+    INSERT INTO nagyker_invoice_counter (ceg_kulcs, ev, sorozat, utolso_sorszam) VALUES (?, ?, ?, ?)
+    ON CONFLICT(ceg_kulcs, ev, sorozat) DO UPDATE SET utolso_sorszam = excluded.utolso_sorszam
+  `).run(cegKulcs, ev, sorozatElotag, sorszam);
+  return `${sorozatElotag}-${cegKulcs}-${ev}/${String(sorszam).padStart(6, '0')}`;
 }
 
-function buildNagykerInvoiceDataXml({
+function buildInvoiceDataXml({
   invoiceNumber, invoiceIssueDate, fizetesiHatarido, fizetesiMod,
   sellerName, sellerTaxNumber, sellerAddress,
   buyerName, buyerTaxNumber, buyerAddress,
@@ -6830,7 +6857,7 @@ function buildNagykerInvoiceDataXml({
 // MINDENKÉPP NAV teszt- (sandbox) környezetben küldd be, és nézd meg a NAV
 // válaszát (navQueryTransactionStatus), mielőtt éles adószámmal élesítenéd.
 
-function buildNagykerInvoicePdf({
+function buildInvoicePdf({
   sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
   buyerName, buyerAddress, buyerTaxNumber,
   tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido, megjegyzes, fizetesiMod,
@@ -6955,8 +6982,214 @@ function buildNagykerInvoicePdf({
   return buildSimplePdf(els);
 }
 
+// ============================================================================
+// SZTORNÓ (ÉRVÉNYTELENÍTŐ OKIRAT) — 2026-07-24 hozzáadva
+// ============================================================================
+// A NAV hivatalos "Példaszámlák és XML-ek" dokumentuma (4.2.3 fejezet,
+// "Érvénytelenítő okirat") szerint: a sztornó egy MODIFY kategóriájú
+// számlával egy tekintet alá eső okirat, ami az EREDETI számla minden
+// tételét megismétli, NEGATÍV mennyiséggel (az egységár változatlan), és
+// invoiceReference blokkban hivatkozik az eredeti számlára +
+// modificationIndex-szel jelzi, hányadik módosítás az eredetihez képest.
+// Forrás: http://www.ugyviteliszoftverek.com/nav/szamlamintak_v3_0.pdf
+
+function buildStornoInvoiceDataXml({
+  invoiceNumber, invoiceIssueDate, originalInvoiceNumber, modificationIndex,
+  sellerName, sellerTaxNumber, sellerAddress,
+  buyerName, buyerTaxNumber, buyerAddress,
+  tetelek, // EREDETI (pozitív) tételek — a függvény negálja őket
+  penznem,
+}) {
+  const eladoTax = parseHunTaxNumber(sellerTaxNumber);
+  const vevoTax = parseHunTaxNumber(buyerTaxNumber);
+  // Minden tétel NEGÁLVA (mennyiség és összeg is előjelet vált) — ez fejezi
+  // ki, hogy a korábban leszámlázott tételek "visszavonásra" kerülnek.
+  const tetelekNegalva = tetelek.map((t) => ({
+    ...t,
+    mennyiseg: -(t.mennyiseg ?? 1),
+    ...splitBruttoToNettoAfa(-t.osszeg),
+  }));
+  const nettoOsszesen = tetelekNegalva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekNegalva.reduce((s, t) => s + t.afa, 0);
+  const bruttoOsszesen = tetelekNegalva.reduce((s, t) => s + t.brutto, 0);
+  const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
+
+  const linesXml = tetelekNegalva.map((t, i) => `<line>
+        <lineNumber>${i + 1}</lineNumber>
+        <lineModificationReference>
+          <lineNumberReference>${i + 1}</lineNumberReference>
+          <lineOperation>CREATE</lineOperation>
+        </lineModificationReference>
+        <lineExpressionIndicator>true</lineExpressionIndicator>
+        <lineNatureIndicator>PRODUCT</lineNatureIndicator>
+        <lineDescription>${escapeXml(t.nev)}</lineDescription>
+        <quantity>${t.mennyiseg.toFixed(2)}</quantity>
+        <unitOfMeasure>OWN</unitOfMeasure>
+        <unitOfMeasureOwn>${escapeXml(t.mertekegyseg || 'db')}</unitOfMeasureOwn>
+        <unitPrice>${(t.netto / t.mennyiseg).toFixed(2)}</unitPrice>
+        <unitPriceHUF>${(t.netto / t.mennyiseg).toFixed(2)}</unitPriceHUF>
+        <lineAmountsNormal>
+          <lineNetAmountData>
+            <lineNetAmount>${t.netto}</lineNetAmount>
+            <lineNetAmountHUF>${t.netto}</lineNetAmountHUF>
+          </lineNetAmountData>
+          <lineVatRate>
+            <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+          </lineVatRate>
+          <lineVatData>
+            <lineVatAmount>${t.afa}</lineVatAmount>
+            <lineVatAmountHUF>${t.afa}</lineVatAmountHUF>
+          </lineVatData>
+          <lineGrossAmountData>
+            <lineGrossAmountNormal>${t.brutto}</lineGrossAmountNormal>
+            <lineGrossAmountNormalHUF>${t.brutto}</lineGrossAmountNormalHUF>
+          </lineGrossAmountData>
+        </lineAmountsNormal>
+      </line>`).join('\n      ');
+
+  return `<InvoiceData xmlns="http://schemas.nav.gov.hu/OSA/3.0/data" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.nav.gov.hu/OSA/3.0/data invoiceData.xsd" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
+  <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
+  <invoiceIssueDate>${invoiceIssueDate}</invoiceIssueDate>
+  <completenessIndicator>false</completenessIndicator>
+  <invoiceReference>
+    <originalInvoiceNumber>${escapeXml(originalInvoiceNumber)}</originalInvoiceNumber>
+    <modifyWithoutMaster>false</modifyWithoutMaster>
+    <modificationIndex>${modificationIndex}</modificationIndex>
+  </invoiceReference>
+  <invoiceMain>
+    <invoice>
+      <invoiceHead>
+        <supplierInfo>
+          <supplierTaxNumber>
+            <base:taxpayerId>${eladoTax.taxpayerId}</base:taxpayerId>
+            <base:vatCode>${eladoTax.vatCode}</base:vatCode>
+            <base:countyCode>${eladoTax.countyCode}</base:countyCode>
+          </supplierTaxNumber>
+          <supplierName>${escapeXml(sellerName)}</supplierName>
+          ${navAddressXml('supplierAddress', sellerAddress)}
+        </supplierInfo>
+        <customerInfo>
+          <customerVatStatus>DOMESTIC</customerVatStatus>
+          <customerVatData>
+            <customerTaxNumber>
+              <base:taxpayerId>${vevoTax.taxpayerId}</base:taxpayerId>
+              <base:vatCode>${vevoTax.vatCode}</base:vatCode>
+              <base:countyCode>${vevoTax.countyCode}</base:countyCode>
+            </customerTaxNumber>
+          </customerVatData>
+          <customerName>${escapeXml(buyerName)}</customerName>
+          ${navAddressXml('customerAddress', buyerAddress)}
+        </customerInfo>
+        <invoiceDetail>
+          <invoiceCategory>MODIFY</invoiceCategory>
+          <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
+          <currencyCode>${escapeXml(penznem || 'HUF')}</currencyCode>
+          <exchangeRate>1.00</exchangeRate>
+          <invoiceAppearance>ELECTRONIC</invoiceAppearance>
+        </invoiceDetail>
+      </invoiceHead>
+      <invoiceLines>
+        <mergedItemIndicator>false</mergedItemIndicator>
+        ${linesXml}
+      </invoiceLines>
+      <invoiceSummary>
+        <summaryNormal>
+          <summaryByVatRate>
+            <vatRate>
+              <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+            </vatRate>
+            <vatRateNetData>
+              <vatRateNetAmount>${nettoOsszesen}</vatRateNetAmount>
+              <vatRateNetAmountHUF>${nettoOsszesen}</vatRateNetAmountHUF>
+            </vatRateNetData>
+            <vatRateVatData>
+              <vatRateVatAmount>${afaOsszesen}</vatRateVatAmount>
+              <vatRateVatAmountHUF>${afaOsszesen}</vatRateVatAmountHUF>
+            </vatRateVatData>
+          </summaryByVatRate>
+          <invoiceNetAmount>${nettoOsszesen}</invoiceNetAmount>
+          <invoiceNetAmountHUF>${nettoOsszesen}</invoiceNetAmountHUF>
+          <invoiceVatAmount>${afaOsszesen}</invoiceVatAmount>
+          <invoiceVatAmountHUF>${afaOsszesen}</invoiceVatAmountHUF>
+        </summaryNormal>
+        <summaryGrossData>
+          <invoiceGrossAmount>${bruttoOsszesen}</invoiceGrossAmount>
+          <invoiceGrossAmountHUF>${bruttoOsszesen}</invoiceGrossAmountHUF>
+        </summaryGrossData>
+      </invoiceSummary>
+    </invoice>
+  </invoiceMain>
+</InvoiceData>`;
+}
+
+function buildStornoInvoicePdf({
+  sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
+  buyerName, buyerAddress, buyerTaxNumber,
+  tetelek, penznem, datum, szamlaSorszam, eredetiSzamlaszam,
+}) {
+  const tetelekNegalva = tetelek.map((t) => ({ ...t, mennyiseg: -(t.mennyiseg ?? 1), ...splitBruttoToNettoAfa(-t.osszeg) }));
+  const nettoOsszesen = tetelekNegalva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekNegalva.reduce((s, t) => s + t.afa, 0);
+  const bruttoOsszesen = tetelekNegalva.reduce((s, t) => s + t.brutto, 0);
+
+  const PIROS = [0.729, 0.184, 0.184]; const PIROS_HALVANY = [0.988, 0.925, 0.925];
+  const INK = [0.165, 0.165, 0.125]; const DIM = [0.42, 0.42, 0.36];
+  const els = [];
+
+  els.push({ type: 'roundrect', x: 0, y: 0, w: 595, h: 100, r: 18, fill: PIROS });
+  els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 82, fill: PIROS });
+  els.push({ type: 'text', x: 50, y: 34, text: 'ÉRVÉNYTELENÍTŐ SZÁMLA', size: 17, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 50, y: 54, text: sellerName, size: 10.5, color: PIROS_HALVANY });
+  els.push({ type: 'text', x: 50, y: 70, text: `A(z) ${eredetiSzamlaszam} számú számla érvénytelenítése`, size: 9, color: PIROS_HALVANY });
+
+  els.push({ type: 'text', x: 390, y: 22, text: 'Sztornó sorszáma', size: 8, color: PIROS_HALVANY });
+  els.push({ type: 'text', x: 390, y: 35, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 390, y: 52, text: `Kelt: ${datum}`, size: 8.5, color: PIROS_HALVANY });
+
+  const infoTop = 132;
+  const cardH = sellerBankAccount ? 78 : 65;
+  els.push({ type: 'roundrect', x: 44, y: infoTop - 12, w: 250, h: cardH, r: 10, fill: [0.99, 0.98, 0.95] });
+  els.push({ type: 'roundrect', x: 314, y: infoTop - 12, w: 237, h: cardH, r: 10, fill: [0.99, 0.98, 0.95] });
+  els.push({ type: 'text', x: 56, y: infoTop, text: 'ELADO', size: 8.5, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 56, y: infoTop + 15, text: sellerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 56, y: infoTop + 29, text: sellerAddress?.szoveg || '-', size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 56, y: infoTop + 42, text: `Adoszam: ${sellerTaxNumber || '-'}`, size: 8.5, color: DIM });
+  if (sellerBankAccount) els.push({ type: 'text', x: 56, y: infoTop + 55, text: `Bankszamla: ${sellerBankAccount}`, size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 326, y: infoTop, text: 'VEVO', size: 8.5, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 326, y: infoTop + 15, text: buyerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 326, y: infoTop + 29, text: buyerAddress?.szoveg || '-', size: 8.5, color: DIM });
+  els.push({ type: 'text', x: 326, y: infoTop + 42, text: `Adoszam: ${buyerTaxNumber || '-'}`, size: 8.5, color: DIM });
+
+  const tableTop = infoTop + cardH + 26;
+  els.push({ type: 'roundrect', x: 44, y: tableTop - 16, w: 507, h: 22, r: 8, fill: PIROS_HALVANY });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Megnevezes', size: 8, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 275, y: tableTop, text: 'Menny.', size: 8, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 330, y: tableTop, text: 'Netto e.ar', size: 8, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 400, y: tableTop, text: 'AFA', size: 8, bold: true, color: PIROS });
+  els.push({ type: 'text', x: 460, y: tableTop, text: 'Brutto', size: 8, bold: true, color: PIROS });
+
+  let rowY = tableTop + 22;
+  for (const t of tetelekNegalva) {
+    const nevRovidítve = t.nev.length > 34 ? `${t.nev.slice(0, 31)}...` : t.nev;
+    els.push({ type: 'text', x: 55, y: rowY, text: nevRovidítve, size: 8, color: INK });
+    els.push({ type: 'text', x: 275, y: rowY, text: `${t.mennyiseg} ${t.mertekegyseg || 'db'}`, size: 8, color: PIROS });
+    els.push({ type: 'text', x: 330, y: rowY, text: `${Math.round(t.netto / t.mennyiseg).toLocaleString('hu-HU')}`, size: 8, color: INK });
+    els.push({ type: 'text', x: 400, y: rowY, text: `${Math.round(t.afa).toLocaleString('hu-HU')}`, size: 8, color: PIROS });
+    els.push({ type: 'text', x: 460, y: rowY, text: `${Math.round(t.brutto).toLocaleString('hu-HU')}`, size: 8, color: PIROS });
+    rowY += 20;
+  }
+
+  rowY += 16;
+  els.push({ type: 'roundrect', x: 296, y: rowY - 15, w: 255, h: 26, r: 9, fill: PIROS_HALVANY });
+  els.push({ type: 'text', x: 308, y: rowY, text: 'Érvénytelenített összeg', size: 12, bold: true, color: INK });
+  els.push({ type: 'text', x: 455, y: rowY, text: `${bruttoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: PIROS });
+
+  els.push({ type: 'text', x: 50, y: 800, text: 'Zabrakadabra Nagyker modul - lnyugta.hu/nagyker', size: 7, color: [0.7, 0.7, 0.65] });
+  return buildSimplePdf(els);
+}
+
 // --- Orchestrátor: NAV-kapcsolat lekérdezése + XML + beküldés + PDF + email -
-async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', fizetesiHatarido, megjegyzes, fizetesiMod }) {
+async function submitSharedInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', fizetesiHatarido, megjegyzes, fizetesiMod }) {
   const creds = getCompanyNavCreds(cegKulcs);
   if (!creds || !navCredsComplete(creds)) {
     throw new Error(`A(z) "${cegKulcs}" cégnek nincs beállítva saját NAV-kapcsolata (Profil > NAV Online Számla).`);
@@ -6973,11 +7206,11 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, b
   }
 
   const datum = todayIsoServer();
-  const szamlaSorszam = nextNagykerInvoiceNumber(cegKulcs);
+  const szamlaSorszam = nextSharedInvoiceNumber(cegKulcs);
   const sellerTaxNumber = creds.taxNumber;
   const hataridoVegleges = fizetesiHatarido || datum;
 
-  const invoiceDataXml = buildNagykerInvoiceDataXml({
+  const invoiceDataXml = buildInvoiceDataXml({
     invoiceNumber: szamlaSorszam, invoiceIssueDate: datum, fizetesiHatarido: hataridoVegleges, fizetesiMod,
     sellerName, sellerTaxNumber, sellerAddress,
     buyerName, buyerTaxNumber, buyerAddress,
@@ -6986,7 +7219,7 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, b
 
   const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds);
 
-  const pdf = buildNagykerInvoicePdf({
+  const pdf = buildInvoicePdf({
     sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
     buyerName, buyerAddress, buyerTaxNumber,
     tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido: hataridoVegleges, megjegyzes, fizetesiMod,
@@ -7033,10 +7266,95 @@ route('POST', '/api/internal/nagyker/create-invoice', async (req, res) => {
     return sendJson(res, 400, { error: 'MISSING_FIELDS' });
   }
   try {
-    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes, fizetesiMod });
+    const eredmeny = await submitSharedInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes, fizetesiMod });
     return sendJson(res, 200, eredmeny);
   } catch (err) {
     console.error('[nagyker-szamlazas] hiba:', err.message);
+    return sendJson(res, 500, { error: err.message });
+  }
+});
+
+// --- Sztornó (érvénytelenítő okirat) orchestrátor ----------------------------
+async function submitStornoInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', eredetiSzamlaszam, modificationIndex }) {
+  const creds = getCompanyNavCreds(cegKulcs);
+  if (!creds || !navCredsComplete(creds)) {
+    throw new Error(`A(z) "${cegKulcs}" cégnek nincs beállítva saját NAV-kapcsolata.`);
+  }
+  const settings = licenseDb.prepare('SELECT * FROM company_settings WHERE ceg_kulcs = ?').get(cegKulcs);
+  const sellerAddress = settings ? {
+    iranyitoszam: settings.szamlazasi_iranyitoszam, telepules: settings.szamlazasi_telepules,
+    kozteruletNev: settings.szamlazasi_kozterulet_nev, kozteruletJelleg: settings.szamlazasi_kozterulet_jelleg,
+    hazszam: settings.szamlazasi_hazszam,
+    szoveg: `${settings.szamlazasi_iranyitoszam || ''} ${settings.szamlazasi_telepules || ''}, ${settings.szamlazasi_kozterulet_nev || ''} ${settings.szamlazasi_kozterulet_jelleg || ''} ${settings.szamlazasi_hazszam || ''}`.trim(),
+  } : null;
+  if (!sellerAddress || !navAddressComplete(sellerAddress)) {
+    throw new Error(`A(z) "${cegKulcs}" cég számlázási címe hiányos vagy nincs beállítva.`);
+  }
+
+  const datum = todayIsoServer();
+  // A sztornó KÜLÖN sorozatban számozódik ('NKS'), hogy egyértelműen
+  // megkülönböztethető legyen a rendes számláktól, saját, folytonos
+  // sorszámozással (NAV-előírás: a sztornó is önálló, egyedi sorszámú okirat).
+  const szamlaSorszam = nextSharedInvoiceNumber(cegKulcs, 'NKS');
+  const sellerTaxNumber = creds.taxNumber;
+
+  const invoiceDataXml = buildStornoInvoiceDataXml({
+    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum,
+    originalInvoiceNumber: eredetiSzamlaszam, modificationIndex,
+    sellerName, sellerTaxNumber, sellerAddress,
+    buyerName, buyerTaxNumber, buyerAddress,
+    tetelek, penznem,
+  });
+
+  const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds);
+
+  const pdf = buildStornoInvoicePdf({
+    sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
+    buyerName, buyerAddress, buyerTaxNumber,
+    tetelek, penznem, datum, szamlaSorszam, eredetiSzamlaszam,
+  });
+  const fajlnev = `${szamlaSorszam.replace(/\//g, '-')}.pdf`;
+  fs.writeFileSync(path.join(INVOICES_DIR, fajlnev), pdf);
+
+  if (buyerEmail) {
+    try {
+      await sendBrevoEmail({
+        toEmail: buyerEmail, toName: buyerName,
+        subject: `Érvénytelenítő számla — ${szamlaSorszam}`,
+        html: `<p>Tisztelt ${escapeXml(buyerName)}!</p><p>Csatoltan küldjük a(z) <b>${escapeXml(eredetiSzamlaszam)}</b> számú számla érvénytelenítéséről szóló okiratot (${escapeXml(szamlaSorszam)}).</p><p>Üdvözlettel,<br>${escapeXml(sellerName)}</p>`,
+        attachments: [{ name: fajlnev, content: pdf }],
+      });
+    } catch (emailErr) {
+      return { szamlaSorszam, transactionId, fajlnev, pdfBase64: pdf.toString('base64'), emailHiba: emailErr.message };
+    }
+  }
+
+  logActivity({ type: 'nagyker_invoice_storno', ok: true, companyKey: cegKulcs, nev: null, detail: `Sztornó beküldve: ${szamlaSorszam} (eredeti: ${eredetiSzamlaszam}, NAV tranzakció: ${transactionId})` });
+
+  return { szamlaSorszam, transactionId, fajlnev, pdfBase64: pdf.toString('base64'), emailHiba: null };
+}
+
+// POST /api/internal/nagyker/create-storno-invoice — ugyanaz a védelmi minta,
+// mint a rendes számla-endpointnál (közös titok fejlécben).
+route('POST', '/api/internal/nagyker/create-storno-invoice', async (req, res) => {
+  if (!NAGYKER_BRIDGE_SECRET || req.headers['x-internal-secret'] !== NAGYKER_BRIDGE_SECRET) {
+    return sendJson(res, 401, { error: 'UNAUTHORIZED' });
+  }
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    return sendJson(res, 400, { error: 'INVALID_JSON' });
+  }
+  const { cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, eredetiSzamlaszam, modificationIndex } = body || {};
+  if (!cegKulcs || !sellerName || !buyerName || !buyerTaxNumber || !eredetiSzamlaszam || !modificationIndex || !Array.isArray(tetelek) || tetelek.length === 0) {
+    return sendJson(res, 400, { error: 'MISSING_FIELDS' });
+  }
+  try {
+    const eredmeny = await submitStornoInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, eredetiSzamlaszam, modificationIndex });
+    return sendJson(res, 200, eredmeny);
+  } catch (err) {
+    console.error('[nagyker-sztorno] hiba:', err.message);
     return sendJson(res, 500, { error: err.message });
   }
 });
