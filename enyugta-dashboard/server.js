@@ -6706,11 +6706,16 @@ function nextNagykerInvoiceNumber(cegKulcs) {
 }
 
 function buildNagykerInvoiceDataXml({
-  invoiceNumber, invoiceIssueDate, fizetesiHatarido,
+  invoiceNumber, invoiceIssueDate, fizetesiHatarido, fizetesiMod,
   sellerName, sellerTaxNumber, sellerAddress,
   buyerName, buyerTaxNumber, buyerAddress,
   tetelek, penznem,
 }) {
+  const ervenyesModok = ['TRANSFER', 'CASH', 'CARD'];
+  const modVegleges = ervenyesModok.includes(fizetesiMod) ? fizetesiMod : 'TRANSFER';
+  // Készpénz/kártya esetén a fizetés a teljesítéskor megtörténik (nem
+  // halasztott), az átutalásnál viszont a valódi fizetési határidő számít.
+  const paymentDateVegleges = modVegleges === 'TRANSFER' ? (fizetesiHatarido || invoiceIssueDate) : invoiceIssueDate;
   const eladoTax = parseHunTaxNumber(sellerTaxNumber);
   const vevoTax = parseHunTaxNumber(buyerTaxNumber);
   const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
@@ -6781,8 +6786,8 @@ function buildNagykerInvoiceDataXml({
           <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
           <currencyCode>${escapeXml(penznem || 'HUF')}</currencyCode>
           <exchangeRate>1.00</exchangeRate>
-          <paymentMethod>TRANSFER</paymentMethod>
-          <paymentDate>${fizetesiHatarido || invoiceIssueDate}</paymentDate>
+          <paymentMethod>${modVegleges}</paymentMethod>
+          <paymentDate>${paymentDateVegleges}</paymentDate>
           <invoiceAppearance>ELECTRONIC</invoiceAppearance>
         </invoiceDetail>
       </invoiceHead>
@@ -6828,8 +6833,10 @@ function buildNagykerInvoiceDataXml({
 function buildNagykerInvoicePdf({
   sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
   buyerName, buyerAddress, buyerTaxNumber,
-  tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido, megjegyzes,
+  tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido, megjegyzes, fizetesiMod,
 }) {
+  const FIZETESI_MOD_MAGYARUL = { TRANSFER: 'Atutalas', CASH: 'Keszpenz', CARD: 'Bankkartya' };
+  const fizetesiModSzoveg = FIZETESI_MOD_MAGYARUL[fizetesiMod] || 'Atutalas';
   const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
   const bruttoOsszesenPontos = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
   const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
@@ -6870,7 +6877,7 @@ function buildNagykerInvoicePdf({
   els.push({ type: 'text', x: 390, y: 35, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
   els.push({ type: 'text', x: 390, y: 52, text: `Kelt: ${datum}    Telj.: ${datum}`, size: 8.5, color: CREAM });
   els.push({ type: 'text', x: 390, y: 64, text: `Fiz. hatarido: ${fizetesiHatarido || datum}`, size: 8.5, color: CREAM });
-  els.push({ type: 'text', x: 390, y: 76, text: 'Fizetesi mod: Utalas', size: 8.5, color: CREAM });
+  els.push({ type: 'text', x: 390, y: 76, text: `Fizetesi mod: ${fizetesiModSzoveg}`, size: 8.5, color: CREAM });
 
   // --- Eladó / Vevő — kerekített, halvány kártyák ---
   const infoTop = 132;
@@ -6949,7 +6956,7 @@ function buildNagykerInvoicePdf({
 }
 
 // --- Orchestrátor: NAV-kapcsolat lekérdezése + XML + beküldés + PDF + email -
-async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', fizetesiHatarido, megjegyzes }) {
+async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF', fizetesiHatarido, megjegyzes, fizetesiMod }) {
   const creds = getCompanyNavCreds(cegKulcs);
   if (!creds || !navCredsComplete(creds)) {
     throw new Error(`A(z) "${cegKulcs}" cégnek nincs beállítva saját NAV-kapcsolata (Profil > NAV Online Számla).`);
@@ -6971,7 +6978,7 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, b
   const hataridoVegleges = fizetesiHatarido || datum;
 
   const invoiceDataXml = buildNagykerInvoiceDataXml({
-    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum, fizetesiHatarido: hataridoVegleges,
+    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum, fizetesiHatarido: hataridoVegleges, fizetesiMod,
     sellerName, sellerTaxNumber, sellerAddress,
     buyerName, buyerTaxNumber, buyerAddress,
     tetelek, penznem,
@@ -6982,7 +6989,7 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, b
   const pdf = buildNagykerInvoicePdf({
     sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
     buyerName, buyerAddress, buyerTaxNumber,
-    tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido: hataridoVegleges, megjegyzes,
+    tetelek, penznem, datum, szamlaSorszam, fizetesiHatarido: hataridoVegleges, megjegyzes, fizetesiMod,
   });
   const fajlnev = `${szamlaSorszam.replace(/\//g, '-')}.pdf`;
   fs.writeFileSync(path.join(INVOICES_DIR, fajlnev), pdf);
@@ -7021,12 +7028,12 @@ route('POST', '/api/internal/nagyker/create-invoice', async (req, res) => {
   } catch {
     return sendJson(res, 400, { error: 'INVALID_JSON' });
   }
-  const { cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes } = body || {};
+  const { cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes, fizetesiMod } = body || {};
   if (!cegKulcs || !sellerName || !buyerName || !buyerTaxNumber || !Array.isArray(tetelek) || tetelek.length === 0) {
     return sendJson(res, 400, { error: 'MISSING_FIELDS' });
   }
   try {
-    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes });
+    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, sellerBankAccount, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem, fizetesiHatarido, megjegyzes, fizetesiMod });
     return sendJson(res, 200, eredmeny);
   } catch (err) {
     console.error('[nagyker-szamlazas] hiba:', err.message);
