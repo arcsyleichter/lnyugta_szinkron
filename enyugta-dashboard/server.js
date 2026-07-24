@@ -1848,48 +1848,6 @@ function requireReseller(req) {
   return session;
 }
 
-// ============================================================================
-// NAGYKER MODUL — belépési híd (2026-07-24 hozzáadva)
-// ============================================================================
-// Rövid élettartamú, aláírt token a lnyugta.hu/nagyker modulba való
-// átlépéshez, a meglévő enysession (cég-bejelentkezés) alapján. A token
-// formátuma szándékosan megegyezik a signSession/verifySession mintával
-// (base64url JSON + '.' + HMAC-SHA256), de KÜLÖN, saját titkot használ
-// (NAGYKER_BRIDGE_SECRET), hogy a két rendszer közötti csatolás minimális
-// legyen — ha ez a titok kompromittálódna, az nem érinti a fő rendszer
-// saját session-titkát.
-const NAGYKER_BRIDGE_SECRET = process.env.NAGYKER_BRIDGE_SECRET || null;
-if (!NAGYKER_BRIDGE_SECRET) {
-  console.warn('[nagyker-hid] FIGYELEM: NAGYKER_BRIDGE_SECRET nincs beallitva - a "Nagyker" belepes es a nagyker-szamlazas nem fog mukodni, amig be nem allitod (ugyanazzal az ertekkel a Nagyker szolgaltatason is).');
-}
-
-function signNagykerBridgeToken(payload) {
-  const withJti = { ...payload, jti: crypto.randomBytes(12).toString('hex') };
-  const body = b64url(JSON.stringify(withJti));
-  const sig = crypto.createHmac('sha256', NAGYKER_BRIDGE_SECRET).update(body).digest('base64url');
-  return `${body}.${sig}`;
-}
-
-// GET /nagyker-belepes — a "Nagyker" menupontra/linkre mutat a feluleten.
-// Ellenorzi a meglevo ceg-bejelentkezest (enysession), es ha rendben van,
-// egy 2 percig ervenyes, egyszer-hasznalhato tokennel atiranyitja a
-// bongeszot a lnyugta.hu/nagyker/token-bejelentkezes route-ra.
-route('GET', '/nagyker-belepes', async (req, res) => {
-  const session = requireAuth(req);
-  if (!session || !session.adoszam) {
-    res.writeHead(302, { Location: '/' });
-    return res.end();
-  }
-  if (!NAGYKER_BRIDGE_SECRET) {
-    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
-    return res.end('A Nagyker modul jelenleg nincs bekotve (hianyzo NAGYKER_BRIDGE_SECRET a szerveren).');
-  }
-  const token = signNagykerBridgeToken({ adoszam: session.adoszam, exp: Date.now() + 2 * 60 * 1000 });
-  const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
-  res.writeHead(302, { Location: `${baseUrl}/nagyker/token-bejelentkezes?t=${encodeURIComponent(token)}` });
-  res.end();
-});
-
 
 // Dátum-tartomány normalizálása: alapértelmezés az utolsó 30 nap
 function todayIsoServer() { return new Date().toISOString().slice(0, 10); }
@@ -1917,6 +1875,48 @@ function notStorno(alias) { return `(IFNULL(${alias}.storno,'N') != 'I' AND IFNU
 
 const routes = [];
 function route(method, pattern, handler) { routes.push({ method, pattern, handler }); }
+
+// ============================================================================
+// NAGYKER MODUL — belépési híd (2026-07-24 hozzáadva)
+// ============================================================================
+// Rövid élettartamú, aláírt token a lnyugta.hu/nagyker modulba való
+// átlépéshez, a meglévő enysession (cég-bejelentkezés) alapján. A token
+// formátuma szándékosan megegyezik a signSession/verifySession mintával
+// (base64url JSON + '.' + HMAC-SHA256), de KÜLÖN, saját titkot használ
+// (NAGYKER_BRIDGE_SECRET), hogy a két rendszer közötti csatolás minimális
+// legyen — ha ez a titok kompromittálódna, az nem érinti a fő rendszer
+// saját session-titkát.
+const NAGYKER_BRIDGE_SECRET = process.env.NAGYKER_BRIDGE_SECRET || null;
+if (!NAGYKER_BRIDGE_SECRET) {
+  console.warn('[nagyker-hid] FIGYELEM: NAGYKER_BRIDGE_SECRET nincs beallitva - a "Nagyker" belepes es a nagyker-szamlazas nem fog mukodni, amig be nem allitod (ugyanazzal az ertekkel a Nagyker szolgaltatason is).');
+}
+
+function signNagykerBridgeToken(payload) {
+  const withJti = { ...payload, jti: crypto.randomBytes(12).toString('hex') };
+  const body = b64url(JSON.stringify(withJti));
+  const sig = crypto.createHmac('sha256', NAGYKER_BRIDGE_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+// GET /nagyker-belepes — a "Nagyker" menupontra/linkre mutat a feluleten.
+// Ellenorzi a meglevo ceg-bejelentkezest (enysession), es ha rendben van,
+// egy 2 percig ervenyes, egyszer-hasznalhato tokennel atiranyitja a
+// bongeszot a lnyugta.hu/nagyker/token-bejelentkezes route-ra.
+route('GET', '/api/nagyker-belepes', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session || !session.adoszam) {
+    res.writeHead(302, { Location: '/' });
+    return res.end();
+  }
+  if (!NAGYKER_BRIDGE_SECRET) {
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('A Nagyker modul jelenleg nincs bekotve (hianyzo NAGYKER_BRIDGE_SECRET a szerveren).');
+  }
+  const token = signNagykerBridgeToken({ adoszam: session.adoszam, exp: Date.now() + 2 * 60 * 1000 });
+  const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+  res.writeHead(302, { Location: `${baseUrl}/nagyker/token-bejelentkezes?t=${encodeURIComponent(token)}` });
+  res.end();
+});
 
 /* ---------------------------------------------------------------------------
    Kliensoldali (böngésző) hibák fogadása — /api/client-error
@@ -6905,7 +6905,7 @@ async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxN
 // POST /internal/nagyker/create-invoice — a Nagyker modul hívja meg,
 // szerver-szerver kérésként (nem böngészőből), rendelés-jóváhagyáskor.
 // Védelem: közös titok fejlécben (NEM böngésző-elérhető route).
-route('POST', '/internal/nagyker/create-invoice', async (req, res) => {
+route('POST', '/api/internal/nagyker/create-invoice', async (req, res) => {
   if (!NAGYKER_BRIDGE_SECRET || req.headers['x-internal-secret'] !== NAGYKER_BRIDGE_SECRET) {
     return sendJson(res, 401, { error: 'UNAUTHORIZED' });
   }
