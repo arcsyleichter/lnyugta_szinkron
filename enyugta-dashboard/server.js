@@ -6925,11 +6925,10 @@ function buildInvoicePdf({
   els.push({ type: 'text', x: 326, y: infoTop + 29, text: buyerAddress?.szoveg || '(nincs megadva szamlazasi cim)', size: 8.5, color: DIM });
   els.push({ type: 'text', x: 326, y: infoTop + 42, text: `Adoszam: ${buyerTaxNumber || '-'}`, size: 8.5, color: DIM });
 
-  // --- Tételes táblázat (Cikkszám oszloppal, kerekített fejléc-sávval) ---
+  // --- Tételes táblázat (a cikkszám a Megnevezés alatt, kisebb betűvel — nem külön oszlopban) ---
   const tableTop = infoTop + cardH + 26;
   els.push({ type: 'roundrect', x: 44, y: tableTop - 16, w: 507, h: 22, r: 8, fill: PINK_SOFT });
-  els.push({ type: 'text', x: 55, y: tableTop, text: 'Cikkszam', size: 8, bold: true, color: PINK_DEEP });
-  els.push({ type: 'text', x: 110, y: tableTop, text: 'Megnevezes', size: 8, bold: true, color: PINK_DEEP });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Megnevezes', size: 8, bold: true, color: PINK_DEEP });
   els.push({ type: 'text', x: 275, y: tableTop, text: 'Menny.', size: 8, bold: true, color: PINK_DEEP });
   els.push({ type: 'text', x: 320, y: tableTop, text: 'Netto e.ar', size: 8, bold: true, color: PINK_DEEP });
   els.push({ type: 'text', x: 378, y: tableTop, text: 'AFA%', size: 8, bold: true, color: PINK_DEEP });
@@ -6937,19 +6936,29 @@ function buildInvoicePdf({
   els.push({ type: 'text', x: 455, y: tableTop, text: 'Brutto', size: 8, bold: true, color: PINK_DEEP });
 
   let rowY = tableTop + 24;
-  const sorMagassag = tetelekBontva.length > 20 ? 15 : 20; // sok tétel esetén tömörebb sorok
+  // Az al-sorok száma (cikkszám + eltarthatóság) tételenként eltérhet —
+  // ezért soronként külön számoljuk a szükséges magasságot, nem egy
+  // globális, fix sormagassággal.
   for (const t of tetelekBontva) {
-    const nevRovidítve = t.nev.length > 32 ? `${t.nev.slice(0, 29)}...` : t.nev;
+    const nevRovidítve = t.nev.length > 46 ? `${t.nev.slice(0, 43)}...` : t.nev;
     const egysegNetto = Math.round(t.netto / (t.mennyiseg || 1));
-    els.push({ type: 'text', x: 55, y: rowY, text: t.cikkszam || '-', size: 8, color: DIM });
-    els.push({ type: 'text', x: 110, y: rowY, text: nevRovidítve, size: 8, color: INK });
+    els.push({ type: 'text', x: 55, y: rowY, text: nevRovidítve, size: 8, color: INK });
     els.push({ type: 'text', x: 275, y: rowY, text: `${t.mennyiseg || 1} ${t.mertekegyseg || 'db'}`, size: 8, color: INK });
     els.push({ type: 'text', x: 320, y: rowY, text: `${egysegNetto.toLocaleString('hu-HU')}`, size: 8, color: INK });
     els.push({ type: 'text', x: 378, y: rowY, text: `${t.afaSzazalek}%`, size: 8, color: INK });
     els.push({ type: 'text', x: 408, y: rowY, text: `${Math.round(t.afa).toLocaleString('hu-HU')}`, size: 8, color: INK });
     els.push({ type: 'text', x: 455, y: rowY, text: `${Math.round(t.brutto).toLocaleString('hu-HU')}`, size: 8, color: INK });
-    els.push({ type: 'line', x1: 50, y1: rowY + 7, x2: 545, y2: rowY + 7, color: [0.93, 0.88, 0.9], width: 0.5 });
-    rowY += sorMagassag;
+    let alSorY = rowY + 10;
+    if (t.cikkszam) {
+      els.push({ type: 'text', x: 55, y: alSorY, text: `Cikkszám: ${t.cikkszam}`, size: 6.5, color: DIM });
+      alSorY += 9;
+    }
+    if (t.eltarthatosagNap) {
+      els.push({ type: 'text', x: 55, y: alSorY, text: `Eltarthatóság: hűtve tárolva ${t.eltarthatosagNap} napig`, size: 6.5, color: DIM });
+      alSorY += 9;
+    }
+    els.push({ type: 'line', x1: 50, y1: alSorY - 3, x2: 545, y2: alSorY - 3, color: [0.93, 0.88, 0.9], width: 0.5 });
+    rowY = alSorY + 8;
   }
 
   rowY += 10;
