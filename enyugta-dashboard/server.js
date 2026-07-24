@@ -6745,11 +6745,10 @@ function buildInvoiceDataXml({
   const paymentDateVegleges = modVegleges === 'TRANSFER' ? (fizetesiHatarido || invoiceIssueDate) : invoiceIssueDate;
   const eladoTax = parseHunTaxNumber(sellerTaxNumber);
   const vevoTax = parseHunTaxNumber(buyerTaxNumber);
-  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg, (t.afaSzazalek ?? 27) / 100), afaSzazalekVegleges: t.afaSzazalek ?? 27 }));
   const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
   const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
   const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
-  const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
 
   const linesXml = tetelekBontva.map((t, i) => `<line>
         <lineNumber>${i + 1}</lineNumber>
@@ -6767,7 +6766,7 @@ function buildInvoiceDataXml({
             <lineNetAmountHUF>${t.netto}</lineNetAmountHUF>
           </lineNetAmountData>
           <lineVatRate>
-            <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+            <vatPercentage>${(t.afaSzazalekVegleges / 100).toFixed(2)}</vatPercentage>
           </lineVatRate>
           <lineVatData>
             <lineVatAmount>${t.afa}</lineVatAmount>
@@ -6779,6 +6778,29 @@ function buildInvoiceDataXml({
           </lineGrossAmountData>
         </lineAmountsNormal>
       </line>`).join('\n      ');
+
+  // A NAV megköveteli, hogy VEGYES ÁFA-kulcsú tételek esetén adókulcsonként
+  // KÜLÖN summaryByVatRate blokk szerepeljen (nem egyetlen, összevont blokk).
+  const kulcsCsoportok = new Map();
+  for (const t of tetelekBontva) {
+    const k = t.afaSzazalekVegleges;
+    if (!kulcsCsoportok.has(k)) kulcsCsoportok.set(k, { netto: 0, afa: 0 });
+    const cs = kulcsCsoportok.get(k);
+    cs.netto += t.netto; cs.afa += t.afa;
+  }
+  const summaryByVatRateXml = [...kulcsCsoportok.entries()].map(([kulcs, cs]) => `<summaryByVatRate>
+            <vatRate>
+              <vatPercentage>${(kulcs / 100).toFixed(2)}</vatPercentage>
+            </vatRate>
+            <vatRateNetData>
+              <vatRateNetAmount>${cs.netto}</vatRateNetAmount>
+              <vatRateNetAmountHUF>${cs.netto}</vatRateNetAmountHUF>
+            </vatRateNetData>
+            <vatRateVatData>
+              <vatRateVatAmount>${cs.afa}</vatRateVatAmount>
+              <vatRateVatAmountHUF>${cs.afa}</vatRateVatAmountHUF>
+            </vatRateVatData>
+          </summaryByVatRate>`).join('\n          ');
 
   return `<InvoiceData xmlns="http://schemas.nav.gov.hu/OSA/3.0/data" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.nav.gov.hu/OSA/3.0/data invoiceData.xsd" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
   <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
@@ -6824,19 +6846,7 @@ function buildInvoiceDataXml({
       </invoiceLines>
       <invoiceSummary>
         <summaryNormal>
-          <summaryByVatRate>
-            <vatRate>
-              <vatPercentage>${vatPercentageDecimal}</vatPercentage>
-            </vatRate>
-            <vatRateNetData>
-              <vatRateNetAmount>${nettoOsszesen}</vatRateNetAmount>
-              <vatRateNetAmountHUF>${nettoOsszesen}</vatRateNetAmountHUF>
-            </vatRateNetData>
-            <vatRateVatData>
-              <vatRateVatAmount>${afaOsszesen}</vatRateVatAmount>
-              <vatRateVatAmountHUF>${afaOsszesen}</vatRateVatAmountHUF>
-            </vatRateVatData>
-          </summaryByVatRate>
+          ${summaryByVatRateXml}
           <invoiceNetAmount>${nettoOsszesen}</invoiceNetAmount>
           <invoiceNetAmountHUF>${nettoOsszesen}</invoiceNetAmountHUF>
           <invoiceVatAmount>${afaOsszesen}</invoiceVatAmount>
@@ -6864,7 +6874,7 @@ function buildInvoicePdf({
 }) {
   const FIZETESI_MOD_MAGYARUL = { TRANSFER: 'Atutalas', CASH: 'Keszpenz', CARD: 'Bankkartya' };
   const fizetesiModSzoveg = FIZETESI_MOD_MAGYARUL[fizetesiMod] || 'Atutalas';
-  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg, (t.afaSzazalek ?? 27) / 100) }));
   const bruttoOsszesenPontos = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
   const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
   const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
@@ -7016,12 +7026,11 @@ function buildStornoInvoiceDataXml({
   const tetelekNegalva = tetelek.map((t) => ({
     ...t,
     mennyiseg: -(t.mennyiseg ?? 1),
-    ...splitBruttoToNettoAfa(-t.osszeg),
+    ...splitBruttoToNettoAfa(-t.osszeg, (t.afaSzazalek ?? 27) / 100),
   }));
   const nettoOsszesen = tetelekNegalva.reduce((s, t) => s + t.netto, 0);
   const afaOsszesen = tetelekNegalva.reduce((s, t) => s + t.afa, 0);
   const bruttoOsszesen = tetelekNegalva.reduce((s, t) => s + t.brutto, 0);
-  const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
 
   // FONTOS (NAV hivatalos "Érvénytelenítő okirat" példája alapján): a
   // lineNumberReference NEM hivatkozhat közvetlenül az eredeti számla saját
@@ -7048,7 +7057,7 @@ function buildStornoInvoiceDataXml({
             <lineNetAmountHUF>${t.netto}</lineNetAmountHUF>
           </lineNetAmountData>
           <lineVatRate>
-            <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+            <vatPercentage>${(t.afaSzazalek / 100).toFixed(2)}</vatPercentage>
           </lineVatRate>
           <lineVatData>
             <lineVatAmount>${t.afa}</lineVatAmount>
@@ -7061,6 +7070,28 @@ function buildStornoInvoiceDataXml({
         </lineAmountsNormal>
       </line>`).join('\n      ');
 
+  // A NAV megköveteli, hogy VEGYES ÁFA-kulcsú tételek esetén adókulcsonként
+  // KÜLÖN summaryByVatRate blokk szerepeljen (nem egyetlen, összevont blokk).
+  const kulcsCsoportokSztorno = new Map();
+  for (const t of tetelekNegalva) {
+    const k = t.afaSzazalek;
+    if (!kulcsCsoportokSztorno.has(k)) kulcsCsoportokSztorno.set(k, { netto: 0, afa: 0 });
+    const cs = kulcsCsoportokSztorno.get(k);
+    cs.netto += t.netto; cs.afa += t.afa;
+  }
+  const summaryByVatRateXml = [...kulcsCsoportokSztorno.entries()].map(([kulcs, cs]) => `<summaryByVatRate>
+            <vatRate>
+              <vatPercentage>${(kulcs / 100).toFixed(2)}</vatPercentage>
+            </vatRate>
+            <vatRateNetData>
+              <vatRateNetAmount>${cs.netto}</vatRateNetAmount>
+              <vatRateNetAmountHUF>${cs.netto}</vatRateNetAmountHUF>
+            </vatRateNetData>
+            <vatRateVatData>
+              <vatRateVatAmount>${cs.afa}</vatRateVatAmount>
+              <vatRateVatAmountHUF>${cs.afa}</vatRateVatAmountHUF>
+            </vatRateVatData>
+          </summaryByVatRate>`).join('\n          ');
   return `<InvoiceData xmlns="http://schemas.nav.gov.hu/OSA/3.0/data" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.nav.gov.hu/OSA/3.0/data invoiceData.xsd" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
   <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
   <invoiceIssueDate>${invoiceIssueDate}</invoiceIssueDate>
@@ -7108,19 +7139,7 @@ function buildStornoInvoiceDataXml({
       </invoiceLines>
       <invoiceSummary>
         <summaryNormal>
-          <summaryByVatRate>
-            <vatRate>
-              <vatPercentage>${vatPercentageDecimal}</vatPercentage>
-            </vatRate>
-            <vatRateNetData>
-              <vatRateNetAmount>${nettoOsszesen}</vatRateNetAmount>
-              <vatRateNetAmountHUF>${nettoOsszesen}</vatRateNetAmountHUF>
-            </vatRateNetData>
-            <vatRateVatData>
-              <vatRateVatAmount>${afaOsszesen}</vatRateVatAmount>
-              <vatRateVatAmountHUF>${afaOsszesen}</vatRateVatAmountHUF>
-            </vatRateVatData>
-          </summaryByVatRate>
+          ${summaryByVatRateXml}
           <invoiceNetAmount>${nettoOsszesen}</invoiceNetAmount>
           <invoiceNetAmountHUF>${nettoOsszesen}</invoiceNetAmountHUF>
           <invoiceVatAmount>${afaOsszesen}</invoiceVatAmount>
@@ -7141,7 +7160,7 @@ function buildStornoInvoicePdf({
   buyerName, buyerAddress, buyerTaxNumber,
   tetelek, penznem, datum, szamlaSorszam, eredetiSzamlaszam,
 }) {
-  const tetelekNegalva = tetelek.map((t) => ({ ...t, mennyiseg: -(t.mennyiseg ?? 1), ...splitBruttoToNettoAfa(-t.osszeg) }));
+  const tetelekNegalva = tetelek.map((t) => ({ ...t, mennyiseg: -(t.mennyiseg ?? 1), ...splitBruttoToNettoAfa(-t.osszeg, (t.afaSzazalek ?? 27) / 100) }));
   const nettoOsszesen = tetelekNegalva.reduce((s, t) => s + t.netto, 0);
   const afaOsszesen = tetelekNegalva.reduce((s, t) => s + t.afa, 0);
   const bruttoOsszesen = tetelekNegalva.reduce((s, t) => s + t.brutto, 0);
