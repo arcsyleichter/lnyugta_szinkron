@@ -7023,10 +7023,15 @@ function buildStornoInvoiceDataXml({
   const bruttoOsszesen = tetelekNegalva.reduce((s, t) => s + t.brutto, 0);
   const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
 
+  // FONTOS (NAV hivatalos "Érvénytelenítő okirat" példája alapján): a
+  // lineNumberReference NEM hivatkozhat közvetlenül az eredeti számla saját
+  // sorszámaira (ez "már létezik a számlaláncban" hibát ad) — folytatólagosan
+  // kell számozni, az eredeti számla utolsó tételsorszámán TÚL.
+  const eredetiSorokSzama = tetelekNegalva.length;
   const linesXml = tetelekNegalva.map((t, i) => `<line>
         <lineNumber>${i + 1}</lineNumber>
         <lineModificationReference>
-          <lineNumberReference>${i + 1}</lineNumberReference>
+          <lineNumberReference>${eredetiSorokSzama + i + 1}</lineNumberReference>
           <lineOperation>CREATE</lineOperation>
         </lineModificationReference>
         <lineExpressionIndicator>true</lineExpressionIndicator>
