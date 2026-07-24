@@ -7060,13 +7060,13 @@ function buildStornoInvoiceDataXml({
   <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
   <invoiceIssueDate>${invoiceIssueDate}</invoiceIssueDate>
   <completenessIndicator>false</completenessIndicator>
-  <invoiceReference>
-    <originalInvoiceNumber>${escapeXml(originalInvoiceNumber)}</originalInvoiceNumber>
-    <modifyWithoutMaster>false</modifyWithoutMaster>
-    <modificationIndex>${modificationIndex}</modificationIndex>
-  </invoiceReference>
   <invoiceMain>
     <invoice>
+      <invoiceReference>
+        <originalInvoiceNumber>${escapeXml(originalInvoiceNumber)}</originalInvoiceNumber>
+        <modifyWithoutMaster>false</modifyWithoutMaster>
+        <modificationIndex>${modificationIndex}</modificationIndex>
+      </invoiceReference>
       <invoiceHead>
         <supplierInfo>
           <supplierTaxNumber>
@@ -7090,7 +7090,7 @@ function buildStornoInvoiceDataXml({
           ${navAddressXml('customerAddress', buyerAddress)}
         </customerInfo>
         <invoiceDetail>
-          <invoiceCategory>MODIFY</invoiceCategory>
+          <invoiceCategory>NORMAL</invoiceCategory>
           <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
           <currencyCode>${escapeXml(penznem || 'HUF')}</currencyCode>
           <exchangeRate>1.00</exchangeRate>
