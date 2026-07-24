@@ -7315,7 +7315,7 @@ async function submitStornoInvoice({ cegKulcs, sellerName, sellerBankAccount, bu
     tetelek, penznem,
   });
 
-  const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds);
+  const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds, 'MODIFY');
 
   const pdf = buildStornoInvoicePdf({
     sellerName, sellerAddress, sellerTaxNumber, sellerBankAccount,
@@ -7567,7 +7567,7 @@ function extractInvoiceLines(invoiceXml) {
 // szokatlan, de a v3.0 séma pontosan ezt várja (a korábbi v2.0
 // dokumentáció "operation"/"invoice" neveket használt, de ezek a v3.0-ban
 // már NEM érvényesek).
-async function navSubmitInvoice(invoiceDataXml, creds = navCredsFromEnv()) {
+async function navSubmitInvoice(invoiceDataXml, creds = navCredsFromEnv(), operation = 'CREATE') {
   const { token } = await navTokenExchange(creds);
   const requestId = navRequestId();
   const now = new Date();
@@ -7578,7 +7578,7 @@ async function navSubmitInvoice(invoiceDataXml, creds = navCredsFromEnv()) {
   // fixen — most a creds paraméterből jön, hogy cégenkénti (nem csak a
   // platform saját) NAV-kapcsolattal is működjön (lásd Nagyker-számlázás).
   const { signature: requestSignature, debug: sigDebug } = navRequestSignatureManageInvoice(requestId, timestampMasked, creds.signingKey, [
-    { operation: 'CREATE', base64Content },
+    { operation, base64Content },
   ]);
 
   const bodyXml = `<ManageInvoiceRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
@@ -7590,7 +7590,7 @@ ${navSoftwareXml()}
   <compressedContent>false</compressedContent>
   <invoiceOperation>
     <index>1</index>
-    <invoiceOperation>CREATE</invoiceOperation>
+    <invoiceOperation>${operation}</invoiceOperation>
     <invoiceData>${base64Content}</invoiceData>
   </invoiceOperation>
 </invoiceOperations>
