@@ -1848,6 +1848,49 @@ function requireReseller(req) {
   return session;
 }
 
+// ============================================================================
+// NAGYKER MODUL — belépési híd (2026-07-24 hozzáadva)
+// ============================================================================
+// Rövid élettartamú, aláírt token a lnyugta.hu/nagyker modulba való
+// átlépéshez, a meglévő enysession (cég-bejelentkezés) alapján. A token
+// formátuma szándékosan megegyezik a signSession/verifySession mintával
+// (base64url JSON + '.' + HMAC-SHA256), de KÜLÖN, saját titkot használ
+// (NAGYKER_BRIDGE_SECRET), hogy a két rendszer közötti csatolás minimális
+// legyen — ha ez a titok kompromittálódna, az nem érinti a fő rendszer
+// saját session-titkát.
+const NAGYKER_BRIDGE_SECRET = process.env.NAGYKER_BRIDGE_SECRET || null;
+if (!NAGYKER_BRIDGE_SECRET) {
+  console.warn('[nagyker-hid] FIGYELEM: NAGYKER_BRIDGE_SECRET nincs beallitva - a "Nagyker" belepes es a nagyker-szamlazas nem fog mukodni, amig be nem allitod (ugyanazzal az ertekkel a Nagyker szolgaltatason is).');
+}
+
+function signNagykerBridgeToken(payload) {
+  const withJti = { ...payload, jti: crypto.randomBytes(12).toString('hex') };
+  const body = b64url(JSON.stringify(withJti));
+  const sig = crypto.createHmac('sha256', NAGYKER_BRIDGE_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+// GET /nagyker-belepes — a "Nagyker" menupontra/linkre mutat a feluleten.
+// Ellenorzi a meglevo ceg-bejelentkezest (enysession), es ha rendben van,
+// egy 2 percig ervenyes, egyszer-hasznalhato tokennel atiranyitja a
+// bongeszot a lnyugta.hu/nagyker/token-bejelentkezes route-ra.
+route('GET', '/nagyker-belepes', async (req, res) => {
+  const session = requireAuth(req);
+  if (!session || !session.adoszam) {
+    res.writeHead(302, { Location: '/' });
+    return res.end();
+  }
+  if (!NAGYKER_BRIDGE_SECRET) {
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('A Nagyker modul jelenleg nincs bekotve (hianyzo NAGYKER_BRIDGE_SECRET a szerveren).');
+  }
+  const token = signNagykerBridgeToken({ adoszam: session.adoszam, exp: Date.now() + 2 * 60 * 1000 });
+  const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+  res.writeHead(302, { Location: `${baseUrl}/nagyker/token-bejelentkezes?t=${encodeURIComponent(token)}` });
+  res.end();
+});
+
+
 // Dátum-tartomány normalizálása: alapértelmezés az utolsó 30 nap
 function todayIsoServer() { return new Date().toISOString().slice(0, 10); }
 
@@ -6614,6 +6657,277 @@ function buildNavInvoiceDataXml({ invoiceNumber, invoiceIssueDate, buyerName, bu
 </InvoiceData>`;
 }
 
+// ============================================================================
+// NAGYKER B2B SZÁMLÁZÁS (2026-07-24 hozzáadva)
+// ============================================================================
+// A buildNavInvoiceDataXml-től eltérően itt az ELADÓ (kibocsátó) NEM
+// hardkódolt (paraméterként jön), és a tételek VALÓDI mennyiséget /
+// mértékegységet kapnak (PRODUCT jellegű tétel, nem "1 hónap SERVICE").
+// A Nagyker modul (lnyugta.hu/nagyker) hívja meg ezt egy internal route-on
+// keresztül, rendelés-jóváhagyáskor.
+
+// --- Nagyker-számlák saját, cégenkénti sorszám-sorozata ---------------------
+function nextNagykerInvoiceNumber(cegKulcs) {
+  licenseDb.exec(`
+    CREATE TABLE IF NOT EXISTS nagyker_invoice_counter (
+      ceg_kulcs TEXT NOT NULL,
+      ev INTEGER NOT NULL,
+      utolso_sorszam INTEGER NOT NULL,
+      PRIMARY KEY (ceg_kulcs, ev)
+    );
+  `);
+  const ev = new Date().getFullYear();
+  const row = licenseDb.prepare(`SELECT utolso_sorszam FROM nagyker_invoice_counter WHERE ceg_kulcs = ? AND ev = ?`).get(cegKulcs, ev);
+  const sorszam = row ? row.utolso_sorszam + 1 : 1;
+  licenseDb.prepare(`
+    INSERT INTO nagyker_invoice_counter (ceg_kulcs, ev, utolso_sorszam) VALUES (?, ?, ?)
+    ON CONFLICT(ceg_kulcs, ev) DO UPDATE SET utolso_sorszam = excluded.utolso_sorszam
+  `).run(cegKulcs, ev, sorszam);
+  return `NK-${cegKulcs}-${ev}/${String(sorszam).padStart(6, '0')}`;
+}
+
+function buildNagykerInvoiceDataXml({
+  invoiceNumber, invoiceIssueDate,
+  sellerName, sellerTaxNumber, sellerAddress,
+  buyerName, buyerTaxNumber, buyerAddress,
+  tetelek, penznem,
+}) {
+  const eladoTax = parseHunTaxNumber(sellerTaxNumber);
+  const vevoTax = parseHunTaxNumber(buyerTaxNumber);
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const vatPercentageDecimal = ELEKTRONIKUS_SZOLGALTATAS_AFA_KULCS.toFixed(2);
+
+  const linesXml = tetelekBontva.map((t, i) => `<line>
+        <lineNumber>${i + 1}</lineNumber>
+        <lineExpressionIndicator>true</lineExpressionIndicator>
+        <lineNatureIndicator>PRODUCT</lineNatureIndicator>
+        <lineDescription>${escapeXml(t.nev)}</lineDescription>
+        <quantity>${(t.mennyiseg ?? 1).toFixed(2)}</quantity>
+        <unitOfMeasure>OWN</unitOfMeasure>
+        <unitOfMeasureOwn>${escapeXml(t.mertekegyseg || 'db')}</unitOfMeasureOwn>
+        <unitPrice>${(t.netto / (t.mennyiseg || 1)).toFixed(2)}</unitPrice>
+        <unitPriceHUF>${(t.netto / (t.mennyiseg || 1)).toFixed(2)}</unitPriceHUF>
+        <lineAmountsNormal>
+          <lineNetAmountData>
+            <lineNetAmount>${t.netto}</lineNetAmount>
+            <lineNetAmountHUF>${t.netto}</lineNetAmountHUF>
+          </lineNetAmountData>
+          <lineVatRate>
+            <vatPercentage>${vatPercentageDecimal}</vatPercentage>
+          </lineVatRate>
+          <lineVatData>
+            <lineVatAmount>${t.afa}</lineVatAmount>
+            <lineVatAmountHUF>${t.afa}</lineVatAmountHUF>
+          </lineVatData>
+          <lineGrossAmountData>
+            <lineGrossAmountNormal>${t.brutto}</lineGrossAmountNormal>
+            <lineGrossAmountNormalHUF>${t.brutto}</lineGrossAmountNormalHUF>
+          </lineGrossAmountData>
+        </lineAmountsNormal>
+      </line>`).join('\n      ');
+
+  return `<InvoiceData xmlns="http://schemas.nav.gov.hu/OSA/3.0/data" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.nav.gov.hu/OSA/3.0/data invoiceData.xsd" xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns:base="http://schemas.nav.gov.hu/OSA/3.0/base">
+  <invoiceNumber>${escapeXml(invoiceNumber)}</invoiceNumber>
+  <invoiceIssueDate>${invoiceIssueDate}</invoiceIssueDate>
+  <completenessIndicator>false</completenessIndicator>
+  <invoiceMain>
+    <invoice>
+      <invoiceHead>
+        <supplierInfo>
+          <supplierTaxNumber>
+            <base:taxpayerId>${eladoTax.taxpayerId}</base:taxpayerId>
+            <base:vatCode>${eladoTax.vatCode}</base:vatCode>
+            <base:countyCode>${eladoTax.countyCode}</base:countyCode>
+          </supplierTaxNumber>
+          <supplierName>${escapeXml(sellerName)}</supplierName>
+          ${navAddressXml('supplierAddress', sellerAddress)}
+        </supplierInfo>
+        <customerInfo>
+          <customerVatStatus>DOMESTIC</customerVatStatus>
+          <customerVatData>
+            <customerTaxNumber>
+              <taxpayerId>${vevoTax.taxpayerId}</taxpayerId>
+              <vatCode>${vevoTax.vatCode}</vatCode>
+              <countyCode>${vevoTax.countyCode}</countyCode>
+            </customerTaxNumber>
+          </customerVatData>
+          <customerName>${escapeXml(buyerName)}</customerName>
+          ${navAddressXml('customerAddress', buyerAddress)}
+        </customerInfo>
+        <invoiceDetail>
+          <invoiceCategory>NORMAL</invoiceCategory>
+          <invoiceDeliveryDate>${invoiceIssueDate}</invoiceDeliveryDate>
+          <invoiceAppearance>ELECTRONIC</invoiceAppearance>
+          <currencyCode>${escapeXml(penznem || 'HUF')}</currencyCode>
+          <exchangeRate>1.00</exchangeRate>
+        </invoiceDetail>
+      </invoiceHead>
+      <invoiceLines>
+        <mergedItemIndicator>false</mergedItemIndicator>
+        ${linesXml}
+      </invoiceLines>
+    </invoice>
+  </invoiceMain>
+</InvoiceData>`;
+}
+// FONTOS, MIELŐTT ÉLESBEN HASZNÁLOD: ezt az XML-vázat a meglévő
+// buildNavInvoiceDataXml mintájából származtattam, DE nem volt módunk élő
+// NAV sandbox ellen tesztelni (nincs hozzáférés). Az ELSŐ néhány számlát
+// MINDENKÉPP NAV teszt- (sandbox) környezetben küldd be, és nézd meg a NAV
+// válaszát (navQueryTransactionStatus), mielőtt éles adószámmal élesítenéd.
+
+function buildNagykerInvoicePdf({
+  sellerName, sellerAddress, sellerTaxNumber,
+  buyerName, buyerAddress, buyerTaxNumber,
+  tetelek, penznem, datum, szamlaSorszam,
+}) {
+  const tetelekBontva = tetelek.map((t) => ({ ...t, ...splitBruttoToNettoAfa(t.osszeg) }));
+  const bruttoOsszesen = tetelekBontva.reduce((s, t) => s + t.brutto, 0);
+  const nettoOsszesen = tetelekBontva.reduce((s, t) => s + t.netto, 0);
+  const afaOsszesen = tetelekBontva.reduce((s, t) => s + t.afa, 0);
+
+  const JADE = [0.35, 0.58, 0.79]; const INK = [0.16, 0.2, 0.28]; const DIM = [0.45, 0.48, 0.53];
+  const els = [];
+  els.push({ type: 'rect', x: 0, y: 0, w: 595, h: 90, fill: JADE });
+  els.push({ type: 'text', x: 50, y: 40, text: sellerName, size: 18, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 50, y: 62, text: 'Szamla', size: 11, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 32, text: 'Szamla sorszama:', size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 46, text: szamlaSorszam, size: 12, bold: true, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 62, text: `Kibocsatas kelte: ${datum}`, size: 9, color: [1, 1, 1] });
+  els.push({ type: 'text', x: 380, y: 76, text: `Teljesites kelte: ${datum}`, size: 9, color: [1, 1, 1] });
+
+  const infoTop = 130;
+  els.push({ type: 'text', x: 50, y: infoTop, text: 'ELADO', size: 9, bold: true, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 16, text: sellerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 50, y: infoTop + 31, text: sellerAddress?.szoveg || '-', size: 9, color: DIM });
+  els.push({ type: 'text', x: 50, y: infoTop + 45, text: `Adoszam: ${sellerTaxNumber || '-'}`, size: 9, color: DIM });
+
+  els.push({ type: 'text', x: 320, y: infoTop, text: 'VEVO', size: 9, bold: true, color: DIM });
+  els.push({ type: 'text', x: 320, y: infoTop + 16, text: buyerName, size: 11, bold: true, color: INK });
+  els.push({ type: 'text', x: 320, y: infoTop + 31, text: buyerAddress?.szoveg || '(nincs megadva szamlazasi cim)', size: 9, color: DIM });
+  els.push({ type: 'text', x: 320, y: infoTop + 45, text: `Adoszam: ${buyerTaxNumber || '-'}`, size: 9, color: DIM });
+
+  els.push({ type: 'line', x1: 50, y1: infoTop + 76, x2: 545, y2: infoTop + 76, color: [0.85, 0.85, 0.85], width: 1 });
+
+  const tableTop = infoTop + 100;
+  els.push({ type: 'rect', x: 50, y: tableTop - 16, w: 495, h: 22, fill: [0.95, 0.96, 0.97] });
+  els.push({ type: 'text', x: 55, y: tableTop, text: 'Megnevezes', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 230, y: tableTop, text: 'Menny.', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 280, y: tableTop, text: 'Netto egys.ar', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 345, y: tableTop, text: 'AFA%', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 375, y: tableTop, text: 'AFA osszeg', size: 8.5, bold: true, color: INK });
+  els.push({ type: 'text', x: 450, y: tableTop, text: 'Brutto', size: 8.5, bold: true, color: INK });
+  let rowY = tableTop + 24;
+  for (const t of tetelekBontva) {
+    const nevRovidítve = t.nev.length > 28 ? `${t.nev.slice(0, 25)}...` : t.nev;
+    const egysegNetto = Math.round(t.netto / (t.mennyiseg || 1));
+    els.push({ type: 'text', x: 55, y: rowY, text: nevRovidítve, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 230, y: rowY, text: `${t.mennyiseg || 1} ${t.mertekegyseg || 'db'}`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 280, y: rowY, text: `${egysegNetto.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 345, y: rowY, text: `${t.afaSzazalek}%`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 375, y: rowY, text: `${t.afa.toLocaleString('hu-HU')}`, size: 8.5, color: INK });
+    els.push({ type: 'text', x: 450, y: rowY, text: `${t.brutto.toLocaleString('hu-HU')} ${penznem}`, size: 8.5, color: INK });
+    els.push({ type: 'line', x1: 50, y1: rowY + 9, x2: 545, y2: rowY + 9, color: [0.92, 0.92, 0.92], width: 0.5 });
+    rowY += 22;
+  }
+  rowY += 8;
+  els.push({ type: 'line', x1: 50, y1: rowY, x2: 545, y2: rowY, color: INK, width: 1.2 });
+  rowY += 18;
+  els.push({ type: 'text', x: 280, y: rowY, text: `Netto osszesen: ${nettoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
+  rowY += 15;
+  els.push({ type: 'text', x: 280, y: rowY, text: `AFA osszesen: ${afaOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 9, color: DIM });
+  rowY += 20;
+  els.push({ type: 'text', x: 280, y: rowY, text: 'Fizetendo (brutto)', size: 12, bold: true, color: INK });
+  els.push({ type: 'text', x: 450, y: rowY, text: `${bruttoOsszesen.toLocaleString('hu-HU')} ${penznem}`, size: 13, bold: true, color: JADE });
+
+  return buildSimplePdf(els);
+}
+
+// --- Orchestrátor: NAV-kapcsolat lekérdezése + XML + beküldés + PDF + email -
+async function submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem = 'HUF' }) {
+  const creds = getCompanyNavCreds(cegKulcs);
+  if (!creds || !navCredsComplete(creds)) {
+    throw new Error(`A(z) "${cegKulcs}" cégnek nincs beállítva saját NAV-kapcsolata (Profil > NAV Online Számla).`);
+  }
+  const settings = licenseDb.prepare('SELECT * FROM company_settings WHERE ceg_kulcs = ?').get(cegKulcs);
+  const sellerAddress = settings ? {
+    iranyitoszam: settings.szamlazasi_iranyitoszam, telepules: settings.szamlazasi_telepules,
+    kozteruletNev: settings.szamlazasi_kozterulet_nev, kozteruletJelleg: settings.szamlazasi_kozterulet_jelleg,
+    hazszam: settings.szamlazasi_hazszam,
+    szoveg: `${settings.szamlazasi_iranyitoszam || ''} ${settings.szamlazasi_telepules || ''}, ${settings.szamlazasi_kozterulet_nev || ''} ${settings.szamlazasi_kozterulet_jelleg || ''} ${settings.szamlazasi_hazszam || ''}`.trim(),
+  } : null;
+  if (!sellerAddress || !navAddressComplete(sellerAddress)) {
+    throw new Error(`A(z) "${cegKulcs}" cég számlázási címe hiányos vagy nincs beállítva (Profil > Cégadatok).`);
+  }
+
+  const datum = todayIsoServer();
+  const szamlaSorszam = nextNagykerInvoiceNumber(cegKulcs);
+  const sellerTaxNumber = creds.taxNumber;
+
+  const invoiceDataXml = buildNagykerInvoiceDataXml({
+    invoiceNumber: szamlaSorszam, invoiceIssueDate: datum,
+    sellerName, sellerTaxNumber, sellerAddress,
+    buyerName, buyerTaxNumber, buyerAddress,
+    tetelek, penznem,
+  });
+
+  const { transactionId } = await navSubmitInvoice(invoiceDataXml, creds);
+
+  const pdf = buildNagykerInvoicePdf({
+    sellerName, sellerAddress, sellerTaxNumber,
+    buyerName, buyerAddress, buyerTaxNumber,
+    tetelek, penznem, datum, szamlaSorszam,
+  });
+  const fajlnev = `${szamlaSorszam.replace(/\//g, '-')}.pdf`;
+  fs.writeFileSync(path.join(INVOICES_DIR, fajlnev), pdf);
+
+  if (buyerEmail) {
+    try {
+      await sendBrevoEmail({
+        toEmail: buyerEmail, toName: buyerName,
+        subject: `Számla — ${szamlaSorszam}`,
+        html: `<p>Tisztelt ${escapeXml(buyerName)}!</p><p>Csatoltan küldjük a(z) <b>${escapeXml(szamlaSorszam)}</b> számú számlát.</p><p>Üdvözlettel,<br>${escapeXml(sellerName)}</p>`,
+        attachments: [{ name: `${fajlnev}`, content: pdf }],
+      });
+    } catch (emailErr) {
+      // A számla EKKORRA már beküldésre került a NAV-nak — az email-küldés
+      // hibája nem vonhatja vissza ezt. A hívó (Nagyker modul) felelőssége
+      // eldönteni, mit tesz, ha emailHiba nem null (pl. figyelmezteti a nagykert).
+      return { szamlaSorszam, transactionId, fajlnev, emailHiba: emailErr.message };
+    }
+  }
+
+  logActivity({ type: 'nagyker_invoice_created', ok: true, companyKey: cegKulcs, nev: null, detail: `Nagyker számla beküldve: ${szamlaSorszam} (NAV tranzakció: ${transactionId})` });
+
+  return { szamlaSorszam, transactionId, fajlnev, emailHiba: null };
+}
+
+// POST /internal/nagyker/create-invoice — a Nagyker modul hívja meg,
+// szerver-szerver kérésként (nem böngészőből), rendelés-jóváhagyáskor.
+// Védelem: közös titok fejlécben (NEM böngésző-elérhető route).
+route('POST', '/internal/nagyker/create-invoice', async (req, res) => {
+  if (!NAGYKER_BRIDGE_SECRET || req.headers['x-internal-secret'] !== NAGYKER_BRIDGE_SECRET) {
+    return sendJson(res, 401, { error: 'UNAUTHORIZED' });
+  }
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    return sendJson(res, 400, { error: 'INVALID_JSON' });
+  }
+  const { cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem } = body || {};
+  if (!cegKulcs || !sellerName || !buyerName || !buyerTaxNumber || !Array.isArray(tetelek) || tetelek.length === 0) {
+    return sendJson(res, 400, { error: 'MISSING_FIELDS' });
+  }
+  try {
+    const eredmeny = await submitNagykerInvoice({ cegKulcs, sellerName, buyerName, buyerTaxNumber, buyerAddress, buyerEmail, tetelek, penznem });
+    return sendJson(res, 200, eredmeny);
+  } catch (err) {
+    console.error('[nagyker-szamlazas] hiba:', err.message);
+    return sendJson(res, 500, { error: err.message });
+  }
+});
+
 async function navApiCall(operation, bodyXml, baseUrl) {
   const resp = await fetch(`${baseUrl || NAV_BASE_URL}/${operation}`, {
     method: 'POST',
@@ -6813,20 +7127,23 @@ function extractInvoiceLines(invoiceXml) {
 // szokatlan, de a v3.0 séma pontosan ezt várja (a korábbi v2.0
 // dokumentáció "operation"/"invoice" neveket használt, de ezek a v3.0-ban
 // már NEM érvényesek).
-async function navSubmitInvoice(invoiceDataXml) {
-  const { token } = await navTokenExchange();
+async function navSubmitInvoice(invoiceDataXml, creds = navCredsFromEnv()) {
+  const { token } = await navTokenExchange(creds);
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
   const base64Content = Buffer.from(invoiceDataXml, 'utf8').toString('base64');
-  const { signature: requestSignature, debug: sigDebug } = navRequestSignatureManageInvoice(requestId, timestampMasked, process.env.NAV_SIGNING_KEY, [
+  // JAVÍTVA (2026-07-24): korábban process.env.NAV_SIGNING_KEY-t használt
+  // fixen — most a creds paraméterből jön, hogy cégenkénti (nem csak a
+  // platform saját) NAV-kapcsolattal is működjön (lásd Nagyker-számlázás).
+  const { signature: requestSignature, debug: sigDebug } = navRequestSignatureManageInvoice(requestId, timestampMasked, creds.signingKey, [
     { operation: 'CREATE', base64Content },
   ]);
 
   const bodyXml = `<ManageInvoiceRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
-${navUserXml(requestSignature)}
+${navUserXml(requestSignature, creds)}
 ${navSoftwareXml()}
 <exchangeToken>${escapeXml(token)}</exchangeToken>
 <invoiceOperations>
@@ -6839,7 +7156,7 @@ ${navSoftwareXml()}
 </invoiceOperations>
 </ManageInvoiceRequest>`;
 
-  const { status, text } = await navApiCall('manageInvoice', bodyXml);
+  const { status, text } = await navApiCall('manageInvoice', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
     const err = new Error(`NAV manageInvoice hiba: ${errorMsg} | requestId: ${requestId} | timestampMasked: ${timestampMasked} | partialAuthRaw: ${sigDebug.partialAuthRaw} | indexHash: ${sigDebug.indexHashes[0]} | requestSignature: ${requestSignature} | Nyers válasz: ${text.slice(0, 1200)}`);
@@ -6858,12 +7175,13 @@ ${navSoftwareXml()}
 // A feldolgozás állapotának lekérdezése — a NAV aszinkron dolgozza fel a
 // beküldött számlákat, ezért a tranzakció-azonosítóval később kell
 // rákérdezni az eredményre (elfogadva / figyelmeztetéssel / elutasítva).
-async function navQueryTransactionStatus(transactionId) {
+async function navQueryTransactionStatus(transactionId, creds = navCredsFromEnv()) {
   const requestId = navRequestId();
   const now = new Date();
   const timestampMasked = navTimestampMasked(now);
   const timestampIso = navTimestampIso(now);
-  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, process.env.NAV_SIGNING_KEY);
+  // JAVÍTVA (2026-07-24): creds.signingKey a fix env-változó helyett.
+  const requestSignature = navRequestSignatureSimple(requestId, timestampMasked, creds.signingKey);
 
   // FONTOS: a QueryTransactionStatusRequestType XSD-je szerint (NAV saját
   // sémavalidátorának hibaüzenetével is megerősítve) ennek a kérésnek NINCS
@@ -6872,13 +7190,13 @@ async function navQueryTransactionStatus(transactionId) {
   // tokenExchange hívásra.
   const bodyXml = `<QueryTransactionStatusRequest xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common" xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
 ${navHeaderXml(requestId, timestampIso)}
-${navUserXml(requestSignature)}
+${navUserXml(requestSignature, creds)}
 ${navSoftwareXml()}
 <transactionId>${escapeXml(transactionId)}</transactionId>
 <returnOriginalRequest>false</returnOriginalRequest>
 </QueryTransactionStatusRequest>`;
 
-  const { status, text } = await navApiCall('queryTransactionStatus', bodyXml);
+  const { status, text } = await navApiCall('queryTransactionStatus', bodyXml, navBaseUrlFor(creds.sandbox));
   if (status !== 200) {
     const errorMsg = navXmlField(text, 'message') || navXmlField(text, 'errorCode') || `HTTP ${status}`;
     throw new Error(`NAV queryTransactionStatus hiba: ${errorMsg} | Nyers válasz: ${text.slice(0, 1500)}`);
